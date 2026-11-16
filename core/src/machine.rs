@@ -404,7 +404,6 @@ mod tests {
         };
         assert_eq!(run(), run());
     }
-}
 
     /// A deterministic xorshift, so a failure repeats (no dependency: the core has none to spare).
     struct Rng(u64);
@@ -488,3 +487,4 @@ mod tests {
             assert!(r.is_ok(), "entry {entry:#x}");
         }
     }
+}
