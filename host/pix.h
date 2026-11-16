@@ -289,7 +289,7 @@ static inline void px_carousel(uint32_t *c, int mode, int cur) {
 
 /* What the buttons do, per panel: the area below the FM-1's screen in Standard. */
 static const char *const PX_HINTS[PANEL_COUNT][9] = {
-    {"FM-1 CONTROLS", "A PLAY  X HOME  Y EDIT", "DPAD L R  SELECT", "DPAD U D  OCT- OCT+", "L2 R2  PRESETS", "KEYS: Z S X D C V G B ...", "F2-F12 BUTTONS  [ ] OCT", "ARROWS  SELECT ALGO", "- =  POT"},
+    {"PAD ON MACHINE", "D-PAD A B X Y  NOTES", "SELECT START  OCT- OCT+", "STICKS  KNOBS 1-4", "L1  OP1-6 PIT GLO MONO POLY", "L1 STICKS MASTER PRESETS...", "L2  FX HOME SAVE ENV ARP SEQ", "R2  GLO EDIT PLAY REC", "L1+R1  MENU   FN  PANELS"},
     {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  BOOT THE FILE", "X  RESCAN THE FOLDER", "LAST ROW  QUIT", "", "", ""},
     {"BOTH CORES", "UP DOWN  CORE 0 1", "LEFT RIGHT  CORE 0 1", "", "", "", "", "", ""},
     {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},

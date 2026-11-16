@@ -10,7 +10,8 @@
  *   fm1ntt --version
  *
  * The FM-1's 240x240 screen sits flush top left, pixel for pixel. Fn (raw button 16, Tab or F1) toggles Standard (1x, panels right and
- * below) and Zoomed (2x, one narrow panel at the right). L1 and R1 (Home and End) turn the panel carousel, as TinyNTT's:
+ * below) and Zoomed (2x, one narrow panel at the right; Tab or F1 on a keyboard). On the pad Fn turns the panel carousel and L1+R1 together
+ * open and close the menu (TOOLS); Home and End turn the carousel on a keyboard; on MACHINE the pad plays, see the pad section below. The carousel is as TinyNTT's:
  * MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND TOOLS. The audio device paces the emulation: SDL's callback asks the core for frames.
  * Files are only written under the app's folder ($FM1NTT_DIR, else /roms/FM1-NTT on the R36S, else ~/FM1-NTT), to a temporary name
  * and then renamed. Nothing here has run on an R36S. */
@@ -29,6 +30,7 @@
 
 #include "fm1ntt.h"
 #include "pix.h"
+#include "toast.h"
 
 #ifndef FM1NTT_BUILD
 #define FM1NTT_BUILD "unknown"
@@ -37,6 +39,14 @@
 #define AUDIO_FRAMES 512
 #define MAX_INSNS_PER_BUFFER 8000000u
 #define PAD_FN 16
+#define PAD_L1 4
+#define PAD_R1 5
+#define PAD_L2 6
+#define PAD_R2 7
+#define PAD_SELECT 12
+#define PAD_START 13
+#define STICK_DEAD 0.35f
+#define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
 #define NTOOLS 11
@@ -50,6 +60,14 @@ typedef struct {
     char msg[160];
     int msg_style;
     int enc_turns[7];
+    /* the pad: held buttons, the matrix id each press sent (+1; 0 none) so its release matches, the sticks, the note scale and key */
+    unsigned pad_mask;
+    int pad_sent[32];
+    float axis[4], axis_acc[4];
+    uint32_t axis_t;
+    int scale, key_shift, menu_back;
+    Toast toast;                        /* the hot-plug toast over row 0 */
+    volatile int master_att;            /* percent the master level is cut by (0: unity) */
     int pot;
     /* files */
     char files[PX_MAX_FILES][PX_NAME];
@@ -354,6 +372,7 @@ static void rec_stop(App *a) {
 static void audio_step(App *a, int16_t *out, size_t frames) {
     if (a->paused || !fm1ntt_loaded(a->m)) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
     fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
+    if (a->master_att > 0) { int g = 100 - a->master_att; for (size_t i = 0; i < frames * 2; i++) out[i] = (int16_t)(out[i] * g / 100); }
     int pl = 0, pr = 0;
     for (size_t i = 0; i < frames; i++) {
         int l = abs(out[2 * i]), r = abs(out[2 * i + 1]);
@@ -700,7 +719,8 @@ static int button_of_key(SDL_Keycode k) {
     default: return -1;
     }
 }
-/* The R36S pad's raw buttons: B 0, A 1, X 2, Y 3, L1 4, R1 5, L2 6, R2 7, up 8, down 9, left 10, right 11, Select 12, Start 13, Fn 16. */
+/* The R36S pad's raw buttons: B 0, A 1, X 2, Y 3, L1 4, R1 5, L2 6, R2 7, up 8, down 9, left 10, right 11, Select 12, Start 13, Fn 16;
+ * axes 0 1 the left stick (x, y), 2 3 the right (y is down in SDL). Every other panel: the d-pad and A B X Y L2 R2 as actions. */
 static int act_of_pad(int b) {
     switch (b) {
     case 8: return A_UP; case 9: return A_DOWN; case 10: return A_LEFT; case 11: return A_RIGHT;
@@ -708,9 +728,103 @@ static int act_of_pad(int b) {
     default: return A_NONE;
     }
 }
-/* On the MACHINE panel the pad is the FM-1: A PLAY, X HOME, Y EDIT, up OCT+, down OCT-; left right SELECT, L2 R2 PRESETS. */
-static int button_of_pad_machine(int b) {
-    switch (b) { case 1: return 12; case 2: return 8; case 3: return 6; case 8: return 1; case 9: return 0; default: return -1; }
+
+/* On MACHINE the pad plays. Without a modifier: the d-pad and face buttons are eight notes of the chosen scale (up C, left D, down E,
+ * right F, Y G, B A, A B, X the next C), Select OCT-, Start OCT+, the sticks the four knobs. L1 held: the sticks are master, presets,
+ * select and algorithm; the d-pad, faces, Select and Start the ten black-key functions (OP1-OP6, PIT, GLO, MONO, POLY); Fn changes the
+ * scale. L2 held: SEL FX HOME SAVE ENV LFO ARP SEQ; Select and Start transpose (my addition: L1's Select and Start are MONO and POLY). R2 held: GLO EDIT PLAY REC. */
+enum { MOD_NONE, MOD_L1, MOD_L2, MOD_R2 };
+static const struct { const char *name; int n; int semi[8]; } SCALES[] = {
+    {"MAJOR", 7, {0, 2, 4, 5, 7, 9, 11}}, {"MINOR", 7, {0, 2, 3, 5, 7, 8, 10}}, {"DORIAN", 7, {0, 2, 3, 5, 7, 9, 10}},
+    {"MIXOLYDIAN", 7, {0, 2, 4, 5, 7, 9, 10}}, {"MAJOR PENTATONIC", 5, {0, 2, 4, 7, 9}}, {"MINOR PENTATONIC", 5, {0, 3, 5, 7, 10}},
+    {"CHROMATIC", 8, {0, 1, 2, 3, 4, 5, 6, 7}},
+};
+#define NSCALES ((int)(sizeof SCALES / sizeof SCALES[0]))
+#define KEY_MIN (-6)
+#define KEY_MAX 5
+static const char *const KEY_NAMES[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+static const char *key_name(int shift) { return KEY_NAMES[((shift % 12) + 12) % 12]; }
+/* The pad's button as a position 0..7 in the scale (up left down right Y B A X), or -1. */
+static int degree_of_pad(int b) {
+    switch (b) { case 8: return 0; case 10: return 1; case 9: return 2; case 11: return 3; case 3: return 4; case 0: return 5; case 1: return 6; case 2: return 7; default: return -1; }
+}
+/* The matrix id of a scale position: C4 is note key 7 (F3 is key 0) plus the key's shift; -1 when it falls off the 27 keys. */
+static int note_id_of_degree(int scale, int shift, int deg) {
+    int n = SCALES[scale].n, semi = SCALES[scale].semi[deg % n] + 12 * (deg / n), k = 7 + shift + semi;
+    return k >= 0 && k < 27 ? FM1_KEY_BASE + k : -1;
+}
+static int pad_mod(unsigned mask) {
+    return mask >> PAD_L1 & 1 ? MOD_L1 : mask >> PAD_L2 & 1 ? MOD_L2 : mask >> PAD_R2 & 1 ? MOD_R2 : MOD_NONE;
+}
+/* Under a modifier, the FM-1 button a pad button presses (matrix id 0..13), -1 none, -2 a name the FM-1 has no button for. */
+static int button_of_pad_mod(int mod, int b) {
+    if (mod == MOD_L2) switch (b) { case 8: return -2; case 10: return 2; case 9: return 8; case 11: return 9; case 3: return 4; case 0: return 5; case 1: return 10; case 2: return 11; default: return -1; }
+    if (mod == MOD_R2) switch (b) { case 8: return 7; case 10: return 6; case 9: return 12; case 11: return 13; default: return -1; }
+    return -1;
+}
+/* The manual puts ten functions on the piano's black keys: OP1 to OP6, PIT, GLO, MONO, POLY. They are note keys (F#3, G#3, A#3, C#4, D#4,
+ * F#4, G#4, A#4, C#5, D#5: note key indexes 1 3 5 8 10 13 15 17 20 22), in that order; the ORDER is assumed from the manual's list, not
+ * measured. The pad under L1 presses them in the d-pad and face order: up left down right Y B A X, then Select and Start. */
+static const int FUNCTION_KEYS[10] = {1, 3, 5, 8, 10, 13, 15, 17, 20, 22};
+static const char *const FUNCTION_NAMES[10] = {"OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "PIT", "GLO", "MONO", "POLY"};
+static int function_of_pad(int b) { return b == PAD_SELECT ? 8 : b == PAD_START ? 9 : degree_of_pad(b); }
+/* A stick's deflection (-1..1, positive = up for y, right for x) as whole clicks over dt ms; the remainder stays in acc. */
+static int stick_clicks(float *acc, float v, uint32_t dt_ms) {
+    float m = v < 0 ? -v : v;
+    if (m <= STICK_DEAD) { *acc = 0; return 0; }
+    *acc += (v < 0 ? -1.0f : 1.0f) * (m - STICK_DEAD) / (1.0f - STICK_DEAD) * STICK_MAX_CPS * (float)dt_ms / 1000.0f;
+    int n = (int)*acc;
+    *acc -= (float)n;
+    return n;
+}
+static int sticks_active(const App *a) {
+    for (int i = 0; i < 4; i++) if (a->axis[i] > STICK_DEAD || a->axis[i] < -STICK_DEAD) return 1;
+    return 0;
+}
+static void sticks_tick(App *a, uint32_t now) {
+    uint32_t dt = a->axis_t ? now - a->axis_t : 0;
+    a->axis_t = now;
+    if (dt > 200) dt = 200;
+    if (a->panel != PANEL_MACHINE || a->confirm) { for (int i = 0; i < 4; i++) a->axis_acc[i] = 0; return; }
+    int l1 = pad_mod(a->pad_mask) == MOD_L1;
+    /* knob 1..4 are encoders 2..5; with L1: presets 6, select 0, algorithm 1, and the left stick's x is the master level */
+    static const int plain[4] = {2, 3, 4, 5}, held[4] = {-1, 6, 0, 1};
+    for (int i = 0; i < 4; i++) {
+        float v = i & 1 ? -a->axis[i] : a->axis[i];       /* the y axes: up is positive */
+        int n = stick_clicks(&a->axis_acc[i], v, dt), e = l1 ? held[i] : plain[i];
+        if (!n) continue;
+        if (e >= 0) enc(a, e, n);
+        else {
+            int att = a->master_att - n * 2;                /* clicks of 2% */
+            a->master_att = att < 0 ? 0 : att > 100 ? 100 : att;
+            snprintf(a->msg, sizeof a->msg, "Master %d%%", 100 - a->master_att);
+            a->msg_style = 0;
+        }
+    }
+}
+/* One pad button pressed on MACHINE. */
+static void pad_machine_press(App *a, int b) {
+    int mod = pad_mod(a->pad_mask), id = -1;
+    if (mod == MOD_L2 && (b == PAD_SELECT || b == PAD_START)) {
+        a->key_shift += b == PAD_START ? 1 : -1;
+        if (a->key_shift > KEY_MAX) a->key_shift = KEY_MIN;
+        if (a->key_shift < KEY_MIN) a->key_shift = KEY_MAX;
+        say(a, 0, "Key %s", key_name(a->key_shift));
+        return;
+    }
+    if (mod == MOD_NONE) {
+        int d = degree_of_pad(b);
+        if (d >= 0) { id = note_id_of_degree(a->scale, a->key_shift, d); if (id < 0) say(a, 0, "That note is off the FM-1's keys", NULL); }
+        else if (b == PAD_SELECT) id = 0;
+        else if (b == PAD_START) id = 1;
+    } else if (mod == MOD_L1) {
+        int f = function_of_pad(b);
+        if (f >= 0) { id = FM1_KEY_BASE + FUNCTION_KEYS[f]; snprintf(a->msg, sizeof a->msg, "%s", FUNCTION_NAMES[f]); a->msg_style = 0; }
+    } else {
+        id = button_of_pad_mod(mod, b);
+        if (id == -2) { say(a, 0, "SEL: the FM-1 has no matrix button for it", NULL); id = -1; }
+    }
+    if (id >= 0 && b < 32) { key_id(a, id, 1); a->pad_sent[b] = id + 1; }
 }
 static int act_of_key(SDL_Keycode k) {
     switch (k) {
@@ -721,13 +835,13 @@ static int act_of_key(SDL_Keycode k) {
     }
 }
 
+/* Zoom is a keyboard key (Tab or F1); the pad's Fn is the carousel. */
 static int is_toggle(const SDL_Event *e) {
-    return (e->type == SDL_KEYDOWN && !e->key.repeat && (e->key.keysym.sym == SDLK_TAB || e->key.keysym.sym == SDLK_F1)) ||
-           (e->type == SDL_JOYBUTTONDOWN && e->jbutton.button == PAD_FN);
+    return e->type == SDL_KEYDOWN && !e->key.repeat && (e->key.keysym.sym == SDLK_TAB || e->key.keysym.sym == SDLK_F1);
 }
-/* L1 and R1 (Home and End on a keyboard) turn the carousel: -1 before, +1 after, 0 neither. */
+/* Fn on the pad and Home / End on a keyboard turn the carousel: -1 before, +1 after, 0 neither. */
 static int is_carousel(const SDL_Event *e) {
-    if (e->type == SDL_JOYBUTTONDOWN) return e->jbutton.button == 4 ? -1 : e->jbutton.button == 5 ? 1 : 0;
+    if (e->type == SDL_JOYBUTTONDOWN) return e->jbutton.button == PAD_FN ? 1 : 0;
     if (e->type == SDL_KEYDOWN && !e->key.repeat) return e->key.keysym.sym == SDLK_HOME ? -1 : e->key.keysym.sym == SDLK_END ? 1 : 0;
     return 0;
 }
@@ -756,32 +870,43 @@ static void handle(App *a, const SDL_Event *e) {
             case SDLK_EQUALS: pot(a, 64); break;
             default: break;
         } else act(a, act_of_key(k));
+    } else if (e->type == SDL_JOYAXISMOTION) {
+        if (e->jaxis.axis < 4) a->axis[e->jaxis.axis] = e->jaxis.value / 32768.0f;
     } else if (e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYBUTTONUP) {
         int down = e->type == SDL_JOYBUTTONDOWN, b = e->jbutton.button;
-        if (b == 13) { if (down) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); } return; }
+        if (b < 32 && !down && a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; return; }   /* the release matches the press */
+        if (b == PAD_START && !machine_panel) { if (down) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); } return; }
         if (a->panel == PANEL_MIDI && !a->confirm && b == 1) { midi_ok(a, down); return; }
-        if (machine_panel) {
-            int id = button_of_pad_machine(b);
-            if (id >= 0) key_id(a, id, down);
-            else if (down) switch (b) {
-                case 10: enc(a, 0, -1); break;
-                case 11: enc(a, 0, 1); break;
-                case 6: enc(a, 6, -1); break;
-                case 7: enc(a, 6, 1); break;
-                default: break;
-            }
-        } else if (down) act(a, act_of_pad(b));
+        if (machine_panel) { if (down) pad_machine_press(a, b); }
+        else if (down) act(a, act_of_pad(b));
     }
 }
 
 /* One event as the whole app takes it: quit, Fn, the carousel, then the panel's own controls. Rec demo's tour calls this too, so it
  * records the real input path. */
+static void release_pad(App *a) {
+    for (int b = 0; b < 32; b++) if (a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; }
+}
+/* L1 and R1 together open the menu (TOOLS) and close it again, back to the panel it was opened from. */
+static void menu_toggle(App *a) {
+    release_pad(a);
+    if (a->panel != PANEL_TOOLS) { a->menu_back = a->panel; a->panel = PANEL_TOOLS; }
+    else a->panel = a->menu_back;
+    if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
+}
 static void dispatch(App *a, const SDL_Event *e) {
+    if ((e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && toast_key(&a->toast, SDL_GetTicks())) return;   /* a failure's key is used up */
     int turn = is_carousel(e);
+    if (e->type == SDL_JOYBUTTONDOWN && e->jbutton.button < 32) a->pad_mask |= 1u << e->jbutton.button;
+    if (e->type == SDL_JOYBUTTONUP && e->jbutton.button < 32) a->pad_mask &= ~(1u << e->jbutton.button);
+    int chord = e->type == SDL_JOYBUTTONDOWN && (e->jbutton.button == PAD_L1 || e->jbutton.button == PAD_R1) && (a->pad_mask >> PAD_L1 & 1) && (a->pad_mask >> PAD_R1 & 1);
+    int fn_scale = e->type == SDL_JOYBUTTONDOWN && e->jbutton.button == PAD_FN && a->panel == PANEL_MACHINE && !a->confirm && (a->pad_mask >> PAD_L1 & 1);
     if (e->type == SDL_QUIT) { rec_stop(a); a->quit = 1; }
     else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->confirm) a->confirm = CF_NONE; else request_quit(a); }
     else if (is_toggle(e)) a->mode ^= 1;
-    else if (turn && !a->confirm) { a->panel = panel_step(a->panel, turn); if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0); }
+    else if (chord) { if (!a->confirm) menu_toggle(a); }
+    else if (fn_scale) { a->scale = (a->scale + 1) % NSCALES; say(a, 0, "Scale %s", SCALES[a->scale].name); }
+    else if (turn && !a->confirm) { release_pad(a); a->panel = panel_step(a->panel, turn); if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0); }
     else if (turn) { /* a question is open: A or B first */ }
     else handle(a, e);
 }
@@ -873,16 +998,131 @@ static int selftest(void) {
     const uint32_t fg[] = {C_TEXT, C_DIM, C_HEAD, C_OK, C_WARN, C_ERR};
     for (unsigned i = 0; i < sizeof fg / sizeof *fg; i++) { CHECK(px_contrast(fg[i], C_PANEL) >= 4.5); CHECK(px_contrast(fg[i], C_BG) >= 4.5); }
     CHECK(px_contrast(C_TEXT, C_SEL) >= 4.5 && px_contrast(C_BG, C_KEYDN) >= 4.5);
-    /* the carousel: L1 and R1 go round, both ways */
+    /* the hot-plug toast: colours pass 4.5:1; history is not replayed; a change flashes 3 s; a failure stays and its key is used up */
+    CHECK(px_contrast(0xFF000000u, TOAST_INFO_BG) >= 4.5 && px_contrast(0xFFFFFFFFu, TOAST_ERR_BG) >= 4.5);
+    {
+        char tp[320];
+        snprintf(tp, sizeof tp, "%s/fm1ntt-toast-%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+        FILE *tf = fopen(tp, "wb");
+        CHECK(tf != NULL);
+        if (tf) {
+            fputs("100\tinfo\tOld news\n", tf);
+            fclose(tf);
+            Toast t;
+            toast_init(&t, tp, 1000);
+            CHECK(!toast_poll(&t, 1000) && !t.has && !toast_active(&t));              /* what was there at start is history */
+            tf = fopen(tp, "ab");
+            fputs("200\tinfo\tHeadphones connected\n300\tinfo\tUSB audio connected: Dac\ngarbage\n400\tbad\tx\n", tf);
+            fclose(tf);
+            CHECK(toast_poll(&t, 2000) && t.has && !strcmp(t.cur.text, "Headphones connected") && t.n == 1);
+            CHECK(!toast_key(&t, 2100) && t.has);                                      /* a change never consumes a key */
+            toast_poll(&t, 4999); CHECK(!strcmp(t.cur.text, "Headphones connected"));
+            toast_poll(&t, 5000); CHECK(t.has && !strcmp(t.cur.text, "USB audio connected: Dac") && t.until == 8000);
+            toast_poll(&t, 8000); CHECK(!t.has && !toast_active(&t));
+            tf = fopen(tp, "ab");
+            fputs("500\tinfo\tOne\n600\terror\tA USB device did not start\n", tf);
+            fclose(tf);
+            toast_poll(&t, 9000);
+            CHECK(t.has && t.cur.error && t.n == 0);                                   /* the failure replaced the change on show */
+            toast_poll(&t, 60000); CHECK(t.has && t.cur.error);                       /* and stays */
+            CHECK(toast_key(&t, 60001) && !t.has);                                     /* the key is used up */
+            App ta;
+            memset(&ta, 0, sizeof ta);
+            ta.toast = t;
+            toast_add(&ta.toast, "Failure", 1, 70000);
+            SDL_Event any = {.type = SDL_JOYBUTTONDOWN};
+            any.jbutton.button = 8;
+            dispatch(&ta, &any);                                                       /* the press clears it and does nothing else */
+            CHECK(!ta.toast.has && ta.pad_sent[8] == 0 && ta.panel == PANEL_MACHINE);
+            for (int i = 0; i < 12; i++) { char x[16]; snprintf(x, sizeof x, "c%d", i); toast_add(&t, x, 0, 80000); }
+            toast_add(&t, "Late failure", 1, 80000);
+            CHECK(t.has && t.cur.error && t.n <= TOAST_Q && t.n >= TOAST_Q - 1);      /* 8 changes at most; the failure shows first */
+            uint32_t *cv = calloc((size_t)PX_W * PX_H, 4);
+            if (cv) { toast_draw(&t, cv); CHECK(cv[5 * PX_W + 3] == TOAST_ERR_BG && cv[20 * PX_W + 3] == 0); free(cv); }
+            remove(tp);
+        }
+    }
+    /* the carousel: Fn goes round on the pad, Home and End both ways on a keyboard; L1 and R1 together are the menu */
     CHECK(panel_step(PANEL_MACHINE, -1) == PANEL_TOOLS && panel_step(PANEL_TOOLS, 1) == PANEL_MACHINE && panel_step(PANEL_CPU, 1) == PANEL_MEMORY);
     SDL_Event l1 = {.type = SDL_JOYBUTTONDOWN}, r1 = {.type = SDL_JOYBUTTONDOWN}, fn = {.type = SDL_JOYBUTTONDOWN}, tab = {.type = SDL_KEYDOWN}, home = {.type = SDL_KEYDOWN}, end = {.type = SDL_KEYDOWN};
-    l1.jbutton.button = 4; r1.jbutton.button = 5; fn.jbutton.button = PAD_FN; tab.key.keysym.sym = SDLK_TAB; home.key.keysym.sym = SDLK_HOME; end.key.keysym.sym = SDLK_END;
-    CHECK(is_carousel(&l1) == -1 && is_carousel(&r1) == 1 && is_carousel(&home) == -1 && is_carousel(&end) == 1 && is_carousel(&fn) == 0);
-    CHECK(is_toggle(&fn) && is_toggle(&tab) && !is_toggle(&l1));
+    l1.jbutton.button = PAD_L1; r1.jbutton.button = PAD_R1; fn.jbutton.button = PAD_FN; tab.key.keysym.sym = SDLK_TAB; home.key.keysym.sym = SDLK_HOME; end.key.keysym.sym = SDLK_END;
+    CHECK(is_carousel(&fn) == 1 && is_carousel(&home) == -1 && is_carousel(&end) == 1 && is_carousel(&l1) == 0 && is_carousel(&r1) == 0);
+    CHECK(is_toggle(&tab) && !is_toggle(&fn) && !is_toggle(&l1));
+    {
+        App p;
+        memset(&p, 0, sizeof p);
+        p.panel = PANEL_CPU;
+        dispatch(&p, &fn); CHECK(p.panel == PANEL_MEMORY);
+        dispatch(&p, &l1); CHECK(p.panel == PANEL_MEMORY);                /* L1 alone does nothing */
+        dispatch(&p, &r1); CHECK(p.panel == PANEL_TOOLS && p.menu_back == PANEL_MEMORY);   /* both: the menu */
+        dispatch(&p, &r1); CHECK(p.panel == PANEL_MEMORY);                /* both again: back */
+        l1.type = r1.type = fn.type = SDL_JOYBUTTONUP; dispatch(&p, &l1); dispatch(&p, &r1); dispatch(&p, &fn); CHECK(p.pad_mask == 0);
+        fn.type = SDL_JOYBUTTONDOWN;
+        l1.type = r1.type = SDL_JOYBUTTONDOWN;
+    }
     /* the controls map to the matrix */
     CHECK(note_of_key('z') == 0 && note_of_key('/') == 16 && note_of_key('q') == 12 && note_of_key('o') == 26 && note_of_key('1') == -1);
     CHECK(button_of_key(SDLK_SPACE) == 12 && button_of_key(SDLK_F12) == 13 && button_of_key(SDLK_a) == -1);
-    CHECK(button_of_pad_machine(1) == 12 && button_of_pad_machine(0) == -1 && act_of_pad(0) == A_BACK && act_of_pad(4) == A_NONE);
+    CHECK(act_of_pad(0) == A_BACK && act_of_pad(4) == A_NONE);
+    /* the pad on MACHINE: notes of the scale (C major: up C, left D, down E, right F, Y G, B A, A B, X C), modifiers, sticks */
+    {
+        const int pad_btn[8] = {8, 10, 9, 11, 3, 0, 1, 2}, major[8] = {0, 2, 4, 5, 7, 9, 11, 12};
+        for (int d = 0; d < 8; d++) CHECK(degree_of_pad(pad_btn[d]) == d && note_id_of_degree(0, 0, d) == FM1_KEY_BASE + 7 + major[d]);
+        CHECK(note_id_of_degree(1, 0, 2) == FM1_KEY_BASE + 7 + 3 && note_id_of_degree(0, 2, 0) == FM1_KEY_BASE + 9 && note_id_of_degree(0, KEY_MIN, 0) == FM1_KEY_BASE + 1);
+        CHECK(note_id_of_degree(4, 0, 5) == FM1_KEY_BASE + 7 + 12 && note_id_of_degree(6, 5, 7) == FM1_KEY_BASE + 19);
+        CHECK(note_id_of_degree(4, 5, 7) == -1 || note_id_of_degree(4, 5, 7) <= FM1_KEY_BASE + 26);
+        for (int sc = 0; sc < NSCALES; sc++) for (int d = 0; d < 8; d++) for (int k = KEY_MIN; k <= KEY_MAX; k++) { int id = note_id_of_degree(sc, k, d); CHECK(id == -1 || (id >= FM1_KEY_BASE && id < 41)); }
+        CHECK(!strcmp(key_name(0), "C") && !strcmp(key_name(-1), "B") && !strcmp(key_name(5), "F"));
+        CHECK(pad_mod(0) == MOD_NONE && pad_mod(1u << PAD_L1) == MOD_L1 && pad_mod(1u << PAD_L2) == MOD_L2 && pad_mod(1u << PAD_R2) == MOD_R2 && pad_mod(1u << PAD_R1) == MOD_NONE);
+        /* L2: SEL FX HOME SAVE ENV LFO ARP SEQ; R2: GLO EDIT PLAY REC; L1: GLO on X, OP1-OP6 and PIT have no button */
+        CHECK(button_of_pad_mod(MOD_L2, 10) == 2 && button_of_pad_mod(MOD_L2, 9) == 8 && button_of_pad_mod(MOD_L2, 11) == 9 && button_of_pad_mod(MOD_L2, 3) == 4 &&
+              button_of_pad_mod(MOD_L2, 0) == 5 && button_of_pad_mod(MOD_L2, 1) == 10 && button_of_pad_mod(MOD_L2, 2) == 11 && button_of_pad_mod(MOD_L2, 8) == -2);
+        CHECK(button_of_pad_mod(MOD_R2, 8) == 7 && button_of_pad_mod(MOD_R2, 10) == 6 && button_of_pad_mod(MOD_R2, 9) == 12 && button_of_pad_mod(MOD_R2, 11) == 13 && button_of_pad_mod(MOD_R2, 2) == -1);
+        for (int f = 0; f < 10; f++) CHECK(function_of_pad(f < 8 ? pad_btn[f] : f == 8 ? PAD_SELECT : PAD_START) == f && FUNCTION_KEYS[f] >= 0 && FUNCTION_KEYS[f] < 27);
+        CHECK(function_of_pad(4) == -1 && function_of_pad(PAD_FN) == -1);
+        /* a stick: nothing inside the dead zone, clicks past it, the sign follows the direction, the remainder is kept */
+        float acc = 0;
+        CHECK(stick_clicks(&acc, 0.3f, 1000) == 0 && stick_clicks(&acc, 1.0f, 1000) == 12 && stick_clicks(&acc, -1.0f, 1000) == -12);
+        acc = 0;
+        int sum = 0;
+        for (int i = 0; i < 100; i++) sum += stick_clicks(&acc, 1.0f, 10);
+        CHECK(sum == 12);
+        /* the whole path: notes press and release by the id they sent, modifiers, the key, the scale, the master level */
+        App p;
+        memset(&p, 0, sizeof p);
+        p.panel = PANEL_MACHINE;
+        p.m = fm1ntt_new();
+        SDL_Event ev = {.type = SDL_JOYBUTTONDOWN};
+        ev.jbutton.button = 8; dispatch(&p, &ev);
+        CHECK(p.pad_sent[8] == FM1_KEY_BASE + 7 + 1);   /* the id sent, plus one (no firmware: the core ignores the key itself) */
+        l1.type = SDL_JOYBUTTONDOWN; dispatch(&p, &l1);
+        ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);                                   /* released after L1 went down: still the same key */
+        CHECK(p.pad_sent[8] == 0);
+        ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = PAD_START; dispatch(&p, &ev);    /* L1 + Start: POLY, the black key D#5 */
+        CHECK(p.key_shift == 0 && p.pad_sent[PAD_START] == FM1_KEY_BASE + 22 + 1);
+        ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);
+        CHECK(p.pad_sent[PAD_START] == 0);
+        ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = PAD_FN; dispatch(&p, &ev);       /* L1 + Fn: next scale, the panel stays */
+        CHECK(p.scale == 1 && p.panel == PANEL_MACHINE);
+        ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);
+        l1.type = SDL_JOYBUTTONUP; dispatch(&p, &l1);
+        SDL_Event l2 = {.type = SDL_JOYBUTTONDOWN};
+        l2.jbutton.button = PAD_L2; dispatch(&p, &l2);                                    /* L2 + Start: key up */
+        ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = PAD_START; dispatch(&p, &ev);
+        CHECK(p.key_shift == 1 && p.pad_sent[PAD_START] == 0);
+        ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);
+        l2.type = SDL_JOYBUTTONUP; dispatch(&p, &l2);
+        ev.type = SDL_JOYBUTTONDOWN;
+        ev.jbutton.button = PAD_START; dispatch(&p, &ev);                                 /* Start alone: OCT+ */
+        CHECK(p.pad_sent[PAD_START] == 2);
+        ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);
+        CHECK(p.pad_sent[PAD_START] == 0 && !p.paused);
+        p.pad_mask = 0; p.axis[0] = 1.0f; p.axis_t = 1000; for (int i = 1; i <= 5; i++) sticks_tick(&p, 1000 + 200 * i); CHECK(p.enc_turns[2] == 12);   /* knob 1 */
+        p.axis[0] = 0; p.axis[1] = -1.0f; for (int i = 1; i <= 5; i++) sticks_tick(&p, 2000 + 200 * i); CHECK(p.enc_turns[3] == 12);                      /* knob 2: up is clockwise */
+        p.pad_mask = 1u << PAD_L1; p.axis[1] = 0; p.axis[3] = -1.0f; for (int i = 1; i <= 5; i++) sticks_tick(&p, 3000 + 200 * i); CHECK(p.enc_turns[1] == 12); /* L1: algorithm */
+        p.axis[3] = 0; p.axis[0] = -1.0f; for (int i = 1; i <= 5; i++) sticks_tick(&p, 4000 + 200 * i); CHECK(p.master_att == 24);                        /* L1: master down */
+        fm1ntt_free(p.m);
+    }
 
     /* the app's folder is a temporary one for the rest, so the files written are real and nothing else is touched */
     char tmpl[300];
@@ -1357,6 +1597,7 @@ int main(int argc, char **argv) {
         present(ren, tex, canvas);
         if (load_firmware(&a, path, raw, entry) != 0) a.panel = PANEL_FILES;
     }
+    toast_init(&a.toast, "/run/r3i6nos-hotplug/events", SDL_GetTicks());
     if (a.dev) SDL_PauseAudioDevice(a.dev, 0);
 
     uint32_t last_draw = 0;
@@ -1364,10 +1605,13 @@ int main(int argc, char **argv) {
     for (int run = 1; run && !a.quit;) {
         SDL_Event e;
         /* idle: block, never spin; with a firmware running the panels are redrawn about ten times a second */
-        int wait = fm1ntt_loaded(a.m) || a.job ? 33 : 250;
+        int wait = sticks_active(&a) ? 16 : fm1ntt_loaded(a.m) || a.job ? 33 : toast_active(&a.toast) ? 100 : 250;
         if (SDL_WaitEventTimeout(&e, wait)) {
             do { dispatch(&a, &e); dirty = 1; } while (SDL_PollEvent(&e));
         }
+        if (sticks_active(&a)) dirty = 1;
+        if (toast_poll(&a.toast, SDL_GetTicks())) dirty = 1;
+        sticks_tick(&a, SDL_GetTicks());
         rec_pump(&a);
         speed_tick(&a);
         job_poll(&a);
@@ -1395,6 +1639,7 @@ int main(int argc, char **argv) {
         if (dirty || rev != a.rev || ((fm1ntt_loaded(a.m) || a.job) && now - last_draw > 100)) {   /* meters and the clock move too */
             fill_ui(&a, &u, 1);
             px_draw(canvas, a.mode, &u);
+            toast_draw(&a.toast, canvas);
             present(ren, tex, canvas);
             last_draw = now;
             dirty = 0;

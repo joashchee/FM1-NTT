@@ -40,9 +40,9 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
 4. **The core's only dependencies are the vendored crates, it is deterministic, and the C API never unwinds** (`panic = "abort"`; every function tolerates null). No new dependency without asking.
 5. **Firmware is untrusted input:** an `Error`, never a crash, a hang or unbounded memory. Bound every size, check every access.
 6. **The window is pixel graphics, not r3i6nos's text theme** (the maintainer, 2026-11-16): the FM-1's 240 x 240 screen flush top left,
-   pixel for pixel; **Fn** (raw button 16; Tab or F1) toggles Standard (1x, panels right and below) and Zoomed (2x, one panel at the right).
-   **L1 and R1 turn the panel carousel** (MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND TOOLS), as TinyNTT's; Start pauses; the FM-1's own controls are
-   the pad only on MACHINE. Only the app's folder is written (`firmware/ slots/ recordings/ screenshots/`), temp name then rename.
+   pixel for pixel; **Tab or F1** toggles Standard (1x, panels right and below) and Zoomed (2x, one panel at the right).
+   **Fn (raw button 16) turns the panel carousel** (MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND TOOLS), **L1+R1 open the menu** (the maintainer, 2026-11-16);
+   Start pauses off MACHINE; the FM-1's own controls (notes, sticks, L1/L2/R2 modifiers: README) are the pad only on MACHINE. Only the app's folder is written (`firmware/ slots/ recordings/ screenshots/`), temp name then rename.
    Text is the project's own 5 x 7 font; every text pair passes 4.5:1; nothing scrolls (a long list is whole pages). Select and Start never
    quit when the app has a Quit item (the maintainer's rule, 2026-11-10); until Files has one, B and Esc leave.
 7. **The r3i6nos port rules that are not about the theme** (`../r3i6nos/CLAUDE.md` 9 to 14, rule 8 excepted), all in pixels and in this repo:
@@ -50,8 +50,7 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
    writer vendored at `host/vendor/r3i6nos_report.h`, with `# NEEDS:` setup lines, progress files and the `== power ==` section), a **Rec demo**
    (`--rec-demo`, TOOLS > Rec demo -> `/roms/FM1-NTT/Demo/`: a checklist of hero features, the lock and status files in `/run/loveos/demo/`,
    Select+Start held to cancel, deterministic PNGs, WAV and mp4 opening on the splash with the version line, `rec-demo.txt`), a local build
-   script (`r36s/build-deb.sh`, still to be in r3i6nos's `scripts/ports.conf`), the splash, and the power section. **Not done:** the hot-plug
-   toast. **Keep the hero list in `README.md` and `HEROES` in `host/demo.h` in step**: a new hero feature gets a step in the tour that works
+   script (`r36s/build-deb.sh`, still to be in r3i6nos's `scripts/ports.conf`), the splash, and the power section. **Hot-plug toast** (`host/toast.h`) is built; not done: Rec demo polling it and stopping on a failure. **Keep the hero list in `README.md` and `HEROES` in `host/demo.h` in step**: a new hero feature gets a step in the tour that works
    alone (it starts from `rec_place`), a row in the checklist and a frame count in `DEMO_FRAMES_FEATURE` (the self-test fails when the table
    is out of date), and the two recordings must stay byte-identical. The `firmware` hero feature is shown
    with a real firmware (the one given, else the one loaded, else the bundled UNTRUE STEP); with none at all it is SKIPped and the log says so.

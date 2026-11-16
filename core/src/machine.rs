@@ -405,3 +405,86 @@ mod tests {
         assert_eq!(run(), run());
     }
 }
+
+    /// A deterministic xorshift, so a failure repeats (no dependency: the core has none to spare).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    /// Whatever the bytes, loading a package is an `Ok` or an `Err`, never a panic, and a booted machine renders without one.
+    fn load_and_run(bytes: &[u8]) {
+        let r = std::panic::catch_unwind(|| {
+            if let Ok(mut m) = Machine::from_package(bytes) {
+                let mut out = vec![0i16; 256];
+                m.render(&mut out, 20_000);
+                m.key(20, true);
+                m.render(&mut out, 20_000);
+            }
+        });
+        assert!(r.is_ok(), "the loader or the machine panicked ({} bytes)", bytes.len());
+    }
+
+    #[test]
+    fn a_damaged_package_is_an_error_or_a_boot_never_a_panic() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundled-firmware/haunted-fm1");
+        let Ok(rd) = std::fs::read_dir(&dir) else { return };   // a checkout without the bundled folder: nothing to damage
+        let mut files: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "fwsc")).collect();
+        files.sort();
+        let Some(path) = files.first() else { return };
+        let good = std::fs::read(path).unwrap();
+        // every cut length near the start (the header), then a stride across the rest
+        for n in (0..2048.min(good.len())).chain((2048..good.len()).step_by(good.len() / 40 + 1)) {
+            load_and_run(&good[..n]);
+        }
+        // a byte set to 0x00 / 0xFF / 0x7F / 0x80: every offset in the header, a stride across the rest
+        let dense = 512.min(good.len());
+        let offsets: Vec<usize> = (0..dense).chain((dense..good.len()).step_by(good.len() / 60 + 1)).collect();
+        for &at in &offsets {
+            for v in [0x00u8, 0xFF, 0x7F, 0x80] {
+                let mut b = good.clone();
+                b[at] = v;
+                load_and_run(&b);
+            }
+        }
+        // random damage: a few bytes, a few hundred times
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..200 {
+            let mut b = good.clone();
+            for _ in 0..1 + rng.next() % 8 {
+                let at = (rng.next() % b.len() as u64) as usize;
+                b[at] = rng.next() as u8;
+            }
+            load_and_run(&b);
+        }
+    }
+
+    #[test]
+    fn raw_garbage_and_wrong_sized_saves_are_refused_or_run_safely() {
+        let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+        for len in [1usize, 3, 4, 64, 4095, 4096, 65536] {
+            let img: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            let r = std::panic::catch_unwind(|| {
+                let mut m = Machine::from_raw(img, 0x0200_0120).unwrap();
+                let mut out = vec![0i16; 128];
+                m.render(&mut out, 20_000);
+                for bad in [0usize, 1, 4096, fm1_soc::FLASH_SIZE - 1, fm1_soc::FLASH_SIZE + 1] {
+                    assert!(m.restore_flash(&vec![0xA5; bad]).is_err());
+                }
+            });
+            assert!(r.is_ok());
+        }
+        for entry in [0u32, 1, 0x0200_0000, 0xFFFF_FFFF, 0x0200_0121] {
+            let r = std::panic::catch_unwind(|| {
+                let mut m = Machine::from_raw(vec![0xFF; 4096], entry).unwrap();
+                let mut out = vec![0i16; 128];
+                m.render(&mut out, 20_000);
+            });
+            assert!(r.is_ok(), "entry {entry:#x}");
+        }
+    }

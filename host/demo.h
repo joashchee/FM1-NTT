@@ -18,8 +18,8 @@
 
 typedef struct { const char *id, *label; } Hero;
 static const Hero HEROES[] = {
-    {"carousel", "The eight panels on L1 and R1"},
-    {"zoom", "Standard and Zoomed with Fn"},
+    {"carousel", "The eight panels on Fn"},
+    {"zoom", "Standard and Zoomed with F1 or Tab"},
     {"midi", "Send notes to the MIDI jack"},
     {"tools", "Pause, reset and flash slots"},
     {"firmware", "Boot a firmware and play it (a bundled one, or yours)"},
@@ -255,29 +255,29 @@ static void tour(Rec *r) {
     }
     if (HERO_ON(0)) {
         rec_place(r, PANEL_MACHINE, MODE_STANDARD);
-        rec_cap(r, 0, "R1 turns the carousel through every panel");
+        rec_cap(r, 0, "Fn turns the carousel through every panel");
         rec_hold(r, 30, 1);
         for (int i = 1; i < PANEL_COUNT && !r->cancelled; i++) {
-            rec_press(r, 5, 6);                                              /* R1 */
+            rec_press(r, PAD_FN, 6);                                         /* Fn */
             rec_hold(r, 30, 1);
             snprintf(what, sizeof what, "carousel-%s", PX_PANEL_NAMES[a->panel]);
             for (char *p = what; *p; p++) *p = (char)tolower((unsigned char)*p);
             rec_shot(r, what);
         }
-        rec_press(r, 5, 6);                                                  /* round to MACHINE */
-        rec_cap(r, 0, "L1 goes back");
-        rec_press(r, 4, 6);
+        rec_press(r, PAD_FN, 6);                                             /* round to MACHINE */
+        rec_cap(r, 0, "L1 and R1 together open the menu");
+        rec_joy(r, PAD_L1, 1); rec_joy(r, PAD_R1, 1); rec_hold(r, 6, 1); rec_joy(r, PAD_R1, 0); rec_joy(r, PAD_L1, 0); rec_hold(r, 4, 1);
         rec_hold(r, 24, 1);
     }
     if (HERO_ON(1)) {
         rec_place(r, PANEL_CPU, MODE_STANDARD);
         rec_hold(r, 24, 1);
-        rec_cap(r, 1, "Fn doubles the FM-1's screen to 2x, flush top left");
-        rec_press(r, PAD_FN, 4);
+        rec_cap(r, 1, "F1 doubles the FM-1's screen to 2x, flush top left");
+        rec_key(r, SDLK_F1, 5);
         rec_hold(r, 52, 1);
         rec_shot(r, "zoomed");
-        rec_cap(r, 1, "Fn again: back to 1x with the panels around it");
-        rec_press(r, PAD_FN, 4);
+        rec_cap(r, 1, "F1 again: back to 1x with the panels around it");
+        rec_key(r, SDLK_F1, 5);
         rec_hold(r, 8, 1);
     }
     if (HERO_ON(2)) {

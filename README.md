@@ -3,7 +3,7 @@
 A cross-platform sandbox, playground and emulator for **FM-1 firmware**: run the M-VAVE FM-1 pocket FM synth's community
 firmwares (Felucca, SLOOP, Melodee, S1Vave and the rest) on a computer, in a browser, or on an **R36S** handheld running
 [r3i6nos](https://github.com/joashchee/r3i6nos), to audition them before flashing a real FM-1. The FM-1's own
-240 x 240 screen is drawn pixel for pixel at the top left, with sandbox panels around it; **Fn** zooms it to 2x.
+240 x 240 screen is drawn pixel for pixel at the top left, with sandbox panels around it; **F1 or Tab** zooms it to 2x.
 
 > **Early days.** The CPU, memory map and peripherals are the vendored MIT [`fm1-emu`](https://github.com/joakimeriksson/fm1-emu) crates;
 > the C and SDL2 host, the pixel layouts, the C API and the web shell are in and tested, but **nothing has run on a real R36S** (`ROADMAP.md`). Five permissively licensed firmwares
@@ -40,14 +40,28 @@ r36s/build-deb.sh             # build/pkg/FM1-NTT.deb for the R36S (Docker)
 
 ## Panels and controls
 
-**L1 / R1** (Home / End) turn the panel carousel: MACHINE, FILES, CPU, MEMORY, CONSOLE, MIDI, SOUND, TOOLS. **Fn** (Tab / F1) toggles Standard and
-Zoomed (2x). **Start** (P) pauses. On a keyboard: Z S X D C V ... and Q 2 W 3 E R ... play the 27 keys, F2-F12 and [ ] are the buttons, arrows
+**Fn** (Home / End on a keyboard) turns the panel carousel: MACHINE, FILES, CPU, MEMORY, CONSOLE, MIDI, SOUND, TOOLS. **L1 + R1** together open the menu
+(TOOLS) and close it again. **Tab / F1** toggles Standard and Zoomed (2x). **Start** (P) pauses on every panel but MACHINE.
+
+**The pad on MACHINE** (the stick axes and the black-key order are untested on a unit):
+
+| | none held | **L1** held | **L2** held | **R2** held |
+|---|---|---|---|---|
+| left stick x / y | knob 1 / knob 2 | master level / presets | knob 1 / 2 | knob 1 / 2 |
+| right stick x / y | knob 3 / knob 4 | select / algorithm | knob 3 / 4 | knob 3 / 4 |
+| d-pad up left down right | notes 1 to 4 of the scale (C D E F) | OP1 OP2 OP3 OP4 | SEL FX HOME SAVE | GLO EDIT PLAY/STOP REC |
+| Y B A X | notes 5 to 8 (G A B C) | OP5 OP6 PIT GLO | ENV LFO ARP SEQ | |
+| Select / Start | OCT- / OCT+ | MONO / POLY | key down / up (the app's own key) | |
+| Fn | next panel | next scale | next panel | next panel |
+
+OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys: F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is assumed from the manual's list, not measured). SEL has no matrix button, so it says so and presses nothing. Scales: major, minor,
+dorian, mixolydian, both pentatonics, chromatic; the key moves them from C (shown as the key's name). On a keyboard: Z S X D C V ... and Q 2 W 3 E R ... play the 27 keys, F2-F12 and [ ] are the buttons, arrows
 and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return is A, Backspace is B, Insert and Delete are X and Y, Esc leaves.
 `docs/ARCHITECTURE.md` section 4 says what each panel does.
 
 ## Hero features (the Rec demo's checklist)
 
-1. **carousel**: the eight panels on L1 and R1. 2. **zoom**: Standard and Zoomed with Fn. 3. **midi**: send notes to the MIDI jack.
+1. **carousel**: the eight panels on Fn, and the menu on L1 + R1. 2. **zoom**: Standard and Zoomed with F1 or Tab. 3. **midi**: send notes to the MIDI jack.
 4. **tools**: pause, reset, flash slots. 5. **firmware**: boot a firmware and play it (a bundled one unless you give yours).
 
 ## Docs

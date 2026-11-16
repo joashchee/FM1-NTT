@@ -28,8 +28,8 @@ buttons, 27 note keys, 7 encoders and a pot; SPI flash; audio out at 44.1 kHz; M
 
 ## 4. The window: Standard and Zoomed
 
-The FM-1's 240 x 240 screen is drawn **pixel for pixel, flush top left**; the rest of the 640 x 480 window is the sandbox's panels. **Fn**
-(the R36S's raw button 16; Tab or F1 on a keyboard) toggles the two modes:
+The FM-1's 240 x 240 screen is drawn **pixel for pixel, flush top left**; the rest of the 640 x 480 window is the sandbox's panels. **Tab or F1**
+(a keyboard; the pad's Fn now turns the carousel, the maintainer's mapping of 2026-11-16) toggles the two modes:
 
 | | Standard | Zoomed |
 |---|---|---|
@@ -43,8 +43,8 @@ is 1:1.
 
 ### The panel carousel (as TinyNTT's)
 
-The top 18 rows of the right panel are the carousel: the panel before with **L1**, the current one in the middle, the one after with **R1**
-(Home and End on a keyboard); it goes round. Standard also has, below the screen, what the buttons do on this panel. Eight panels:
+The top 18 rows of the right panel are the carousel: the panel before, the current one in the middle, the one after; **Fn** (raw button 16) turns it forward, Home and End both ways
+on a keyboard; it goes round. **L1 + R1** together open the menu (TOOLS) and close it again, back to the panel it came from. Standard also has, below the screen, what the buttons do on this panel. Eight panels:
 
 | Panel | What it is for | Controls (pad) |
 |---|---|---|

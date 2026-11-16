@@ -19,7 +19,19 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 26
+      - name: Add the WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
       - name: Run checks
         run: scripts/check.sh
+  r36s:
+    # The arm64 package, built and smoke-tested in Debian 12 under qemu (r36s/build-deb.sh); the same script the maintainer runs.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Build the package
+        run: r36s/build-deb.sh
   # CI builds Linux and the web; it never ships a Mac app (an unsigned one is "damaged" on any other Mac): releases are
   # signed and notarized on the maintainer's Mac.
