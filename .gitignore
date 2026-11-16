@@ -11,9 +11,7 @@ dist/
 *.deb
 
 # Firmware images are the user's own and never committed, except the permissively licensed ones in bundled-firmware/ that its
-# MANIFEST.tsv lists (scripts/check-bundled.py enforces this; docs/FIRMWARE.md). The GPL pack is a SEPARATE repository, FM1-NTT Firmware Pack:
-# until it is moved out beside this one it sits here, ignored.
-/FM1-NTT-Firmware-Pack/
+# MANIFEST.tsv lists (scripts/check-bundled.py enforces this; docs/FIRMWARE.md). The GPL pack is a SEPARATE repository, FM1-NTT Firmware Pack, beside this one.
 *.fwsc
 *.fm1save
 !bundled-firmware/**/*.fwsc
