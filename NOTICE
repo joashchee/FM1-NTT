@@ -1,0 +1,28 @@
+FM1-NTT: third-party material with its own licence
+
+The repository's own code is MIT (LICENSE). This part is not ours, though it is MIT too:
+
+fm1-emu (core/vendor/fm1-emu/): the crates fm1-isa, fm1-core and fm1-soc, and docs/isa-notes.md
+  Copyright (c) 2026 Joakim Eriksson. Licence: MIT (core/vendor/fm1-emu/LICENSE, copied unchanged).
+  Source: https://github.com/joakimeriksson/fm1-emu , commit 60645a58d6cd1597ed565a3f00e4981964623232 (2026-11-15), version 0.5.1.
+  Changed: only the workspace Cargo.toml's `members` (three crates); no source file is edited. core/vendor/fm1-emu/VENDORED.md has the detail.
+  Any package or binary that carries it must carry this notice and that licence text (r36s/package/build-deb.sh copies both).
+
+r3i6nos_report.h (host/vendor/r3i6nos_report.h): the device-report writer, system and card sections and power windows
+  Copyright (c) 2026 ANSI Apps (the same holder as this repository). Licence: MIT. Source: https://github.com/joashchee/r3i6nos ,
+  theme/r3i6nos_report.h at commit 8d1c3d844a15e14c479b5a3b5a5c48007cdbfe5e (2026-11-16), copied unchanged. It is vendored so this
+  repository builds with no r3i6nos checkout. Update it by copying the newer file over it and recording the commit here.
+
+No font, picture or sound from anywhere else is in this repository: the pixel font (host/pix.h) and the icons (scripts/build-icons.ts) are drawn for this project.
+
+bundled-firmware/haunted-fm1/ (five firmware packages, unmodified): Haunted FM-1 v0.1 by David Ryan, https://github.com/davidpryan/haunted-fm1
+  The firmwares and their libraries are MIT, Copyright (c) 2026 David Ryan. The packages also contain fm1-base and felucca-bsp (MPL-2.0, Charles Vestal and
+  Leo Kuroshita; source at the commits named in SOURCES.md), JieLi AC79 SDK files (Apache-2.0, Zhuhai Jieli Technology) and the Barlow and Terminus fonts
+  (SIL OFL 1.1). Licence texts, notices and sources: bundled-firmware/haunted-fm1/ (LICENSE*, NOTICE, SOURCES.md). Any package that carries them must
+  carry those files (r36s/package/build-deb.sh copies them to /usr/share/doc/fm1ntt/bundled).
+
+The GPL firmware (Felucca, FoMni-1, Jangada) is NOT in this repository or its package: it lives in the separate FM1-NTT Firmware Pack repository
+  (https://github.com/joashchee/FM1-NTT-Firmware-Pack) with its source, its licences and its own notices. FM1-NTT reads it as data and links none of it.
+
+No other firmware, ROM, SDK or vendor code is in this repository (docs/FIRMWARE.md). The FM-1 and its firmwares belong to M-VAVE and the firmware
+authors; "FM-1" and "M-VAVE" are used only to say what this software works with. Not affiliated with M-VAVE.

@@ -1,0 +1,11 @@
+# Keeps the GitHub Actions the workflows use current. The Rust core has no dependencies and the web shell has none either.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 3

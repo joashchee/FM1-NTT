@@ -1,0 +1,613 @@
+/* FM1-NTT pixel graphics: a 640x480 ARGB canvas, an original 5x7 font, and the two layouts of the window. MIT.
+ *
+ * The R36S host does not use r3i6nos's text-mode theme: the FM-1's own 240x240 screen is drawn pixel for pixel at the top left,
+ * and the space around it holds the sandbox's panels.
+ *
+ *   Standard  the FM-1 screen at 1x (0,0)-(239,239); panels at the right (x 240..639, the full height) and below it
+ *             (x 0..239, y 240..479).
+ *   Zoomed    the FM-1 screen at 2x (0,0)-(479,479), each pixel a 2x2 block; one panel at the right (x 480..639).
+ *
+ * Fn (raw button 16, or Tab / F1 on a keyboard) toggles between them. No file here depends on SDL: the canvas is a plain pixel
+ * array, so the layout and the drawing are tested headless (host/fm1ntt.c --selftest). The font is original to this project.
+ * Static functions, one header. */
+#ifndef FM1NTT_PIX_H
+#define FM1NTT_PIX_H
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+enum { PX_W = 640, PX_H = 480, FM_W = 240, FM_H = 240 };
+enum { MODE_STANDARD = 0, MODE_ZOOMED = 1 };
+
+typedef struct { int x, y, w, h; } PxRect;
+
+/* Where the FM-1's screen goes in each mode, and the free rectangles around it. */
+static inline int px_scale(int mode) { return mode == MODE_ZOOMED ? 2 : 1; }
+static inline PxRect px_screen_rect(int mode) { return (PxRect){0, 0, FM_W * px_scale(mode), FM_H * px_scale(mode)}; }
+static inline int px_panel_rects(int mode, PxRect out[2]) {
+    if (mode == MODE_ZOOMED) { out[0] = (PxRect){480, 0, 160, 480}; return 1; }
+    out[0] = (PxRect){240, 0, 400, 480};
+    out[1] = (PxRect){0, 240, 240, 240};
+    return 2;
+}
+
+/* The carousel strip (the top 18 rows of the right panel) and the panel's content area under it. */
+static inline PxRect px_carousel_rect(int mode) { PxRect p[2]; px_panel_rects(mode, p); return (PxRect){p[0].x, p[0].y, p[0].w, 18}; }
+static inline PxRect px_content_rect(int mode) { PxRect p[2]; px_panel_rects(mode, p); return (PxRect){p[0].x, p[0].y + 20, p[0].w, p[0].h - 20}; }
+
+/* ---- the palette (every pair used for text passes 4.5:1; px_selftest checks) ---------------------------------------------- */
+enum { C_BG = 0xFF101018, C_PANEL = 0xFF181824, C_FRAME = 0xFF3C3C58, C_TEXT = 0xFFD8D8E0, C_DIM = 0xFF8C8CA0, C_HEAD = 0xFF70D0F0,
+       C_OK = 0xFF60E080, C_WARN = 0xFFF0D060, C_ERR = 0xFFFF7070, C_KEYUP = 0xFFE8E8E8, C_KEYDN = 0xFF40B0FF, C_BLACKKEY = 0xFF202030, C_SEL = 0xFF2850A0 };
+
+/* ---- the canvas -------------------------------------------------------------------------------------------------------- */
+static inline void px_rect(uint32_t *c, PxRect r, uint32_t col) {
+    for (int y = r.y < 0 ? 0 : r.y; y < r.y + r.h && y < PX_H; y++)
+        for (int x = r.x < 0 ? 0 : r.x; x < r.x + r.w && x < PX_W; x++) c[y * PX_W + x] = col;
+}
+static inline void px_frame(uint32_t *c, PxRect r, uint32_t col) {
+    px_rect(c, (PxRect){r.x, r.y, r.w, 1}, col);
+    px_rect(c, (PxRect){r.x, r.y + r.h - 1, r.w, 1}, col);
+    px_rect(c, (PxRect){r.x, r.y, 1, r.h}, col);
+    px_rect(c, (PxRect){r.x + r.w - 1, r.y, 1, r.h}, col);
+}
+
+/* ---- the font: 5x7 in a 6x8 cell, original; lowercase draws as capitals --------------------------------------------------- */
+typedef struct { char ch; const char *rows; } PxGlyph;   /* seven rows of five columns, '#' set, '/' between rows */
+static const PxGlyph px_glyphs[] = {
+    {'A', ".###./#...#/#...#/#####/#...#/#...#/#...#"}, {'B', "####./#...#/#...#/####./#...#/#...#/####."},
+    {'C', ".###./#...#/#..../#..../#..../#...#/.###."}, {'D', "####./#...#/#...#/#...#/#...#/#...#/####."},
+    {'E', "#####/#..../#..../####./#..../#..../#####"}, {'F', "#####/#..../#..../####./#..../#..../#...."},
+    {'G', ".###./#...#/#..../#.###/#...#/#...#/.###."}, {'H', "#...#/#...#/#...#/#####/#...#/#...#/#...#"},
+    {'I', ".###./..#../..#../..#../..#../..#../.###."}, {'J', "..###/...#./...#./...#./...#./#..#./.##.."},
+    {'K', "#...#/#..#./#.#../##.../#.#../#..#./#...#"}, {'L', "#..../#..../#..../#..../#..../#..../#####"},
+    {'M', "#...#/##.##/#.#.#/#.#.#/#...#/#...#/#...#"}, {'N', "#...#/##..#/#.#.#/#..##/#...#/#...#/#...#"},
+    {'O', ".###./#...#/#...#/#...#/#...#/#...#/.###."}, {'P', "####./#...#/#...#/####./#..../#..../#...."},
+    {'Q', ".###./#...#/#...#/#...#/#.#.#/#..#./.##.#"}, {'R', "####./#...#/#...#/####./#.#../#..#./#...#"},
+    {'S', ".####/#..../#..../.###./....#/....#/####."}, {'T', "#####/..#../..#../..#../..#../..#../..#.."},
+    {'U', "#...#/#...#/#...#/#...#/#...#/#...#/.###."}, {'V', "#...#/#...#/#...#/#...#/#...#/.#.#./..#.."},
+    {'W', "#...#/#...#/#...#/#.#.#/#.#.#/##.##/#...#"}, {'X', "#...#/#...#/.#.#./..#../.#.#./#...#/#...#"},
+    {'Y', "#...#/#...#/.#.#./..#../..#../..#../..#.."}, {'Z', "#####/....#/...#./..#../.#.../#..../#####"},
+    {'0', ".###./#...#/#..##/#.#.#/##..#/#...#/.###."}, {'1', "..#../.##../..#../..#../..#../..#../.###."},
+    {'2', ".###./#...#/....#/...#./..#../.#.../#####"}, {'3', "####./....#/....#/.###./....#/....#/####."},
+    {'4', "...#./..##./.#.#./#..#./#####/...#./...#."}, {'5', "#####/#..../####./....#/....#/#...#/.###."},
+    {'6', ".###./#..../#..../####./#...#/#...#/.###."}, {'7', "#####/....#/...#./..#../.#.../.#.../.#..."},
+    {'8', ".###./#...#/#...#/.###./#...#/#...#/.###."}, {'9', ".###./#...#/#...#/.####/....#/....#/.###."},
+    {'.', "...../...../...../...../...../.##../.##.."}, {',', "...../...../...../...../.##../..#../.#..."},
+    {':', "...../.##../.##../...../.##../.##../....."}, {';', "...../.##../.##../...../.##../..#../.#..."},
+    {'-', "...../...../...../#####/...../...../....."}, {'_', "...../...../...../...../...../...../#####"},
+    {'+', "...../..#../..#../#####/..#../..#../....."}, {'=', "...../...../#####/...../#####/...../....."},
+    {'/', "....#/....#/...#./..#../.#.../#..../#...."}, {'\\', "#..../#..../.#.../..#../...#./....#/....#"},
+    {'(', "...#./..#../.#.../.#.../.#.../..#../...#."}, {')', ".#.../..#../...#./...#./...#./..#../.#..."},
+    {'[', ".###./.#.../.#.../.#.../.#.../.#.../.###."}, {']', ".###./...#./...#./...#./...#./...#./.###."},
+    {'<', "...#./..#../.#.../#..../.#.../..#../...#."}, {'>', ".#.../..#../...#./....#/...#./..#../.#..."},
+    {'!', "..#../..#../..#../..#../..#../...../..#.."}, {'?', ".###./#...#/....#/...#./..#../...../..#.."},
+    {'%', "##..#/##..#/...#./..#../.#.../#..##/#..##"}, {'#', ".#.#./.#.#./#####/.#.#./#####/.#.#./.#.#."},
+    {'*', "...../#.#.#/.###./#####/.###./#.#.#/....."}, {'\'', "..#../..#../.#.../...../...../...../....."},
+    {'"', ".#.#./.#.#./...../...../...../...../....."}, {'|', "..#../..#../..#../..#../..#../..#../..#.."},
+    {'^', "..#../.#.#./#...#/...../...../...../....."}, {'~', "...../.##.#/#.##./...../...../...../....."},
+    {'@', ".###./#...#/#.###/#.#.#/#.###/#..../.###."}, {'&', ".##../#..#./#.#../.#.../#.#.#/#..#./.##.#"},
+};
+#define PX_NGLYPHS ((int)(sizeof px_glyphs / sizeof px_glyphs[0]))
+
+/* The glyph's 35 bits (row-major, bit 34 = top left), or 0 when none (a space, an unknown byte draws as '?'). */
+static inline uint64_t px_glyph_bits(int ch) {
+    if (ch >= 'a' && ch <= 'z') ch -= 32;
+    if (ch == ' ') return 0;
+    const char *rows = NULL;
+    for (int i = 0; i < PX_NGLYPHS && !rows; i++) if (px_glyphs[i].ch == ch) rows = px_glyphs[i].rows;
+    if (!rows) for (int i = 0; i < PX_NGLYPHS; i++) if (px_glyphs[i].ch == '?') rows = px_glyphs[i].rows;
+    uint64_t bits = 0;
+    for (const char *p = rows; *p; p++) if (*p != '/') bits = (bits << 1) | (*p == '#');
+    return bits;
+}
+
+enum { PX_CELL_W = 6, PX_CELL_H = 8 };
+
+/* Draws text at (x, y) with each font pixel `scale` screen pixels; stops at max_w pixels (0: no limit). Returns the x after it. */
+static inline int px_text(uint32_t *c, int x, int y, const char *s, uint32_t col, int scale, int max_w) {
+    int x0 = x;
+    for (; *s; s++) {
+        if (max_w && x + PX_CELL_W * scale > x0 + max_w) break;
+        uint64_t b = px_glyph_bits((unsigned char)*s);
+        for (int i = 0; i < 35; i++)
+            if (b >> (34 - i) & 1)
+                px_rect(c, (PxRect){x + (i % 5) * scale, y + (i / 5) * scale, scale, scale}, col);
+        x += PX_CELL_W * scale;
+    }
+    return x;
+}
+static inline int px_text_w(const char *s, int scale) { return (int)strlen(s) * PX_CELL_W * scale; }
+
+/* Word-wrapped text in a column w pixels wide, at most max_lines lines of 10 px (a long word is broken); the rest is cut with "...". */
+static inline void px_wrap(uint32_t *c, int x, int y, const char *s, uint32_t col, int w, int max_lines) {
+    int per = w / PX_CELL_W, line = 0;
+    if (per < 4) return;
+    while (*s && line < max_lines) {
+        while (*s == ' ') s++;
+        int n = (int)strlen(s), take = n <= per ? n : per;
+        if (n > per) { int b = take; while (b > 0 && s[b] != ' ') b--; if (b > 0) take = b; }
+        char buf[128];
+        int len = take < (int)sizeof buf - 4 ? take : (int)sizeof buf - 4;
+        memcpy(buf, s, (size_t)len);
+        buf[len] = 0;
+        s += take;
+        while (*s == ' ') s++;
+        if (*s && line == max_lines - 1) { if (len > 3) strcpy(buf + (len > per - 3 ? per - 3 : len), "..."); }
+        px_text(c, x, y + line * 10, buf, col, 1, 0);
+        line++;
+    }
+}
+
+/* ---- what the panels show ---------------------------------------------------------------------------------------------- */
+enum { PANEL_MACHINE, PANEL_FILES, PANEL_CPU, PANEL_MEMORY, PANEL_CONSOLE, PANEL_MIDI, PANEL_SOUND, PANEL_TOOLS, PANEL_COUNT };
+static const char *const PX_PANEL_NAMES[PANEL_COUNT] = {"MACHINE", "FILES", "CPU", "MEMORY", "CONSOLE", "MIDI", "SOUND", "TOOLS"};
+static const char *const PX_BUTTON_NAMES[14] = {"OCT-", "OCT+", "FX", "SCL", "ENV", "LFO", "EDIT", "GLO", "HOME", "SAVE", "ARP", "SEQ", "PLAY", "REC"};
+static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", "KNOB2", "KNOB3", "KNOB4", "PRESETS"};
+static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
+
+enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 12, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
+
+typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
+
+typedef struct {
+    int panel;                          /* PANEL_* */
+    /* the machine */
+    const char *fw_name;                /* "" when none */
+    const char *fw_board;               /* "Fm1", "Smk37", "" */
+    const char *run_state;              /* "NO FIRMWARE", "RUN", "PAUSED", "HALT" */
+    uint64_t ms;                        /* emulated milliseconds since boot */
+    uint64_t down;                      /* matrix ids held: bits 0..13 buttons, 14..40 note keys */
+    int enc_turns[7];
+    int pot;                            /* 0..1023 */
+    const char *msg;                    /* the last thing that happened */
+    int msg_style;                      /* 0 info, 1 ok, 2 warn, 3 error */
+    uint32_t fb[FM_W * FM_H];           /* the FM-1's screen, 0x00RRGGBB */
+    int fb_valid;
+    /* files: the firmware folder's entries, then Quit as the last */
+    char file_dir[96];
+    char bundled_dir[96];               /* where the bundled firmware is, "" when none */
+    char pack_dir[96];                  /* where the copyleft pack is, "" when it is not installed */
+    char files[PX_MAX_FILES + 1][PX_NAME];
+    int nfiles, file_sel;               /* nfiles includes the Quit row */
+    /* cpu */
+    PxCpu cpu[2];
+    int ncpu, cpu_sel;
+    double ips, speed;                  /* instructions a second, emulated time over real time */
+    int jit;
+    /* memory */
+    int mem_region;
+    uint32_t mem_base, mem_size, mem_off;
+    uint8_t mem[PX_MEM_BYTES];
+    int mem_n;
+    /* console */
+    char console[PX_CONSOLE_BYTES + 1];
+    int console_n;
+    /* midi */
+    int midi_chan, midi_note, midi_vel, midi_held;
+    uint8_t midi_log[PX_MIDI_LOG];
+    int midi_log_n;
+    uint64_t midi_queued, midi_dropped;
+    /* sound */
+    int level_l, level_r, peak_l, peak_r;
+    int16_t scope[PX_SCOPE];
+    int rec_on;
+    uint64_t rec_frames;
+    char rec_file[PX_NAME];
+    /* tools */
+    char tools[PX_MAX_TOOLS][PX_NAME];
+    int ntools, tool_sel;
+    char confirm[96];                   /* a question awaiting A or B, "" when none */
+} UiState;
+
+static inline void px_box(uint32_t *c, PxRect r, const char *title) {
+    px_rect(c, r, C_PANEL);
+    px_frame(c, r, C_FRAME);
+    if (title) {
+        px_rect(c, (PxRect){r.x + 6, r.y, px_text_w(title, 1) + 6, 1}, C_PANEL);
+        px_text(c, r.x + 9, r.y - 3, title, C_HEAD, 1, 0);
+    }
+}
+
+/* The 27 note keys F3..G5: 16 white keys with black keys over them. Matrix id of key k is 14 + k. */
+static inline void px_keyboard(uint32_t *c, PxRect r, uint64_t down) {
+    static const int white_of[27] = {0, -1, 1, -1, 2, 3, -1, 4, -1, 5, -1, 6, 7, -1, 8, -1, 9, 10, -1, 11, -1, 12, -1, 13, 14, -1, 15};
+    int ww = r.w / 16, bh = r.h * 6 / 10;
+    for (int k = 0; k < 27; k++)
+        if (white_of[k] >= 0) px_rect(c, (PxRect){r.x + white_of[k] * ww, r.y, ww - 1, r.h}, down >> (14 + k) & 1 ? C_KEYDN : C_KEYUP);
+    for (int k = 0; k < 27; k++)
+        if (white_of[k] < 0) {
+            int left = k > 0 ? white_of[k - 1] : 0;
+            px_rect(c, (PxRect){r.x + left * ww + ww * 2 / 3, r.y, ww * 2 / 3, bh}, down >> (14 + k) & 1 ? C_KEYDN : C_BLACKKEY);
+        }
+}
+
+static inline void px_meter(uint32_t *c, PxRect r, int percent, uint32_t col) {
+    px_rect(c, r, C_BG);
+    int n = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    px_rect(c, (PxRect){r.x, r.y, (r.w - 2) * n / 100, r.h}, col);
+    px_frame(c, r, C_FRAME);
+}
+
+static inline uint32_t px_style(int s) { return s == 1 ? C_OK : s == 2 ? C_WARN : s == 3 ? C_ERR : C_TEXT; }
+
+static inline void px_buttons(uint32_t *c, PxRect r, int per_row, uint64_t down) {
+    int cw = r.w / per_row, rows = (14 + per_row - 1) / per_row, ch = r.h / rows;
+    for (int i = 0; i < 14; i++) {
+        PxRect b = {r.x + (i % per_row) * cw, r.y + (i / per_row) * ch, cw - 3, ch - 3};
+        int on = (int)(down >> i & 1);
+        px_rect(c, b, on ? C_KEYDN : C_BG);
+        px_frame(c, b, C_FRAME);
+        px_text(c, b.x + (b.w - px_text_w(PX_BUTTON_NAMES[i], 1)) / 2, b.y + (b.h - 7) / 2, PX_BUTTON_NAMES[i], on ? C_BG : C_TEXT, 1, b.w);
+    }
+}
+
+static inline const char *px_state_of(const UiState *u) { return u->run_state ? u->run_state : "-"; }
+static inline uint32_t px_state_col(const UiState *u) {
+    const char *s = px_state_of(u);
+    return !strcmp(s, "HALT") ? C_ERR : !strcmp(s, "RUN") ? C_OK : C_WARN;
+}
+
+/* A page of a list, no scrolling: `per` rows; the row `sel` is highlighted and its page shown. Returns the page count; *page is this page (0-based). */
+static inline int px_list(uint32_t *c, PxRect r, const char (*items)[PX_NAME], int n, int sel, int per, int *page) {
+    int pages = n > 0 ? (n + per - 1) / per : 1, pg = sel >= 0 && n > 0 ? sel / per : 0;
+    if (page) *page = pg;
+    for (int i = 0; i < per && pg * per + i < n; i++) {
+        int idx = pg * per + i, y = r.y + i * 12;
+        if (idx == sel) px_rect(c, (PxRect){r.x - 2, y - 2, r.w + 4, 11}, C_SEL);
+        px_text(c, r.x + 2, y, items[idx], C_TEXT, 1, r.w - 4);
+    }
+    return pages;
+}
+
+static inline const char *px_note_name(int n, char *buf) {
+    static const char *const nm[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    snprintf(buf, 8, "%s%d", nm[((n % 12) + 12) % 12], n / 12 - 1);
+    return buf;
+}
+
+/* ---- the carousel (TinyNTT's): the panel before with L1, the current in the middle, the one after with R1 -------------------- */
+static inline void px_carousel(uint32_t *c, int mode, int cur) {
+    PxRect r = px_carousel_rect(mode);
+    px_rect(c, r, C_BG);
+    const char *prev = PX_PANEL_NAMES[(cur + PANEL_COUNT - 1) % PANEL_COUNT], *next = PX_PANEL_NAMES[(cur + 1) % PANEL_COUNT], *now = PX_PANEL_NAMES[cur];
+    char buf[40];
+    int mid_w = px_text_w(now, 1) + 16;
+    if (mode == MODE_STANDARD) {
+        snprintf(buf, sizeof buf, "< L1 %s", prev);
+        px_text(c, r.x + 6, r.y + 5, buf, C_DIM, 1, (r.w - mid_w) / 2 - 8);
+        snprintf(buf, sizeof buf, "%s R1 >", next);
+        px_text(c, r.x + r.w - 6 - px_text_w(buf, 1), r.y + 5, buf, C_DIM, 1, (r.w - mid_w) / 2 - 8);
+    } else {
+        px_text(c, r.x + 4, r.y + 5, "<", C_DIM, 1, 0);
+        px_text(c, r.x + r.w - 4 - 6, r.y + 5, ">", C_DIM, 1, 0);
+    }
+    PxRect m = {r.x + (r.w - mid_w) / 2, r.y + 1, mid_w, 16};
+    px_rect(c, m, C_SEL);
+    px_text(c, m.x + 8, m.y + 4, now, C_TEXT, 1, 0);
+}
+
+/* What the buttons do, per panel: the area below the FM-1's screen in Standard. */
+static const char *const PX_HINTS[PANEL_COUNT][9] = {
+    {"FM-1 CONTROLS", "A PLAY  X HOME  Y EDIT", "DPAD L R  SELECT", "DPAD U D  OCT- OCT+", "L2 R2  PRESETS", "KEYS: Z S X D C V G B ...", "F2-F12 BUTTONS  [ ] OCT", "ARROWS  SELECT ALGO", "- =  POT"},
+    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  BOOT THE FILE", "X  RESCAN THE FOLDER", "LAST ROW  QUIT", "", "", ""},
+    {"BOTH CORES", "UP DOWN  CORE 0 1", "LEFT RIGHT  CORE 0 1", "", "", "", "", "", ""},
+    {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},
+    {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
+    {"SEND TO THE MIDI JACK", "A  NOTE ON, THEN OFF", "LEFT RIGHT  NOTE", "UP DOWN  OCTAVE", "X Y  VELOCITY", "L2 R2  CHANNEL", "B  ALL NOTES OFF", "", ""},
+    {"SCOPE AND RECORDER", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "", "", "", "", ""},
+    {"RESET, SLOTS, JIT, PANIC", "UP DOWN  PICK", "LEFT RIGHT  SLOT", "A  RUN", "B  NO TO A QUESTION", "", "", "", ""},
+};
+
+/* A hint row at the foot of a rectangle: what the buttons do. */
+static inline void px_hint(uint32_t *c, PxRect r, const char *s) { px_text(c, r.x + 8, r.y + r.h - 12, s, C_DIM, 1, r.w - 16); }
+
+/* ---- the panels --------------------------------------------------------------------------------------------------------- */
+static inline void px_panel_machine(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96];
+    int x = r.x + 8, w = r.w - 16, has_fw = u->fw_name && u->fw_name[0];
+    if (!narrow) {
+        x = r.x + 12; w = r.w - 24;
+        px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, 84}, "MACHINE");
+        snprintf(line, sizeof line, "FIRMWARE %s", has_fw ? u->fw_name : "(NONE)");
+        px_text(c, x, r.y + 18, line, has_fw ? C_TEXT : C_WARN, 1, w);
+        snprintf(line, sizeof line, "BOARD    %s", u->fw_board && u->fw_board[0] ? u->fw_board : "-");
+        px_text(c, x, r.y + 32, line, C_TEXT, 1, w);
+        snprintf(line, sizeof line, "STATE    %s", px_state_of(u));
+        px_text(c, x, r.y + 46, line, px_state_col(u), 1, w);
+        snprintf(line, sizeof line, "TIME     %llu.%03llu S", (unsigned long long)(u->ms / 1000), (unsigned long long)(u->ms % 1000));
+        px_text(c, x, r.y + 60, line, C_TEXT, 1, w);
+        px_text(c, x, r.y + 74, "SOC      AC791N 2X PI32V2", C_DIM, 1, w);
+        px_box(c, (PxRect){r.x + 4, r.y + 102, r.w - 8, 48}, "BUTTONS");
+        px_buttons(c, (PxRect){r.x + 10, r.y + 112, r.w - 20, 34}, 7, u->down);
+        px_box(c, (PxRect){r.x + 4, r.y + 158, r.w - 8, 74}, "KEYS F3-G5");
+        px_keyboard(c, (PxRect){r.x + 12, r.y + 170, r.w - 24, 54}, u->down);
+        px_box(c, (PxRect){r.x + 4, r.y + 240, r.w - 8, 88}, "ENCODERS AND POT");
+        for (int e = 0; e < 7; e++) {
+            snprintf(line, sizeof line, "%-9s %+d", PX_ENCODER_NAMES[e], u->enc_turns[e]);
+            px_text(c, x + (e < 4 ? 0 : w / 2), r.y + 252 + (e < 4 ? e : e - 4) * 12, line, C_TEXT, 1, w / 2 - 6);
+        }
+        px_text(c, x + w / 2, r.y + 300, "POT", C_TEXT, 1, 0);
+        px_meter(c, (PxRect){x + w / 2 + 24, r.y + 299, w / 2 - 30, 8}, u->pot * 100 / 1023, C_HEAD);
+        px_box(c, (PxRect){r.x + 4, r.y + 336, r.w - 8, 44}, "SOUND");
+        px_text(c, x, r.y + 348, "L", C_DIM, 1, 0);
+        px_meter(c, (PxRect){x + 12, r.y + 347, w - 12, 8}, u->level_l, C_OK);
+        px_text(c, x, r.y + 362, "R", C_DIM, 1, 0);
+        px_meter(c, (PxRect){x + 12, r.y + 361, w - 12, 8}, u->level_r, C_OK);
+        px_box(c, (PxRect){r.x + 4, r.y + 388, r.w - 8, 56}, "LOG");
+        px_wrap(c, x, r.y + 400, u->msg ? u->msg : "", px_style(u->msg_style), w, 4);
+    } else {
+        px_box(c, (PxRect){r.x + 2, r.y + 8, r.w - 4, 76}, "STATE");
+        px_text(c, x, r.y + 20, has_fw ? u->fw_name : "(NO FIRMWARE)", has_fw ? C_TEXT : C_WARN, 1, w);
+        px_text(c, x, r.y + 34, px_state_of(u), px_state_col(u), 1, w);
+        snprintf(line, sizeof line, "%llu.%01llu S", (unsigned long long)(u->ms / 1000), (unsigned long long)(u->ms % 1000 / 100));
+        px_text(c, x, r.y + 48, line, C_TEXT, 1, w);
+        px_text(c, x, r.y + 62, "AC791N", C_DIM, 1, w);
+        px_box(c, (PxRect){r.x + 2, r.y + 92, r.w - 4, 44}, "SOUND");
+        px_meter(c, (PxRect){x, r.y + 104, w, 8}, u->level_l, C_OK);
+        px_meter(c, (PxRect){x, r.y + 118, w, 8}, u->level_r, C_OK);
+        px_box(c, (PxRect){r.x + 2, r.y + 144, r.w - 4, 74}, "KEYS");
+        px_keyboard(c, (PxRect){x, r.y + 156, w, 54}, u->down);
+        px_box(c, (PxRect){r.x + 2, r.y + 226, r.w - 4, 62}, "BUTTONS");
+        px_buttons(c, (PxRect){x, r.y + 238, w, 46}, 4, u->down);
+        px_box(c, (PxRect){r.x + 2, r.y + 296, r.w - 4, 120}, "LOG");
+        px_wrap(c, x, r.y + 308, u->msg ? u->msg : "", px_style(u->msg_style), w, 10);
+    }
+}
+
+static inline void px_panel_files(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96];
+    int x = r.x + 10, w = r.w - 20, per = narrow ? 20 : 24;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, 28}, "FOLDER");
+    px_text(c, x, r.y + 20, u->file_dir, C_DIM, 1, w);
+    int page = 0, pages;
+    PxRect lr = {x, r.y + 52, w, per * 12};
+    px_box(c, (PxRect){r.x + 4, r.y + 42, r.w - 8, per * 12 + 28}, NULL);
+    pages = px_list(c, lr, u->files, u->nfiles, u->file_sel, per, &page);
+    snprintf(line, sizeof line, "PAGE %d/%d", page + 1, pages);
+    px_text(c, r.x + r.w - 12 - px_text_w(line, 1), r.y + 39, line, C_HEAD, 1, 0);
+    if (u->nfiles <= 1) px_wrap(c, x, r.y + 60, "NO FIRMWARE FILES (.FWSC OR .BIN) HERE. COPY YOURS TO THE FOLDER, THEN X TO RESCAN.", C_WARN, w, 4);
+    if (u->bundled_dir[0] || u->pack_dir[0]) px_text(c, x, r.y + 52 + per * 12 + 4, narrow ? "B BUNDLED  G GPL PACK" : (u->pack_dir[0] ? "B = BUNDLED (MIT)   G = THE GPL PACK (SOURCE INCLUDED)" : "B = BUNDLED WITH THE APP: SEE NOTICE"), C_DIM, 1, w);
+    int by = r.y + 42 + per * 12 + 34;
+    px_box(c, (PxRect){r.x + 4, by, r.w - 8, 56}, "LOADED");
+    int has_fw = u->fw_name && u->fw_name[0];
+    px_text(c, x, by + 12, has_fw ? u->fw_name : "(NONE)", has_fw ? C_TEXT : C_WARN, 1, w);
+    snprintf(line, sizeof line, "BOARD %s", u->fw_board && u->fw_board[0] ? u->fw_board : "-");
+    px_text(c, x, by + 24, line, C_DIM, 1, w);
+    px_wrap(c, x, by + 36, u->msg ? u->msg : "", px_style(u->msg_style), w, 2);
+}
+
+static inline void px_regs(uint32_t *c, int x, int y, const PxCpu *p, int cols, int colw) {
+    char line[48];
+    for (int i = 0; i < 16; i++) {
+        snprintf(line, sizeof line, "R%-2d %08X", i, (unsigned)p->regs[i]);
+        px_text(c, x + (i / (16 / cols)) * colw, y + (i % (16 / cols)) * 11, line, C_TEXT, 1, 0);
+    }
+}
+
+static inline void px_panel_cpu(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96];
+    int x = r.x + 10, w = r.w - 20;
+    snprintf(line, sizeof line, "CORE %d", u->cpu_sel);
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, narrow ? 262 : 168}, line);
+    if (u->cpu_sel >= u->ncpu) {
+        px_text(c, x, r.y + 20, u->ncpu ? "NOT RELEASED BY THE FIRMWARE YET" : "NO FIRMWARE", C_WARN, 1, w);
+    } else {
+        const PxCpu *p = &u->cpu[u->cpu_sel];
+        int ly = r.y + 20;
+        if (narrow) {
+            snprintf(line, sizeof line, "PC %08X", (unsigned)p->pc); px_text(c, x, ly, line, C_TEXT, 1, w); ly += 11;
+            snprintf(line, sizeof line, "SP %08X", (unsigned)p->sp); px_text(c, x, ly, line, C_TEXT, 1, w); ly += 11;
+        } else {
+            snprintf(line, sizeof line, "PC %08X  SP %08X", (unsigned)p->pc, (unsigned)p->sp); px_text(c, x, ly, line, C_TEXT, 1, w); ly += 12;
+        }
+        snprintf(line, sizeof line, "FLAGS %08X", (unsigned)p->flags);
+        px_text(c, x, ly, line, C_TEXT, 1, w); ly += narrow ? 11 : 12;
+        snprintf(line, sizeof line, "INSNS %llu", (unsigned long long)p->insns);
+        px_text(c, x, ly, line, C_TEXT, 1, w); ly += narrow ? 14 : 18;
+        if (narrow) px_regs(c, x, ly, p, 1, 0);
+        else px_regs(c, x, ly, p, 2, w / 2);
+    }
+    int sy = r.y + (narrow ? 280 : 184);
+    px_box(c, (PxRect){r.x + 4, sy, r.w - 8, narrow ? 74 : 62}, "SPEED");
+    snprintf(line, sizeof line, "%.1f M INSNS/S", u->ips / 1e6);
+    px_text(c, x, sy + 12, line, C_TEXT, 1, w);
+    snprintf(line, sizeof line, "%.2fX REAL TIME", u->speed);
+    px_text(c, x, sy + 24, line, u->speed >= 1.0 || !u->ncpu ? C_OK : C_WARN, 1, w);
+    if (narrow) {
+        snprintf(line, sizeof line, "JIT %s", u->jit ? "ON" : "OFF");
+        px_text(c, x, sy + 36, line, C_TEXT, 1, w);
+        px_text(c, x, sy + 48, px_state_of(u), px_state_col(u), 1, w);
+    } else {
+        snprintf(line, sizeof line, "JIT %s  STATE %s", u->jit ? "ON" : "OFF", px_state_of(u));
+        px_text(c, x, sy + 36, line, px_state_col(u), 1, w);
+    }
+}
+
+static inline void px_panel_memory(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96];
+    int x = r.x + 10, w = r.w - 20, per = narrow ? 4 : 8, rows = (narrow ? PX_MEM_BYTES / 2 : PX_MEM_BYTES) / per;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, narrow ? 52 : 40}, PX_REGION_NAMES[u->mem_region % 3]);
+    if (narrow) {
+        snprintf(line, sizeof line, "CHIP %08X", (unsigned)u->mem_base); px_text(c, x, r.y + 20, line, C_TEXT, 1, w);
+        snprintf(line, sizeof line, "OFFSET %06X", (unsigned)u->mem_off); px_text(c, x, r.y + 32, line, C_TEXT, 1, w);
+        snprintf(line, sizeof line, "SIZE %X", (unsigned)u->mem_size); px_text(c, x, r.y + 44, line, C_DIM, 1, w);
+    } else {
+        snprintf(line, sizeof line, "CHIP %08X  OFFSET %06X", (unsigned)u->mem_base, (unsigned)u->mem_off);
+        px_text(c, x, r.y + 20, line, C_TEXT, 1, w);
+        snprintf(line, sizeof line, "SIZE %X BYTES", (unsigned)u->mem_size);
+        px_text(c, x, r.y + 32, line, C_DIM, 1, w);
+    }
+    int top = narrow ? 68 : 56;
+    px_box(c, (PxRect){r.x + 4, r.y + top, r.w - 8, rows * 11 + 14}, NULL);
+    for (int row = 0; row < rows; row++) {
+        int o = row * per;
+        if (o >= u->mem_n) break;
+        char *p = line;
+        { uint32_t ad = u->mem_base + u->mem_off + (uint32_t)o; p += narrow ? snprintf(p, 24, "%06X ", (unsigned)(ad & 0xFFFFFF)) : snprintf(p, 24, "%08X ", (unsigned)ad); }
+        for (int i = 0; i < per; i++) p += o + i < u->mem_n ? snprintf(p, 4, "%02X ", u->mem[o + i]) : snprintf(p, 4, "   ");
+        for (int i = 0; i < per; i++) { int b = o + i < u->mem_n ? u->mem[o + i] : ' '; *p++ = b >= 32 && b < 127 ? (char)b : '.'; }
+        *p = 0;
+        px_text(c, x, r.y + top + 7 + row * 11, line, u->mem_n ? C_TEXT : C_DIM, 1, w);
+    }
+    if (!u->mem_n) px_text(c, x, r.y + top + 7, "NOTHING TO SHOW", C_WARN, 1, w);
+}
+
+/* The console's text in lines of `cols` characters, the last `rows` of them. */
+static inline void px_panel_console(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    int cols = (r.w - 24) / PX_CELL_W, rows = (r.h - 40) / 10;
+    enum { MAXL = 200 };
+    static char lines[MAXL][80];
+    int n = 0, col = 0;
+    if (cols > 78) cols = 78;
+    lines[0][0] = 0;
+    for (int i = 0; i < u->console_n; i++) {
+        unsigned char ch = (unsigned char)u->console[i];
+        if (ch == '\r') continue;
+        if (ch == '\n' || col >= cols) {
+            lines[n][col] = 0;
+            if (n < MAXL - 1) n++; else { memmove(lines[0], lines[1], sizeof lines - sizeof lines[0]); }
+            col = 0; lines[n][0] = 0;
+            if (ch == '\n') continue;
+        }
+        lines[n][col++] = ch >= 32 && ch < 127 ? (char)ch : '.';
+    }
+    lines[n][col] = 0;
+    n++;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, r.h - 24}, "FIRMWARE CONSOLE");
+    if (!u->console_n) { px_text(c, r.x + 12, r.y + 20, "NOTHING WRITTEN YET", C_DIM, 1, r.w - 24); return; }
+    int first = n > rows ? n - rows : 0;
+    for (int i = first; i < n; i++) px_text(c, r.x + 12, r.y + 20 + (i - first) * 10, lines[i], C_TEXT, 1, r.w - 24);
+    (void)narrow;
+}
+
+static inline void px_panel_midi(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96], nn[8];
+    int x = r.x + 10, w = r.w - 20;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, 64}, "SEND");
+    snprintf(line, sizeof line, "CHANNEL  %d", u->midi_chan + 1);
+    px_text(c, x, r.y + 20, line, C_TEXT, 1, w);
+    snprintf(line, sizeof line, "NOTE     %d  %s", u->midi_note, px_note_name(u->midi_note, nn));
+    px_text(c, x, r.y + 32, line, u->midi_held ? C_KEYDN : C_TEXT, 1, w);
+    snprintf(line, sizeof line, "VELOCITY %d", u->midi_vel);
+    px_text(c, x, r.y + 44, line, C_TEXT, 1, w);
+    px_text(c, x, r.y + 56, u->midi_held ? "NOTE ON" : "READY", u->midi_held ? C_OK : C_DIM, 1, w);
+    px_box(c, (PxRect){r.x + 4, r.y + 80, r.w - 8, 50}, "THE JACK");
+    snprintf(line, sizeof line, "QUEUED   %llu", (unsigned long long)u->midi_queued);
+    px_text(c, x, r.y + 92, line, C_TEXT, 1, w);
+    snprintf(line, sizeof line, "DROPPED  %llu", (unsigned long long)u->midi_dropped);
+    px_text(c, x, r.y + 104, line, u->midi_dropped ? C_WARN : C_TEXT, 1, w);
+    px_text(c, x, r.y + 116, "(NO RECEIVER SET UP = DROPPED)", C_DIM, 1, w);
+    int per = narrow ? 8 : 16;
+    px_box(c, (PxRect){r.x + 4, r.y + 138, r.w - 8, 90}, "SENT BYTES");
+    for (int i = 0; i < u->midi_log_n; i++) {
+        snprintf(line, sizeof line, "%02X", u->midi_log[i]);
+        px_text(c, x + (i % per) * 18, r.y + 150 + (i / per) * 11, line, C_TEXT, 1, 0);
+    }
+    if (!u->midi_log_n) px_text(c, x, r.y + 150, "NOTHING SENT YET", C_DIM, 1, w);
+    px_box(c, (PxRect){r.x + 4, r.y + 236, r.w - 8, 40}, "FROM THE FM-1");
+    px_wrap(c, x, r.y + 248, "ITS MIDI OUT IS NOT EXPOSED BY THE CORE YET", C_DIM, w, 2);
+}
+
+static inline void px_panel_sound(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96];
+    int x = r.x + 10, w = r.w - 20;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, 104}, "SCOPE");
+    PxRect sc = {x, r.y + 18, w, 88};
+    px_rect(c, sc, C_BG);
+    px_rect(c, (PxRect){sc.x, sc.y + sc.h / 2, sc.w, 1}, C_FRAME);
+    int prev = sc.h / 2;
+    for (int i = 0; i < sc.w; i++) {
+        int v = u->scope[i * PX_SCOPE / sc.w], y = sc.h / 2 - v * (sc.h / 2 - 1) / 32768;
+        int lo = y < prev ? y : prev, hi = y < prev ? prev : y;
+        px_rect(c, (PxRect){sc.x + i, sc.y + lo, 1, hi - lo + 1}, C_OK);
+        prev = y;
+    }
+    px_box(c, (PxRect){r.x + 4, r.y + 120, r.w - 8, 52}, "LEVEL AND PEAK");
+    px_text(c, x, r.y + 132, "L", C_DIM, 1, 0);
+    px_meter(c, (PxRect){x + 12, r.y + 131, w - 12, 8}, u->level_l, C_OK);
+    px_rect(c, (PxRect){x + 12 + (w - 14) * (u->peak_l > 100 ? 100 : u->peak_l) / 100, r.y + 131, 2, 8}, C_WARN);
+    px_text(c, x, r.y + 148, "R", C_DIM, 1, 0);
+    px_meter(c, (PxRect){x + 12, r.y + 147, w - 12, 8}, u->level_r, C_OK);
+    px_rect(c, (PxRect){x + 12 + (w - 14) * (u->peak_r > 100 ? 100 : u->peak_r) / 100, r.y + 147, 2, 8}, C_WARN);
+    px_box(c, (PxRect){r.x + 4, r.y + 180, r.w - 8, 62}, "RECORDER");
+    snprintf(line, sizeof line, "%s", u->rec_on ? "RECORDING" : "STOPPED");
+    px_text(c, x, r.y + 192, line, u->rec_on ? C_ERR : C_DIM, 1, w);
+    unsigned long long f = (unsigned long long)u->rec_frames;
+    snprintf(line, sizeof line, "%llu:%02llu.%01llu", f / 44100 / 60, f / 44100 % 60, f * 10 / 44100 % 10);
+    px_text(c, x, r.y + 204, line, C_TEXT, 1, w);
+    px_text(c, x, r.y + 216, u->rec_file[0] ? u->rec_file : "(NO FILE YET)", C_DIM, 1, w);
+    px_box(c, (PxRect){r.x + 4, r.y + 250, r.w - 8, 56}, "LOG");
+    px_wrap(c, x, r.y + 262, u->msg ? u->msg : "", px_style(u->msg_style), w, narrow ? 4 : 4);
+}
+
+static inline void px_panel_tools(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    int x = r.x + 10, w = r.w - 20;
+    int page = 0;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, u->ntools * 12 + 14}, "SANDBOX TOOLS");
+    px_list(c, (PxRect){x, r.y + 20, w, u->ntools * 12}, u->tools, u->ntools, u->tool_sel, PX_MAX_TOOLS, &page);
+    int ly = r.y + u->ntools * 12 + 30;
+    px_box(c, (PxRect){r.x + 4, ly, r.w - 8, 70}, "LOG");
+    px_wrap(c, x, ly + 12, u->msg ? u->msg : "", px_style(u->msg_style), w, narrow ? 5 : 5);
+}
+
+/* A question over the panel: A is yes, B is no. */
+static inline void px_confirm(uint32_t *c, PxRect r, const char *q) {
+    PxRect b = {r.x + 8, r.y + r.h / 2 - 40, r.w - 16, 80};
+    px_rect(c, b, C_BG);
+    px_frame(c, b, C_WARN);
+    px_wrap(c, b.x + 8, b.y + 10, q, C_TEXT, b.w - 16, 4);
+    px_text(c, b.x + 8, b.y + b.h - 14, "A  YES      B  NO", C_HEAD, 1, b.w - 16);
+}
+
+/* Draws the whole window into c (PX_W x PX_H ARGB): the FM-1's screen first, then the carousel and the current panel around it. */
+static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
+    for (int i = 0; i < PX_W * PX_H; i++) c[i] = C_BG;
+    /* the FM-1's screen, pixel accurate: 1x copies, 2x makes each pixel a 2x2 block (no smoothing) */
+    int s = px_scale(mode);
+    for (int y = 0; y < FM_H; y++)
+        for (int x = 0; x < FM_W; x++) {
+            uint32_t v = 0xFF000000u | (u->fb_valid ? u->fb[y * FM_W + x] : 0);
+            for (int dy = 0; dy < s; dy++)
+                for (int dx = 0; dx < s; dx++) c[(y * s + dy) * PX_W + x * s + dx] = v;
+        }
+    if (!u->fb_valid) px_text(c, 8, 8, "NO SIGNAL", C_DIM, 1, 0);
+    int narrow = mode == MODE_ZOOMED, p = u->panel >= 0 && u->panel < PANEL_COUNT ? u->panel : 0;
+    PxRect pr[2], cr = px_content_rect(mode);
+    px_panel_rects(mode, pr);
+    px_rect(c, pr[0], C_BG);
+    px_carousel(c, mode, p);
+    switch (p) {
+    case PANEL_MACHINE: px_panel_machine(c, cr, u, narrow); break;
+    case PANEL_FILES: px_panel_files(c, cr, u, narrow); break;
+    case PANEL_CPU: px_panel_cpu(c, cr, u, narrow); break;
+    case PANEL_MEMORY: px_panel_memory(c, cr, u, narrow); break;
+    case PANEL_CONSOLE: px_panel_console(c, cr, u, narrow); break;
+    case PANEL_MIDI: px_panel_midi(c, cr, u, narrow); break;
+    case PANEL_SOUND: px_panel_sound(c, cr, u, narrow); break;
+    default: px_panel_tools(c, cr, u, narrow); break;
+    }
+    if (u->confirm[0]) px_confirm(c, cr, u->confirm);
+    /* the foot of the panel */
+    px_hint(c, pr[0], narrow ? "L1 R1 PANELS  FN 1X" : "L1 R1 PANELS   START PAUSE   FN ZOOM 2X");
+    if (!narrow) {
+        PxRect b = pr[1];
+        px_box(c, (PxRect){b.x + 4, b.y + 8, b.w - 8, b.h - 16}, PX_PANEL_NAMES[p]);
+        for (int i = 0; i < 9 && PX_HINTS[p][i][0]; i++)
+            px_text(c, b.x + 12, b.y + 22 + i * 14, PX_HINTS[p][i], i == 0 ? C_HEAD : C_DIM, 1, b.w - 24);
+        px_text(c, b.x + 12, b.y + b.h - 30, "B ESC LEAVES A QUESTION", C_DIM, 1, b.w - 24);
+    }
+}
+
+/* ---- contrast, for the self-test ---------------------------------------------------------------------------------------- */
+static inline double px_lum(uint32_t c) {
+    double v[3] = {(c >> 16 & 255) / 255.0, (c >> 8 & 255) / 255.0, (c & 255) / 255.0}, w[3] = {0.2126, 0.7152, 0.0722}, s = 0;
+    for (int i = 0; i < 3; i++) s += w[i] * (v[i] <= 0.03928 ? v[i] / 12.92 : __builtin_pow((v[i] + 0.055) / 1.055, 2.4));
+    return s;
+}
+static inline double px_contrast(uint32_t a, uint32_t b) {
+    double la = px_lum(a), lb = px_lum(b);
+    return (la > lb ? la + 0.05 : lb + 0.05) / (la > lb ? lb + 0.05 : la + 0.05);
+}
+
+#endif

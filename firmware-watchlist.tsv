@@ -1,0 +1,9 @@
+# Firmware that is NOT bundled but worth watching, and why (scripts/check-firmware-updates.py). Columns: name, kind (github | page), target, seen, why.
+# "seen" is the release tag (github) or the digest of the page's licence-bearing lines (page) the maintainer last read; --write-seen updates it after a review.
+# Bundled firmware is not listed here: it is checked from the manifests.
+name	kind	target	seen	why
+Shrub (Xfer Records)	page	https://shrub.audio	49382119006747b4	Closed: "copyright 2026 Xfer Inc. All rights reserved", free beta, no source and no redistribution grant (2026-11-16). Ask steve@xferrecords.com for permission to redistribute, or watch for an open licence.
+SLOOP	github	https://github.com/isod89/sloop-fm1	v2.8.5	GPL-3.0 but its source carries a reserved icon atlas (terms unpublished): bundle once it drops it.
+Melodee	github	https://github.com/keremimo/melodee	v1.6.1	GPL-3.0 but embeds Casio CZ-1 and Sequential Prophet-5/10 factory data: bundle once that is dropped or licensed.
+X0X	github	https://github.com/charlesvestal/fm1-x0x	v1.2.2	GPL-3.0 with TR-909 hat/ride/crash samples via a third-party project and a break generator used by permission: maintainer's call.
+Quod	github	https://github.com/tulpasoftworks/quod	v0.3	MIT repository, GPL-3.0-only firmware: would fit the copyleft pack.

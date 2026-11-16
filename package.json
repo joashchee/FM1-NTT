@@ -1,0 +1,12 @@
+{
+  "name": "fm1-ntt",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "FM1-NTT web shell (PWA). No dependencies: Node's standard library only.",
+  "scripts": {
+    "icons": "node scripts/build-icons.ts",
+    "serve": "node web/server.ts",
+    "test": "node --test web/"
+  }
+}

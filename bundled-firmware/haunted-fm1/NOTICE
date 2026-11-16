@@ -1,0 +1,11 @@
+Haunted FM-1 v0.1 (five firmware packages), redistributed unmodified with FM1-NTT.
+
+Copyright (c) 2026 David Ryan. MIT (LICENSE).
+
+The packages contain, as separate licensed parts (SOURCES.md says which and where the source is):
+  fm1-base, Copyright Charles Vestal, and felucca-bsp, Copyright (C) 2026 Leo Kuroshita, Hügelton Instruments: MPL-2.0 (LICENSE-MPL-2.0.txt).
+  JieLi AC79 SDK files, Copyright (c) 2024-2026 Zhuhai Jieli Technology Co., Ltd.: Apache-2.0 (LICENSE-Apache-2.0.txt).
+  Barlow Semi Condensed, Copyright 2017 The Barlow Project Authors: SIL OFL 1.1 (LICENSE-OFL-Barlow.txt).
+  Terminus Font, Copyright (C) 2020 Dimitar Toshkov Zhekov: SIL OFL 1.1 (LICENSE-OFL-Terminus.txt).
+
+M-VAVE and FM-1 are trademarks of their owners. This is not affiliated with M-VAVE.

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+# FM1-NTT: only the three crates it vendors are members (upstream also lists fm1-gdbstub, fm1-emu, fm1-live and fm1-web;
+# the plugin is a workspace of its own upstream). Nothing else is changed in this file or in the crates.
+members = [
+    "crates/fm1-isa",
+    "crates/fm1-core",
+    "crates/fm1-soc",
+]
+
+[workspace.package]
+# the release's version (a tag v<version> releases it; crates/fm1-plugin keeps the same)
+version = "0.5.1"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = true

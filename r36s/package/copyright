@@ -1,0 +1,44 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: FM1-NTT
+Source: https://github.com/joashchee/FM1-NTT
+
+Files: *
+Copyright: 2026 ANSI Apps
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
+ (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge,
+ publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do
+ so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+ FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Files: core/vendor/fm1-emu/*
+Copyright: 2026 Joakim Eriksson
+License: MIT
+ See LICENSE.fm1-emu in this folder (the upstream licence, unchanged) and NOTICE.
+
+Files: usr/share/fm1ntt/firmware/haunted-fm1/*
+Copyright: 2026 David Ryan (the firmwares and shared libraries)
+License: MIT
+ See /usr/share/doc/fm1ntt/bundled/haunted-fm1/LICENSE and SOURCES.md. Unmodified copies of https://github.com/davidpryan/haunted-fm1 v0.1.
+
+Files: the fm1-base and felucca-bsp platform code inside those packages
+Copyright: Charles Vestal; 2026 Leo Kuroshita, Hügelton Instruments
+License: MPL-2.0
+ Source: https://github.com/charlesvestal/fm1-base at e35f7e2c6904ff1a3eed10035474c8cf089c0b88 and its submodule felucca-bsp. Text:
+ /usr/share/doc/fm1ntt/bundled/haunted-fm1/LICENSE-MPL-2.0.txt
+
+Files: the JieLi AC79 SDK files inside those packages
+Copyright: Zhuhai Jieli Technology Co., Ltd.
+License: Apache-2.0
+ Text: /usr/share/doc/fm1ntt/bundled/haunted-fm1/LICENSE-Apache-2.0.txt
+
+Files: the Barlow Semi Condensed and Terminus fonts rendered into those packages
+Copyright: 2017 The Barlow Project Authors; 2020 Dimitar Toshkov Zhekov
+License: OFL-1.1
+ Texts: /usr/share/doc/fm1ntt/bundled/haunted-fm1/LICENSE-OFL-*.txt

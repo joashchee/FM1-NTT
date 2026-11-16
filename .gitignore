@@ -1,0 +1,28 @@
+# OS / editor
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Build output: rebuilt by scripts, never committed
+build/
+target/
+dist/
+*.deb
+
+# Firmware images are the user's own and never committed, except the permissively licensed ones in bundled-firmware/ that its
+# MANIFEST.tsv lists (scripts/check-bundled.py enforces this; docs/FIRMWARE.md). The GPL pack is a SEPARATE repository, FM1-NTT Firmware Pack:
+# until it is moved out beside this one it sits here, ignored.
+/FM1-NTT-Firmware-Pack/
+*.fwsc
+*.fm1save
+!bundled-firmware/**/*.fwsc
+firmware/
+local_firmware*/
+
+# Claude Code local state
+# holds this machine's paths (the Docker socket): never public
+.claude/settings.json
+.claude/settings.local.json
+.claude/.cc-writes/
+CLAUDE.local.md

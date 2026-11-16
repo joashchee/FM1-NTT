@@ -1,0 +1,19 @@
+[package]
+name = "fm1ntt-core"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "FM1-NTT core: a sandbox for FM-1 firmware. Wraps the vendored fm1-emu crates (MIT) in a deterministic machine and a C API."
+
+[lib]
+name = "fm1ntt"
+crate-type = ["rlib", "staticlib"]
+
+# The only dependencies are the three vendored crates (vendor/fm1-emu/VENDORED.md): MIT, no dependencies of their own.
+[dependencies]
+fm1-core = { path = "vendor/fm1-emu/crates/fm1-core" }
+fm1-soc = { path = "vendor/fm1-emu/crates/fm1-soc" }
+
+[profile.release]
+opt-level = 3
+panic = "abort"   # across the C API a panic must never unwind into C
