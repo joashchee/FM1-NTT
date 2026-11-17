@@ -54,7 +54,7 @@ r36s/build-deb.sh             # build/pkg/FM1-NTT.deb for the R36S (Docker)
 | Select / Start | OCT- / OCT+ | MONO / POLY | key down / up (the app's own key) | |
 | Fn | next panel | next scale | next panel | next panel |
 
-OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys: F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is assumed from the manual's list, not measured). SEL has no matrix button, so it says so and presses nothing. Scales: major, minor,
+OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys (they are functions only in EDIT mode, as on the unit: R2+d-pad left is EDIT; otherwise they sound as notes): F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is assumed from the manual's list, not measured). SEL has no matrix button, so it says so and presses nothing. Scales: major, minor,
 dorian, mixolydian, both pentatonics, chromatic; the key moves them from C (shown as the key's name). On a keyboard: Z S X D C V ... and Q 2 W 3 E R ... play the 27 keys, F2-F12 and [ ] are the buttons, arrows
 and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return is A, Backspace is B, Insert and Delete are X and Y, Esc leaves.
 `docs/ARCHITECTURE.md` section 4 says what each panel does.

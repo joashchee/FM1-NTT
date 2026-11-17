@@ -17,6 +17,23 @@ Researched 2026-11-16 from public pages; **nothing here was run, and none of it 
 - **The front panel** (from `fm1-emu`'s `fm1-live/src/panel.rs`, read as the MIT source it is): a matrix of 41 ids, 14 buttons (0 OCT-, 1 OCT+,
   2 FX, 3 SCL, 4 ENV, 5 LFO, 6 EDIT, 7 GLO, 8 HOME, 9 SAVE, 10 ARP, 11 SEQ, 12 PLAY, 13 REC) and 27 note keys F3 to G5 (ids 14-40);
   7 encoders (SELECT, ALGORITHM, KNOB1-4, PRESETS) and one pot (ADC channel 4); the LCD is 240 x 240 RGB565.
+- **EDIT mode, from the FM-1 manual (p. 7; the maintainer pasted it 2026-11-17; not verified on a unit):** six operators OP1-OP6, each a sine
+  oscillator that is a carrier or a modulator; the ALGORITHM encoder sets how they connect. EDIT turns the bottom keyboard into function
+  selectors (the selected one's LED stays lit); pressing EDIT again returns to the main display.
+  - **OP1-OP6:** a short press opens that operator's parameter page (the last page shown is kept per operator); a long press mutes it
+    (restored when the voice changes). **PIT:** the pitch envelope. **MONO / POLY:** one note, last-note priority / up to 12 voices.
+  - **GLO:** algorithm, feedback, oscillator sync, transpose, voice template, rename and copy. *Init voice:* KNOB 1 clockwise resets every
+    parameter. *Rename:* KNOB 2 clockwise opens the panel (OP1-OP5 pick or delete a character, KNOB 3 chooses it, SELECT confirms; KNOB 2
+    counterclockwise cancels). *Copy voice:* KNOB 3 clockwise opens the voice panel (counterclockwise leaves), KNOB 4 picks the source,
+    SELECT confirms overwriting the target.
+  - **Pages:** the SELECT knob turns through a section's pages (at most 6 per operator); KNOB 1-4 set the parameters.
+- **Combo function keys (manual 4.2, pasted 2026-11-17):** some keys carry a secondary
+  label, **active only in Edit mode**; outside it the same key does its primary job (the ten black keys are ordinary notes). In Edit mode
+  all 8 OP/PIT/GLO keys blink (selectable) and the chosen one is solid; MONO/POLY show the mode (active solid, inactive blinking).
+  The table: OP1-OP6 select that operator for editing (LED solid when selected); PIT the pitch envelope; GLO the "Globe" (global) parameters,
+  listed here as algorithm, feedback, oscillator sync and transpose (section 3's EDIT text adds voice template, rename and copy); MONO one
+  note at a time; POLY up to 12.
+  The LED states are the firmware's: the core does not expose LEDs, so the host cannot draw them yet.
 - **Unknown, to find out:** the flash chip revisions that matter (the kit says newer units differ; `fm1-emu` can model the Puya P25Q80 and
   the UC25HQ80), and the sound engine's interface (closed binary on stock firmware).
 
