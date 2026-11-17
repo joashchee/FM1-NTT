@@ -306,7 +306,12 @@ fn main() -> ExitCode {
             "kvs" => for op in 0..6 { vbytes[op * 17 + 13] = 0; },
             "rs" => for op in 0..6 { vbytes[op * 17 + 12] &= !7; },
             "ls" => for op in 0..6 { vbytes[op * 17 + 9] = 0; vbytes[op * 17 + 10] = 0; },
-            x => { eprintln!("no part {x} (lfo peg fb det kvs rs ls)"); return ExitCode::from(2) }
+            // "only3": operator 3 alone (the others silent); "ol-12": every output level 12 lower; "coarse2=1": operator 2's coarse ratio set to 1; "fine1=0": operator 1's fine to 0
+            x if x.starts_with("only") => { let k: usize = x[4..].parse().unwrap_or(0); if !(1..=6).contains(&k) { eprintln!("only1 to only6"); return ExitCode::from(2) } for op in 1..=6 { if op != k { vbytes[(6 - op) * 17 + 14] = 0; } } }
+            x if x.starts_with("ol-") => { let d: u8 = x[3..].parse().unwrap_or(0); for op in 0..6 { let o = &mut vbytes[op * 17 + 14]; *o = o.saturating_sub(d); } }
+            x if x.starts_with("coarse") => { let (k, v) = x[6..].split_once('=').unwrap_or(("0", "0")); let (k, v): (usize, u8) = (k.parse().unwrap_or(0), v.parse().unwrap_or(0)); if !(1..=6).contains(&k) { eprintln!("coarseK=V"); return ExitCode::from(2) } let o = &mut vbytes[(6 - k) * 17 + 15]; *o = (*o & 1) | (v.min(31) << 1); }
+            x if x.starts_with("fine") => { let (k, v) = x[4..].split_once('=').unwrap_or(("0", "0")); let (k, v): (usize, u8) = (k.parse().unwrap_or(0), v.parse().unwrap_or(0)); if !(1..=6).contains(&k) { eprintln!("fineK=V"); return ExitCode::from(2) } vbytes[(6 - k) * 17 + 16] = v.min(99); }
+            x => { eprintln!("no part {x} (lfo peg fb det kvs rs ls only1..6 ol-N coarseK=V fineK=V)"); return ExitCode::from(2) }
         }
     }
     // experiments on the fm6 side only: the voice's own pitch modulation (LFO depth and sensitivity) and its pitch envelope made neutral

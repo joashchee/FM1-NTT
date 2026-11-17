@@ -4,7 +4,7 @@
 #   FM6_FIRMWARE=jangada|skiff scripts/fm6-compare.sh      which firmware's way of reaching its FM6 presets (default felucca)
 #   FM6_TUNING=felucca scripts/fm6-compare.sh              fm6 tuned as Felucca measured: fm6::Tuning, docs/FM6.md; default msfa's. The PAD preset's DTUN macro (30) is set
 # Part 2 of each is its FM6 engine (the ALGORITHM encoder turns to it). Its presets F1..F8 are the first eight voices of the firmware's bank (Felucca lists five of
-# them, Jangada and Skiff eight), and the effects (chorus, delay, reverb) are turned to 0 so only the engine is heard. Needs the Firmware Pack beside this repository
+# them, Jangada and Skiff eight), and the effects (distortion, chorus, delay, reverb) are turned to 0 so only the engine is heard (the F7 preset has 8% distortion, which is 1 to 3 dB of level). Needs the Firmware Pack beside this repository
 # or a path. The firmware is read as data by the emulator and nothing of it is copied.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,7 +20,7 @@ FW="${1:-$DEFAULT}"
 export CARGO_TARGET_DIR="$REPO/build/target"
 cargo build -q --release --manifest-path "$REPO/core/Cargo.toml" --example fm6cmp
 X="$CARGO_TARGET_DIR/release/examples/fm6cmp"
-FX=(--btn FX --enc KNOB2:-64 --enc KNOB3:-64 --enc KNOB4:-64 --btn HOME)
+FX=(--btn FX --enc KNOB1:-64 --enc KNOB2:-64 --enc KNOB3:-64 --enc KNOB4:-64 --btn HOME)   # distortion, chorus, delay, reverb: all four to 0
 for ((p = 0; p < PRESETS; p++)); do
     case "${FM6_FIRMWARE:-felucca}" in
         # Jangada's FM6 presets are 55 single clicks down its list from where part 2 starts (a big turn is not taken one for one)

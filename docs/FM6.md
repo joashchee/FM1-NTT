@@ -102,15 +102,17 @@ no change. Over the five presets all three have (TINE EP, BELL, FM BASS, BRASS, 
 
 | | mean level spread, msfa tuning | with `Tuning::Felucca` | worst | level fm6 minus emulator | strongest partial |
 |---|---|---|---|---|---|
-| Felucca 1.8.2 | 7.6 dB | **0.8 dB** | 3.3 dB | +2.8 to +3.2 dB | within 0.1 cent |
-| Jangada 1.0.1 | 7.6 dB | **1.2 dB** | 5.6 dB (SOFT PAD, note 84) | +2.7 to +3.4 dB | within 0.1 cent |
-| Skiff 2.6 | 7.5 dB | **0.7 dB** | 2.9 dB | +2.8 to +3.2 dB | within 0.8 cent (GLASS BELL, note 36) |
+| Felucca 1.8.2 | 7.6 dB | **0.65 dB** | 2.5 dB | +2.8 to +3.2 dB | within 0.2 cent |
+| Jangada 1.0.1 | 7.6 dB | **1.0 dB** | 4.3 dB (SOFT PAD, note 84) | +2.6 to +3.3 dB | within 0.1 cent |
+| Skiff 2.6 | 7.5 dB | **0.65 dB** | 2.5 dB | +2.8 to +3.2 dB | within 0.7 cent (GLASS BELL, note 36) |
 
-**What they add, F6 to F8** (both firmwares list them; Felucca's list has five): NYLON PICK matches (level +2.6 to +2.8 dB, spread 0.3 to 1.6 dB). **WOOD BARS** matches over its audible note (the curves are within about 2 dB
-for 0.4 s): its "spread" of 70 dB is the decayed tail, where one engine is at -112 dB and the other at digital silence, so the metric means nothing for a voice that dies in half a second. **DRAWBARS differs and is
-unexplained**: the shape matches (spread 0.1 to 1.4 dB) but the emulator is **1.0 to 3.1 dB quieter than the usual 3 dB** (+4.0 dB at notes 60 and 84, +6.1 dB at note 36, the same in both firmwares), and
-stripping the LFO, pitch envelope, feedback, detune, velocity, rate and level scaling changes nothing. It has six carriers (algorithm 32), a 0.5 ratio and a 1.5 ratio, but a plain six-carrier test voice (ratios 1 to 6) gives
-the usual +3.0 dB, so it is not the count of carriers; at note 36 the partials fall 1.3 to 3.4 dB further the lower they are. Not chased.
+**What they add, F6 to F8** (both firmwares list them; Felucca's list has five): NYLON PICK matches (level +2.7 to +2.8 dB, spread 0.3 to 1.3 dB). **WOOD BARS** matches over its audible note (the curves are within about 2 dB
+for 0.4 s): its "spread" of 70 dB is the decayed tail, where one engine is at -112 dB and the other at digital silence, so the metric means nothing for a voice that dies in half a second. **DRAWBARS first looked
+1 to 3 dB too quiet in the emulator, and that was the effects, not the engine**: its preset (F7, "FM ORGAN") has **DIST 8%** on its FX page (SOFT, tone 0), and my effects-off recipe zeroed chorus, delay and reverb
+but not distortion. The same plain test voice written over F7 was 3.3 dB quieter at note 36 than over any other preset (+6.3 dB against +3.0), the loss shrinking with the note (+4.2 at 60, +4.1 at 84) and not
+depending on the voice's output level (a soft distortion with a tone control acts as a filter at low drive); with distortion at 0 it is **+3.0 dB at every note**, for the plain voice and for DRAWBARS. So every preset
+now matches at the same 3.0 dB. (The earlier six-carrier and single-operator tests all ran on presets with DIST 0, which is why none showed it.) **Lesson: effects off means distortion, chorus, delay and reverb**
+(`FX` page, knobs 1 to 4; `scripts/fm6-compare.sh` does all four), and other presets' FX pages should be looked at when a level is off.
 
 **Differences between the three, none in the engine:** the note-on latency (first sample over 0.002: Felucca 7 to 9 ms, Skiff 7 ms, **Jangada 16 ms**), and what the panel offers. Nothing else was found. Still the emulator, one note at a time,
 and not the stock firmware or a unit.
