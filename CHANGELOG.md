@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-17 (maintainer: "check if any of the r36s port optimization helps fm1tastik web deployment"): **`wasm-opt` tried on the web module and not adopted** (binaryen 133, `-O3` and `-Os`, Midnight, 6 emulated seconds, Node on an M1): raw 2,651,942 to 2,492,278 B (-6%), gzipped 747,248 to 760,341 B (+1.8%), JIT 3.22x to 3.23x (unchanged), interpreter 0.53x to 0.49x. The R36S work that does help the web is Worker-side pacing (`fm1ntt_pace` is already exported; recorded in `../fm1tastik/ROADMAP.md`). `web/build.sh`'s comment, `docs/FM1TASTIK.md` and `ROADMAP.md` no longer say it is untested. Not tried in Safari or on a phone.
 - 2026-11-17 (maintainer: "i've moved fm1tastik out"): **fm1tastik now lives at `../fm1tastik`** (`git init` done, no commit yet); the `/fm1tastik/` line is gone from `.gitignore` and the roadmaps point to the new place.
 
 - 2026-11-17 (maintainer: "refresh all roadmaps"): **the three roadmaps brought up to date** (this one, the Firmware Pack's, fm1tastik's): the repository and the pack's move are recorded as done, fm1tastik Phase 1 as live, Skiff as uncommitted in the pack, stale "nothing is built or deployed" lines fixed.

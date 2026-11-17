@@ -5,7 +5,7 @@
 # Both are build output (gitignored). The page loads build-info.json (no-cache), then the hashed file, and checks the hash (fm1ntt.js: loadBuild).
 #   web/build.sh
 # Needs: cargo and the wasm32 target (rustup target add wasm32-unknown-unknown), and node (to check the module's imports and exports).
-# wasm-opt (binaryen) is not used: it was not installed where this was written, so size and speed with it are untested.
+# wasm-opt (binaryen 133) is deliberately not used: tried 2026-11-17 on one firmware (-O3, -Os): raw -6%, gzipped +1.8%, JIT speed unchanged, interpreter -8% (docs/PERFORMANCE.md).
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PUB="$REPO/web/public"
