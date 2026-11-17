@@ -14,13 +14,14 @@ die() { echo "web/build.sh: $*" >&2; exit 1; }
 command -v cargo >/dev/null || die "cargo is not installed"
 command -v node >/dev/null || die "node is not installed (it checks the module's imports and exports)"
 libdir="$(rustc --print target-libdir --target wasm32-unknown-unknown 2>/dev/null || true)"
-[ -n "$libdir" ] && [ -d "$libdir" ] || die "the wasm32 target is not installed: rustup target add wasm32-unknown-unknown"
+[ -n "$libdir" ] || die "the wasm32 target is not installed: rustup target add wasm32-unknown-unknown"
+[ -d "$libdir" ] || die "the wasm32 target is not installed: rustup target add wasm32-unknown-unknown"
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 echo "== building the core for wasm32"
 # cd into the crate: its .cargo/config.toml (export and grow the function table) is found from the working directory
-(cd "$REPO/web/wasm" && CARGO_TARGET_DIR="$REPO/build/web-wasm" cargo build --release --locked --target wasm32-unknown-unknown -q 2>&1 | grep -E "^(error|warning: unused)" -A8 || true)
+(cd "$REPO/web/wasm" || exit 1; CARGO_TARGET_DIR="$REPO/build/web-wasm" cargo build --release --locked --target wasm32-unknown-unknown -q 2>&1 | grep -E "^(error|warning: unused)" -A8 || true)
 built="$REPO/build/web-wasm/wasm32-unknown-unknown/release/fm1ntt_web.wasm"
 [ -f "$built" ] || die "the build produced no module (run it without -q to see why: cd web/wasm && cargo build --release --target wasm32-unknown-unknown)"
 
