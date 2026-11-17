@@ -177,6 +177,24 @@ pub unsafe extern "C" fn fm1ntt_jit(h: *mut Handle, on: c_int) {
     with(h, (), |m| m.set_jit(on != 0));
 }
 
+/// Main-loop pacing 0 (off, exact) to 3: slows the firmware's main loop, not its interrupts, to leave a slow host time. Off by default.
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_pace(h: *mut Handle, level: c_int) {
+    with(h, (), |m| m.set_pace(level.clamp(0, c_int::from(crate::machine::PACE_LEVELS)) as u8));
+}
+
+/// The pacing level now.
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_pace_level(h: *mut Handle) -> c_int {
+    with(h, 0, |m| c_int::from(m.pace()))
+}
+
 /// One core's state, for the CPU panel.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -446,6 +464,12 @@ mod tests {
             fm1ntt_reset(h);
             assert_eq!(fm1ntt_keys_down(h), 0);
             assert_eq!(fm1ntt_jit_on(h), 0);
+            fm1ntt_pace(h, 99);
+            assert_eq!(fm1ntt_pace_level(h), 3);
+            fm1ntt_pace(h, -4);
+            assert_eq!(fm1ntt_pace_level(h), 0);
+            fm1ntt_pace(std::ptr::null_mut(), 2);
+            assert_eq!(fm1ntt_pace_level(std::ptr::null_mut()), 0);
             assert!(CStr::from_ptr(fm1ntt_board(h)).to_bytes().is_empty());
             let (mut q, mut d) = (9u64, 9u64);
             fm1ntt_midi_stats(h, &mut q, &mut d);

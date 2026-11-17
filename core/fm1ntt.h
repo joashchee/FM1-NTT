@@ -33,6 +33,8 @@ int fm1ntt_halted(fm1ntt_machine *m);
 uint64_t fm1ntt_keys_down(fm1ntt_machine *m);                                               /* bit n = id n */
 uint64_t fm1ntt_ms(fm1ntt_machine *m);                                                      /* emulated ms since boot */
 void fm1ntt_jit(fm1ntt_machine *m, int on);                                                 /* off by default */
+void fm1ntt_pace(fm1ntt_machine *m, int level);                                             /* main-loop pacing 0 (off, exact) to 3; off by default */
+int fm1ntt_pace_level(fm1ntt_machine *m);
 const char *fm1ntt_error(void);                                                             /* last failure, "" when none */
 
 /* ---- the sandbox panels' views ---- */

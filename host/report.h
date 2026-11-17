@@ -95,8 +95,27 @@ static int speed_nop(int jit, double seconds, Speed *out) {
     return ok;
 }
 
+/* One line of a /sys file ("" when it is not there): the CPU's governor and clock, which decide how fast every number below is. */
+static void sys_line(const char *path, char *out, size_t n) {
+    out[0] = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    if (fgets(out, (int)n, f)) out[strcspn(out, "\r\n")] = 0;
+    fclose(f);
+}
+/* "governor performance, 1512 MHz now, 1512 MHz max (available: ...)" or "" when the kernel has no cpufreq */
+static void cpufreq_text(char *out, size_t n) {
+    char g[64], cur[32], mx[32], av[160];
+    sys_line("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", g, sizeof g);
+    sys_line("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", cur, sizeof cur);
+    sys_line("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", mx, sizeof mx);
+    sys_line("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors", av, sizeof av);
+    if (!g[0] && !cur[0]) { out[0] = 0; return; }
+    snprintf(out, n, "governor %s, %.0f MHz now, %.0f MHz max (available: %s)", g[0] ? g : "?", atof(cur) / 1000.0, atof(mx) / 1000.0, av[0] ? av : "?");
+}
+
 /* A firmware the caller supplied, run flat out for `seconds` of real time: emulated time over real time. 0 when it halts at once. */
-static int speed_firmware(const char *path, int raw, int jit, double seconds, double *xrt, double *emu_ms, int *halted) {
+static int speed_firmware(const char *path, int raw, int jit, int pace, double seconds, double *xrt, double *emu_ms, int *halted) {
     char why[128];
     size_t n = 0;
     uint8_t *buf = read_file(path, &n, why, sizeof why);
@@ -106,6 +125,7 @@ static int speed_firmware(const char *path, int raw, int jit, double seconds, do
     free(buf);
     if (rc != 0) { fm1ntt_free(m); return 0; }
     fm1ntt_jit(m, jit);
+    fm1ntt_pace(m, pace);
     static int16_t pcm[1024 * 2];
     double t0 = r3_report_ms(), t = t0;
     uint64_t ms0 = fm1ntt_ms(m);
@@ -159,7 +179,7 @@ static unsigned long long fnv64_file(const char *path, size_t *size) {
 /* The whole benchmark. `seconds` is per workload per run (default 1.0 so the three runs of the speed tests take about 3 s each);
  * `fw` (may be NULL) is a firmware to time too. Writes $BASE/bench/bench-<platform>-<stamp>.txt (and latest.txt); returns 0 when written. */
 static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *result, size_t rn) {
-    const int steps = 9;
+    const int steps = 12;
     char dir[300], plat[64], st[32], name[160];
     sub_path(dir, sizeof dir, "bench", NULL);
     if (mkdir_p(dir) != 0) { snprintf(result, rn, "Cannot make the bench folder"); return -1; }
@@ -287,14 +307,21 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
         char id[96];
         snprintf(id, sizeof id, "# firmware: %s %zu bytes fnv64=%016llx\n", base ? base + 1 : fw, sz, h);
         bench_note(&b, "%s", id);
-        for (int jit = 0; jit < 2; jit++) {
+        char cf[300];
+        cpufreq_text(cf, sizeof cf);
+        if (cf[0]) bench_note(&b, "# cpu0 before the firmware runs: %s\n", cf);
+        /* (jit, pace): the interpreter, the native JIT, and the JIT with the main loop paced at 1, 2 and 3 (what the app's PACE does) */
+        static const int var[5][2] = {{0, 0}, {1, 0}, {1, 1}, {1, 2}, {1, 3}};
+        for (int v = 0; v < 5; v++) {
+            int jit = var[v][0], pace = var[v][1];
             if (jit && !fm1ntt_jit_available()) break;
-            report_progress(jit ? "the firmware, native JIT" : "the firmware, interpreter", 7 + jit, steps, b.path);
+            report_progress(!jit ? "the firmware, interpreter" : pace ? "the firmware, native JIT, paced" : "the firmware, native JIT", 7 + v, steps, b.path);
             double xs[BENCH_RUNS], emu = 0;
             int halted = 0, ok = 1;
-            for (int i = 0; i < BENCH_RUNS && ok; i++) ok = speed_firmware(fw, fw_raw, jit, seconds, &xs[i], &emu, &halted);
+            for (int i = 0; i < BENCH_RUNS && ok; i++) ok = speed_firmware(fw, fw_raw, jit, pace, seconds, &xs[i], &emu, &halted);
             char key[160];
-            snprintf(key, sizeof key, "fw.%016llx.%s.xrt", h, jit ? "jit" : "interp");
+            if (pace) snprintf(key, sizeof key, "fw.%016llx.jit.pace%d.xrt", h, pace);
+            else snprintf(key, sizeof key, "fw.%016llx.%s.xrt", h, jit ? "jit" : "interp");
             if (ok && !halted) bench_line(&b, key, xs, "x-real-time", 1);
             else bench_note(&b, ok ? "SKIP fw: the firmware halted before the run ended%s\n" : "SKIP fw: it did not boot (see the app's log)%s\n", "");
         }
@@ -342,6 +369,23 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     r3_report_raw(&r, "# NEEDS: for the draw in mW: run on battery (unplug the charger)\n# NEEDS: for the working window: a firmware loaded, or given as --report FILE\n");
     report_progress("system", 1, steps, r.path);
     r3_report_system(&r);
+    { char cf[300]; cpufreq_text(cf, sizeof cf); r3_report_line(&r, R3_INFO, "cpu0 clock", "%s", cf[0] ? cf : "the kernel shows no cpufreq"); }
+    {   /* where the firmware the app lists comes from: a unit that shows none of one kind says why here */
+        char bd[300], pd[300], cwd[300] = "?";
+        bundled_dir(bd, sizeof bd);
+        pack_dir(pd, sizeof pd);
+        if (!getcwd(cwd, sizeof cwd)) snprintf(cwd, sizeof cwd, "?");
+        char *bp = SDL_GetBasePath();
+        FileEnt *fe = calloc(PX_MAX_FILES, sizeof *fe);
+        int nb = fe && bd[0] ? add_dir(fe, 0, bd, 1) : 0, np = fe && pd[0] ? add_dir(fe, 0, pd, 2) : 0;
+        free(fe);
+        r3_report_line(&r, R3_INFO, "program folder", "%s (working folder %s)", bp ? bp : "?", cwd);
+        if (nb) r3_report_line(&r, R3_PASS, "bundled firmware", "%d firmware files in %s", nb, bd);
+        else r3_report_line(&r, R3_FAIL, "bundled firmware", "none found: looked at ../share/fm1ntt/firmware, ../bundled-firmware and bundled-firmware beside the program, in /usr/share/fm1ntt/firmware and the working folder, and $FM1NTT_BUNDLED%s", getenv("FM1NTT_BUNDLED") ? " (set)" : " (not set)");
+        if (np) r3_report_line(&r, R3_INFO, "firmware pack", "%d firmware files in %s", np, pd);
+        else r3_report_line(&r, R3_INFO, "firmware pack", "not found (optional)");
+        if (bp) SDL_free(bp);
+    }
     report_progress("card", 2, steps, r.path);
     r3_report_card(&r, base);
     int paused = a ? a->paused : 0;
@@ -385,13 +429,26 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
             double xrt = 0, emu = 0;
             int halted = 0;
             const char *fb = strrchr(fw, '/');
-            for (int jit = 0; jit < 2; jit++) {
-                const char *what = jit ? "firmware, native jit" : "firmware, interpreter";
+            double best = 0;
+            int best_pace = 0, best_jit = 0;
+            char cf[300];
+            /* (jit, pace): the interpreter, the JIT, and the JIT with the main loop paced 1..3 (the app's PACE). Only the first two are gates; the goal
+             * is that SOME setting keeps up, which the "firmware, best setting" line below judges. */
+            static const int var[5][2] = {{0, 0}, {1, 0}, {1, 1}, {1, 2}, {1, 3}};
+            for (int v = 0; v < 5; v++) {
+                int jit = var[v][0], pace = var[v][1];
+                char what[48];
+                snprintf(what, sizeof what, !jit ? "firmware, interpreter" : pace ? "firmware, native jit, pace %d" : "firmware, native jit", pace);
                 if (jit && !fm1ntt_jit_available()) { r3_report_line(&r, R3_SKIP, what, "this CPU is not one the native JIT supports"); break; }
-                if (jit) { r3_report_line(&r, R3_INFO, "native jit", "trying it on %s: if the report ends here, the process crashed in the compiler", fb ? fb + 1 : fw); fflush(r.f); }
-                if (speed_firmware(fw, fw_raw, jit, secs, &xrt, &emu, &halted)) r3_report_line(&r, halted ? R3_FAIL : (xrt >= 1.0 ? R3_PASS : R3_FAIL), what, "%s: %.2fx real time over %.0f emulated ms%s (goal 1x: the unit must keep up with the firmware's audio)", fb ? fb + 1 : fw, xrt, emu, halted ? "; it HALTED" : "");
-                else r3_report_line(&r, R3_FAIL, what, "%s did not boot", fb ? fb + 1 : fw);
+                if (jit && !pace) { r3_report_line(&r, R3_INFO, "native jit", "trying it on %s: if the report ends here, the process crashed in the compiler", fb ? fb + 1 : fw); fflush(r.f); }
+                int got = speed_firmware(fw, fw_raw, jit, pace, secs, &xrt, &emu, &halted);
+                if (jit) { cpufreq_text(cf, sizeof cf); if (cf[0]) r3_report_line(&r, R3_INFO, "cpu0 clock", "just after %s: %s", what, cf); }
+                if (!got) { r3_report_line(&r, R3_FAIL, what, "%s did not boot", fb ? fb + 1 : fw); continue; }
+                if (!halted && xrt > best) { best = xrt; best_pace = pace; best_jit = jit; }
+                if (pace) r3_report_line(&r, halted ? R3_FAIL : R3_INFO, what, "%s: %.2fx real time over %.0f emulated ms%s (the main loop paced: sound level, pitch and key-to-sound time held on a Mac; not judged by ear or on the unit)", fb ? fb + 1 : fw, xrt, emu, halted ? "; it HALTED" : "");
+                else r3_report_line(&r, halted ? R3_FAIL : (xrt >= 1.0 ? R3_PASS : R3_FAIL), what, "%s: %.2fx real time over %.0f emulated ms%s (goal 1x: the unit must keep up with the firmware's audio)", fb ? fb + 1 : fw, xrt, emu, halted ? "; it HALTED" : "");
             }
+            r3_report_line(&r, best >= 1.0 ? R3_PASS : R3_FAIL, "firmware, best setting", "%s: %.2fx real time with %s%s (goal 1x: live play)", fb ? fb + 1 : fw, best, best_jit ? "the native jit" : "the interpreter", best_pace ? (best_pace == 1 ? ", pace 1" : best_pace == 2 ? ", pace 2" : ", pace 3") : "");
         } else r3_report_line(&r, R3_SKIP, "firmware", "no firmware: give one (--report FILE) for its speed against real time");
     }
     r3_report_section(&r, "screen");

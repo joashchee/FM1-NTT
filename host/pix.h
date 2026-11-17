@@ -174,7 +174,7 @@ typedef struct {
     PxCpu cpu[2];
     int ncpu, cpu_sel;
     double ips, speed;                  /* instructions a second, emulated time over real time */
-    int jit;
+    int jit, pace;
     /* memory */
     int mem_region;
     uint32_t mem_base, mem_size, mem_off;
@@ -367,7 +367,12 @@ static inline void px_panel_files(uint32_t *c, PxRect r, const UiState *u, int n
     snprintf(line, sizeof line, "PAGE %d/%d", page + 1, pages);
     px_text(c, r.x + r.w - 12 - px_text_w(line, 1), r.y + 39, line, C_HEAD, 1, 0);
     if (u->nfiles <= 1) px_wrap(c, x, r.y + 60, "NO FIRMWARE FILES (.FWSC OR .BIN) HERE. COPY YOURS TO THE FOLDER, THEN X TO RESCAN.", C_WARN, w, 4);
-    if (u->bundled_dir[0] || u->pack_dir[0]) px_text(c, x, r.y + 52 + per * 12 + 4, narrow ? "B BUNDLED  G GPL PACK" : (u->pack_dir[0] ? "B = BUNDLED (MIT)   G = THE GPL PACK (SOURCE INCLUDED)" : "B = BUNDLED WITH THE APP: SEE NOTICE"), C_DIM, 1, w);
+    {
+        const char *foot = u->bundled_dir[0] || u->pack_dir[0]
+            ? (narrow ? "B BUNDLED  G GPL PACK" : (u->pack_dir[0] ? "B = BUNDLED (MIT)   G = THE GPL PACK (SOURCE INCLUDED)" : "B = BUNDLED WITH THE APP: SEE NOTICE"))
+            : "NO BUNDLED FIRMWARE OR PACK FOUND NEXT TO THE APP";
+        px_text(c, x, r.y + 52 + per * 12 + 4, u->bundled_dir[0] ? foot : (u->pack_dir[0] ? (narrow ? "NO BUNDLED FIRMWARE FOUND" : "G = THE GPL PACK. NO BUNDLED FIRMWARE FOUND") : foot), u->bundled_dir[0] ? C_DIM : C_WARN, 1, w);
+    }
     int by = r.y + 42 + per * 12 + 34;
     px_box(c, (PxRect){r.x + 4, by, r.w - 8, 56}, "LOADED");
     int has_fw = u->fw_name && u->fw_name[0];
@@ -415,11 +420,11 @@ static inline void px_panel_cpu(uint32_t *c, PxRect r, const UiState *u, int nar
     snprintf(line, sizeof line, "%.2fX REAL TIME", u->speed);
     px_text(c, x, sy + 24, line, u->speed >= 1.0 || !u->ncpu ? C_OK : C_WARN, 1, w);
     if (narrow) {
-        snprintf(line, sizeof line, "JIT %s", u->jit ? "ON" : "OFF");
+        snprintf(line, sizeof line, "JIT %s  PACE %d", u->jit ? "ON" : "OFF", u->pace);
         px_text(c, x, sy + 36, line, C_TEXT, 1, w);
         px_text(c, x, sy + 48, px_state_of(u), px_state_col(u), 1, w);
     } else {
-        snprintf(line, sizeof line, "JIT %s  STATE %s", u->jit ? "ON" : "OFF", px_state_of(u));
+        snprintf(line, sizeof line, "JIT %s  PACE %d  STATE %s", u->jit ? "ON" : "OFF", u->pace, px_state_of(u));
         px_text(c, x, sy + 36, line, px_state_col(u), 1, w);
     }
 }

@@ -49,7 +49,8 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 11
+#define NTOOLS 12
+#define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
 enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_X, A_Y, A_L2, A_R2 };
 
@@ -74,9 +75,16 @@ typedef struct {
     char fpaths[PX_MAX_FILES][300];     /* each entry's full path */
     char fbundled[PX_MAX_FILES];        /* 1 when it ships with the app (bundled-firmware/) */
     int nfiles, file_sel;
+    uint32_t fbc[240 * 240];            /* the firmware's screen as last converted, with the LCD revision and emulated time it was taken at */
+    uint32_t fb_rev;
+    uint64_t fb_ms;
+    int fb_ok;
+    char bdir[300], pdir[300];          /* where scan_files found the bundled firmware and the pack ("" none) */
     char file[PX_NAME];                 /* the loaded firmware's name */
     /* cpu, memory, midi, tools */
     int cpu_sel, mem_region, midi_chan, midi_note, midi_vel, midi_held, tool_sel, slot;
+    int jit_pref;                       /* the native JIT, applied to each firmware as it boots */
+    int pace_mode, pace_lvl;            /* main-loop pacing: 0 OFF, 1..3 fixed, PACE_AUTO follows the speed; pace_lvl is the level AUTO has reached */
     uint32_t mem_off;
     uint8_t midi_log[PX_MIDI_LOG];
     int midi_log_n;
@@ -180,6 +188,14 @@ static void stamp(char *out, size_t n) {
 /* ---- loading ----------------------------------------------------------------------------------------------------------- */
 static void speed_reset(App *a) { a->sp_real0 = SDL_GetTicks(); a->sp_insns0 = 0; a->sp_ms0 = 0; a->ips = a->speed = 0; }
 
+/* The JIT and pacing settings onto the machine (a load makes a new one, with both off). Callers hold no lock. */
+static void apply_prefs(App *a) {
+    lock(a);
+    fm1ntt_jit(a->m, a->jit_pref && fm1ntt_jit_available());
+    fm1ntt_pace(a->m, a->pace_mode == PACE_AUTO ? a->pace_lvl : a->pace_mode);
+    unlock(a);
+}
+
 static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
     char why[128] = "";
     size_t n = 0;
@@ -190,6 +206,8 @@ static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
     unlock(a);
     free(buf);
     if (rc != 0) { say(a, 3, "%s", fm1ntt_error()); return -1; }
+    apply_prefs(a);
+    a->fb_ok = 0;
     const char *base = strrchr(path, '/');
     snprintf(a->file, sizeof a->file, "%s", base ? base + 1 : path);
     snprintf(a->fw_path, sizeof a->fw_path, "%s", path);
@@ -205,39 +223,51 @@ static int has_ext(const char *name, const char *ext) {
     size_t n = strlen(name), e = strlen(ext);
     return n > e && strcasecmp(name + n - e, ext) == 0;
 }
-/* Where the firmware that ships with the app is: $FM1NTT_BUNDLED, else beside the program (the installed package's /usr/share/fm1ntt/firmware, or
- * a build's ../bundled-firmware), else ./bundled-firmware. "" when there is none. */
-static void bundled_dir(char *out, size_t n) {
+/* 1 when `dir` (or a folder in it, to `depth` levels) holds a firmware file: a folder that exists but is empty or the wrong one is not the answer. */
+static int dir_has_fw(const char *dir, int depth) {
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    int found = 0;
+    while (d && !found && (e = readdir(d))) {
+        char p[600];
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (is_dir(p)) found = depth > 0 && strcmp(e->d_name, "source") && strcmp(e->d_name, "docs") && dir_has_fw(p, depth - 1);
+        else found = (has_ext(e->d_name, ".fwsc") || has_ext(e->d_name, ".bin")) && is_file(p);
+    }
+    if (d) closedir(d);
+    return found;
+}
+/* The first of these that holds firmware: `env` (taken as given when set), then `exe_rel` beside the program, then `abs` and `cwd_rel` as written. */
+static void first_fw_dir(char *out, size_t n, const char *env, const char *const *exe_rel, const char *const *abs) {
     out[0] = 0;
-    const char *e = getenv("FM1NTT_BUNDLED");
+    const char *e = getenv(env);
     if (e && *e) { if (is_dir(e)) snprintf(out, n, "%s", e); return; }
     char *bp = SDL_GetBasePath();
-    const char *rel[] = {"../share/fm1ntt/firmware", "../bundled-firmware", "../../bundled-firmware"};
-    for (unsigned i = 0; bp && i < sizeof rel / sizeof *rel && !out[0]; i++) {
+    for (int i = 0; bp && exe_rel[i] && !out[0]; i++) {
         char p[600];
-        snprintf(p, sizeof p, "%s%s", bp, rel[i]);
-        if (is_dir(p)) snprintf(out, n, "%s", p);
+        snprintf(p, sizeof p, "%s%s", bp, exe_rel[i]);
+        if (is_dir(p) && dir_has_fw(p, 2)) snprintf(out, n, "%s", p);
     }
     if (bp) SDL_free(bp);
-    if (!out[0] && is_dir("bundled-firmware")) snprintf(out, n, "bundled-firmware");
+    for (int i = 0; abs[i] && !out[0]; i++)
+        if (is_dir(abs[i]) && dir_has_fw(abs[i], 2)) snprintf(out, n, "%s", abs[i]);
+}
+/* Where the firmware that ships with the app is: $FM1NTT_BUNDLED, else beside the program (the installed package's /usr/share/fm1ntt/firmware, or
+ * a build's ../bundled-firmware), else the installed path itself, else ./bundled-firmware. "" when there is none. */
+static void bundled_dir(char *out, size_t n) {
+    static const char *const rel[] = {"../share/fm1ntt/firmware", "../bundled-firmware", "../../bundled-firmware", "bundled-firmware", NULL};
+    static const char *const abs[] = {"/usr/share/fm1ntt/firmware", "bundled-firmware", "../bundled-firmware", NULL};
+    first_fw_dir(out, n, "FM1NTT_BUNDLED", rel, abs);
 }
 
 /* Where the copyleft firmware pack is (the GPL tier: its own repository, FM1-NTT Firmware Pack, and its own package): $FM1NTT_PACK, else beside the program
- * (/usr/share/fm1ntt/firmware-gpl, or the pack repository inside or beside this one), else ./FM1-NTT-Firmware-Pack. "" when it is not installed. */
+ * (/usr/share/fm1ntt/firmware-gpl, or the pack repository inside or beside this one), else the installed path itself, else ./FM1-NTT-Firmware-Pack.
+ * "" when it is not installed. */
 static void pack_dir(char *out, size_t n) {
-    out[0] = 0;
-    const char *e = getenv("FM1NTT_PACK");
-    if (e && *e) { if (is_dir(e)) snprintf(out, n, "%s", e); return; }
-    char *bp = SDL_GetBasePath();
-    const char *rel[] = {"../share/fm1ntt/firmware-gpl", "../FM1-NTT-Firmware-Pack", "../../FM1-NTT-Firmware-Pack"};   /* installed, or the pack repository inside / beside this one */
-    for (unsigned i = 0; bp && i < sizeof rel / sizeof *rel && !out[0]; i++) {
-        char p[600];
-        snprintf(p, sizeof p, "%s%s", bp, rel[i]);
-        if (is_dir(p)) snprintf(out, n, "%s", p);
-    }
-    if (bp) SDL_free(bp);
-    if (!out[0] && is_dir("FM1-NTT-Firmware-Pack")) snprintf(out, n, "FM1-NTT-Firmware-Pack");
-    if (!out[0] && is_dir("../FM1-NTT-Firmware-Pack")) snprintf(out, n, "../FM1-NTT-Firmware-Pack");
+    static const char *const rel[] = {"../share/fm1ntt/firmware-gpl", "../FM1-NTT-Firmware-Pack", "../../FM1-NTT-Firmware-Pack", "FM1-NTT-Firmware-Pack", NULL};
+    static const char *const abs[] = {"/usr/share/fm1ntt/firmware-gpl", "FM1-NTT-Firmware-Pack", "../FM1-NTT-Firmware-Pack", NULL};
+    first_fw_dir(out, n, "FM1NTT_PACK", rel, abs);
 }
 
 typedef struct { char name[PX_NAME]; char path[300]; int bundled; } FileEnt;   /* bundled: 0 yours, 1 bundled (permissive), 2 the copyleft pack */
@@ -254,6 +284,14 @@ static int add_dir(FileEnt *out, int n, const char *dir, int bundled) {
         snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
         if (bundled && is_dir(p)) { if (strcmp(e->d_name, "source") && strcmp(e->d_name, "docs")) n = add_dir(out, n, p, bundled); continue; }   /* one folder a family */
         if ((has_ext(e->d_name, ".fwsc") || has_ext(e->d_name, ".bin")) && is_file(p) && strlen(e->d_name) < PX_NAME - 4 && strlen(p) < sizeof out->path) {
+            struct stat sb;
+            long long size = stat(p, &sb) == 0 ? (long long)sb.st_size : -1;
+            int dup = 0;                  /* the same file twice (a pack repository carries a built copy of its own folders) */
+            for (int i = 0; i < n && !dup; i++) {
+                struct stat sb2;
+                dup = out[i].bundled == bundled && !strcmp(out[i].name, e->d_name) && stat(out[i].path, &sb2) == 0 && (long long)sb2.st_size == size;
+            }
+            if (dup) continue;
             snprintf(out[n].name, PX_NAME, "%s", e->d_name);
             snprintf(out[n].path, sizeof out[n].path, "%s", p);
             out[n++].bundled = bundled;
@@ -269,6 +307,8 @@ static void scan_files(App *a) {
     mkdir_p(dir);
     bundled_dir(bdir, sizeof bdir);
     pack_dir(pdir, sizeof pdir);
+    snprintf(a->bdir, sizeof a->bdir, "%s", bdir);
+    snprintf(a->pdir, sizeof a->pdir, "%s", pdir);
     FileEnt *ents = calloc(PX_MAX_FILES, sizeof *ents);
     if (!ents) return;
     int n = add_dir(ents, 0, dir, 0);
@@ -517,7 +557,7 @@ static void tools_run(App *a) {
     case 0: a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); break;
     case 1: if (fm1ntt_loaded(a->m)) a->confirm = CF_RESET; else say(a, 2, "Nothing to reset", NULL); break;
     case 2: panic_all(a); break;
-    case 3: { int on = !fm1ntt_jit_on(a->m); lock(a); fm1ntt_jit(a->m, on); unlock(a); say(a, 0, on ? "Native JIT on (untested on the R36S: watch for a crash)" : "Native JIT off", NULL); } break;
+    case 3: a->jit_pref = !a->jit_pref; apply_prefs(a); say(a, 0, a->jit_pref ? "Native JIT on" : "Native JIT off", NULL); break;
     case 4: a->slot = a->slot % 4 + 1; say(a, 0, "Slot changed", NULL); break;
     case 5: save_flash(a); break;
     case 6: { char p[320]; slot_path(a, p, sizeof p); if (is_file(p)) a->confirm = CF_RESTORE; else say(a, 2, "That slot is empty", NULL); } break;
@@ -525,6 +565,7 @@ static void tools_run(App *a) {
     case 8: job_start(a, JOB_REPORT); break;
     case 9: a->want_demo = 1; break;
     case 10: job_start(a, JOB_BENCH); break;
+    case 11: a->pace_mode = (a->pace_mode + 1) % 5; if (a->pace_mode == PACE_AUTO) a->pace_lvl = 0; apply_prefs(a); say(a, 0, a->pace_mode == PACE_AUTO ? "Pace AUTO: slows the main loop only when the unit cannot keep up" : a->pace_mode ? "Pace fixed: the main loop is slowed, the sound is not" : "Pace off: exact timing", NULL); break;
     default: break;
     }
 }
@@ -608,9 +649,14 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     u->ms = fm1ntt_ms(a->m);
     u->down = fm1ntt_keys_down(a->m);
     if (loaded) {
-        fm1ntt_screen(a->m, u->fb);
+        uint32_t rev = fm1ntt_lcd_revision(a->m);
+        if (!a->fb_ok || rev != a->fb_rev || u->ms < a->fb_ms) {      /* convert the 57,600 pixels only when the LCD changed: the audio waits while this lock is held */
+            fm1ntt_screen(a->m, a->fbc);
+            a->fb_rev = rev; a->fb_ok = 1;
+        }
+        a->fb_ms = u->ms;
         u->fb_valid = 1;
-        a->rev = fm1ntt_lcd_revision(a->m);
+        a->rev = rev;
         Fm1Cpu c;
         for (int k = 0; k < 2; k++)
             if (fm1ntt_cpu(a->m, k, &c)) {
@@ -619,6 +665,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
                 memcpy(p->regs, c.regs, sizeof p->regs);
             }
         u->jit = fm1ntt_jit_on(a->m);
+        u->pace = fm1ntt_pace_level(a->m);
         fm1ntt_midi_stats(a->m, &u->midi_queued, &u->midi_dropped);
         if (a->panel == PANEL_MEMORY) {
             size_t size = 0;
@@ -632,6 +679,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     } else u->mem_region = a->mem_region;
     memcpy(u->scope, a->scope, sizeof u->scope);
     if (use_lock) unlock(a);
+    if (u->fb_valid) memcpy(u->fb, a->fbc, sizeof u->fb);
     memcpy(u->enc_turns, a->enc_turns, sizeof u->enc_turns);
     u->pot = a->pot;
     u->level_l = a->level_l; u->level_r = a->level_r; u->peak_l = a->peak_l; u->peak_r = a->peak_r;
@@ -641,12 +689,8 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     char dir[300];
     sub_path(dir, sizeof dir, "firmware", NULL);
     snprintf(u->file_dir, sizeof u->file_dir, "%s", dir);
-    char bd[300];
-    bundled_dir(bd, sizeof bd);
-    snprintf(u->bundled_dir, sizeof u->bundled_dir, "%s", bd);
-    char pd[300];
-    pack_dir(pd, sizeof pd);
-    snprintf(u->pack_dir, sizeof u->pack_dir, "%s", pd);
+    snprintf(u->bundled_dir, sizeof u->bundled_dir, "%s", a->bdir);
+    snprintf(u->pack_dir, sizeof u->pack_dir, "%s", a->pdir);
     for (int i = 0; i < a->nfiles; i++) snprintf(u->files[i], PX_NAME, "%c%c %s", !strcmp(a->fpaths[i], a->fw_path) && a->fw_path[0] ? '*' : ' ', a->fbundled[i] == 2 ? 'G' : a->fbundled[i] ? 'B' : ' ', a->files[i]);
     snprintf(u->files[a->nfiles], PX_NAME, "   [ QUIT ]");
     u->nfiles = a->nfiles + 1;
@@ -674,11 +718,23 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->tools[8], PX_NAME, "  DEVICE REPORT%s", a->job_kind == JOB_REPORT ? " (RUNNING)" : "");
     snprintf(u->tools[9], PX_NAME, "  REC DEMO");
     snprintf(u->tools[10], PX_NAME, "  BENCHMARK%s", a->job_kind == JOB_BENCH ? " (RUNNING)" : "");
+    if (a->pace_mode == PACE_AUTO) snprintf(u->tools[11], PX_NAME, "  PACE: AUTO (NOW %d)", a->pace_lvl);
+    else if (a->pace_mode) snprintf(u->tools[11], PX_NAME, "  PACE: %d", a->pace_mode);
+    else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
     u->ntools = NTOOLS;
     u->tool_sel = a->tool_sel;
     if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried.");
     else if (a->confirm == CF_RESTORE) snprintf(u->confirm, sizeof u->confirm, "Restore slot %d into the flash? The machine reboots.", a->slot);
     else if (a->confirm == CF_QUIT) snprintf(u->confirm, sizeof u->confirm, "A recording is running. Stop it, save it and quit?");
+}
+
+/* AUTO pacing: one level up when the unit falls behind real time, one down when it has a lot to spare (exact timing is kept when it can) */
+static void pace_auto(App *a) {
+    if (a->pace_mode != PACE_AUTO || a->paused || a->speed <= 0 || !fm1ntt_loaded(a->m)) return;
+    int l = a->pace_lvl;
+    if (a->speed < 0.97 && l < 3) l++;
+    else if (a->speed > 3.0 && l > 0) l--;
+    if (l != a->pace_lvl) { a->pace_lvl = l; lock(a); fm1ntt_pace(a->m, l); unlock(a); }
 }
 
 /* speed: once a second, instructions a second and emulated time over real time */
@@ -694,6 +750,7 @@ static void speed_tick(App *a) {
     if (!a->paused && ins >= a->sp_insns0) { a->ips = (double)(ins - a->sp_insns0) / dt; a->speed = (double)(ms - a->sp_ms0) / 1000.0 / dt; }
     else a->ips = a->speed = 0;
     a->sp_real0 = now; a->sp_insns0 = ins; a->sp_ms0 = ms;
+    pace_auto(a);
 }
 
 /* ---- input ------------------------------------------------------------------------------------------------------------- */
@@ -1218,7 +1275,15 @@ static int selftest(void) {
     while (d && (e = readdir(d))) shots += has_ext(e->d_name, ".bmp");
     if (d) closedir(d);
     CHECK(shots == 1);
-    a.tool_sel = 3; act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == 1); act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == 0);
+    a.tool_sel = 3; act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == fm1ntt_jit_available()); act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == 0);
+    a.tool_sel = 11; act(&a, A_OK); CHECK(a.pace_mode == 1 && fm1ntt_pace_level(a.m) == 1);
+    act(&a, A_OK); act(&a, A_OK); CHECK(a.pace_mode == 3 && fm1ntt_pace_level(a.m) == 3);
+    act(&a, A_OK); CHECK(a.pace_mode == PACE_AUTO && fm1ntt_pace_level(a.m) == 0);   /* AUTO starts exact */
+    a.speed = 0.5; pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 2 && fm1ntt_pace_level(a.m) == 2);   /* behind: up a level a second */
+    a.speed = 1.5; pace_auto(&a); CHECK(a.pace_lvl == 2);                                                 /* keeping up: stays */
+    a.speed = 5.0; pace_auto(&a); pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 0 && fm1ntt_pace_level(a.m) == 0);   /* plenty to spare: back to exact */
+    act(&a, A_OK); CHECK(a.pace_mode == 0 && fm1ntt_pace_level(a.m) == 0);
+    a.speed = 0;
     /* the recorder: the ring to a real WAV, header sizes right, renamed from .part, a quit while recording asks first */
     a.panel = PANEL_SOUND;
     a.rec_ring = malloc((size_t)REC_RING_FRAMES * 2 * sizeof(int16_t));
@@ -1485,9 +1550,23 @@ static unsigned parse_features(const char *csv, int *bad) {
     return m;
 }
 
+/* SDL_WaitEventTimeout is a 1 ms poll loop on KMSDRM (SDL 2.26: ~1000 wake-ups/s, 15% of a core idle, the R36S report of
+   2026-11-17). Sleep in coarse slices and poll between them: idle costs ~25 wake-ups/s, and a key waits at most one slice. */
+static int wait_event(SDL_Event *e, int ms) {
+    uint32_t end = SDL_GetTicks() + (uint32_t)ms;
+    int slice = ms >= 200 ? 40 : 16;
+    for (;;) {
+        if (SDL_PollEvent(e)) return 1;
+        uint32_t now = SDL_GetTicks();
+        if ((int32_t)(end - now) <= 0) return 0;
+        uint32_t left = end - now;
+        SDL_Delay(left < (uint32_t)slice ? left : (uint32_t)slice);
+    }
+}
+
 int main(int argc, char **argv) {
     const char *path = NULL, *shot = NULL, *fwopt = NULL, *features = NULL;
-    int raw = 0, zoomed = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0;
+    int raw = 0, zoomed = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pace_opt = PACE_AUTO;
     double seconds = 1.0;
     uint32_t entry = FM1_ENTRY_FELUCCA;
     for (int i = 1; i < argc; i++) {
@@ -1501,6 +1580,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--bench")) do_bench = 1;
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) { seconds = atof(argv[++i]); if (seconds < 0.05) seconds = 0.05; if (seconds > 60) seconds = 60; }
         else if (!strcmp(argv[i], "--fw") && i + 1 < argc) fwopt = argv[++i];
+        else if (!strcmp(argv[i], "--pace") && i + 1 < argc) { const char *v = argv[++i]; pace_opt = !strcmp(v, "auto") ? PACE_AUTO : atoi(v) % 4; }
+        else if (!strcmp(argv[i], "--no-jit")) no_jit = 1;
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
         else if (!strcmp(argv[i], "--features") && i + 1 < argc) features = argv[++i];
         else if (!strcmp(argv[i], "--no-video")) no_video = 1;
@@ -1515,6 +1596,8 @@ int main(int argc, char **argv) {
     a.mode = zoomed ? MODE_ZOOMED : MODE_STANDARD;
     a.panel = panel;
     a.midi_note = 60; a.midi_vel = 100; a.slot = 1;
+    a.jit_pref = !no_jit && !getenv("FM1NTT_NO_JIT");     /* on wherever the CPU supports it: the interpreter cannot keep up on a handheld */
+    a.pace_mode = pace_opt;
     say(&a, 0, "Pick a firmware in FILES, or give a path on the command line", NULL);
 
     /* the three runs with no window (over SSH): each prints what it did and exits 0 when its file is written */
@@ -1605,8 +1688,8 @@ int main(int argc, char **argv) {
     for (int run = 1; run && !a.quit;) {
         SDL_Event e;
         /* idle: block, never spin; with a firmware running the panels are redrawn about ten times a second */
-        int wait = sticks_active(&a) ? 16 : fm1ntt_loaded(a.m) || a.job ? 33 : toast_active(&a.toast) ? 100 : 250;
-        if (SDL_WaitEventTimeout(&e, wait)) {
+        int wait = sticks_active(&a) ? 16 : fm1ntt_loaded(a.m) || a.job ? 60 : toast_active(&a.toast) ? 100 : 250;
+        if (wait_event(&e, wait)) {
             do { dispatch(&a, &e); dirty = 1; } while (SDL_PollEvent(&e));
         }
         if (sticks_active(&a)) dirty = 1;
@@ -1636,7 +1719,10 @@ int main(int argc, char **argv) {
         uint32_t rev = fm1ntt_lcd_revision(a.m);
         unlock(&a);
         uint32_t now = SDL_GetTicks();
-        if (dirty || rev != a.rev || ((fm1ntt_loaded(a.m) || a.job) && now - last_draw > 100)) {   /* meters and the clock move too */
+        /* Redraw rates (audio comes first, and a repaint costs ~3.5 ms of the unit's time and a lock on the audio): the firmware's screen at most 15 times a
+         * second, the panels and the clock 5 times (the SOUND meters 10), and at once for anything the person did. */
+        uint32_t panel_ms = a.panel == PANEL_SOUND ? 100 : 200;
+        if (dirty || (rev != a.rev && now - last_draw >= 60) || ((fm1ntt_loaded(a.m) || a.job) && now - last_draw > panel_ms)) {
             fill_ui(&a, &u, 1);
             px_draw(canvas, a.mode, &u);
             toast_draw(&a.toast, canvas);

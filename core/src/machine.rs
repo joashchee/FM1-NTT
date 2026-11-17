@@ -13,6 +13,10 @@ const DEFAULT_MHZ: u64 = 240;
 const SECTOR: usize = 4096;
 /// Instructions per slice between audio checks (fm1-web's).
 const SLICE: u32 = 20_000;
+/// Pacing levels: (instructions run, then stalled for that times the ratio). Chosen on an Apple M1 with the bundled firmwares, the
+/// Pack's and Omni: the audio's level and pitch held within 5% and the key-to-sound time did not change (docs/PERFORMANCE.md).
+pub const PACE_LEVELS: u8 = 3;
+const PACE: [(u32, f64); 4] = [(0, 0.0), (2000, 3.0), (1000, 6.0), (1000, 10.0)];
 
 /// What a boot needs, kept so the machine can be reset to power-on (and a saved flash restored into a fresh one).
 struct Boot {
@@ -66,6 +70,8 @@ pub struct Machine {
     keys: u64,
     instructions: u64,
     identity: String,
+    /// main-loop pacing, 0 (off) to `PACE_LEVELS`: see `set_pace`
+    pace: u8,
 }
 
 impl Machine {
@@ -88,7 +94,7 @@ impl Machine {
     fn boot(image: Vec<u8>, entry: u32, stock: Option<(Vec<u8>, fm1_soc::Board)>, identity: String) -> Machine {
         let boot = Boot { image, entry, stock };
         let (soc, cpu) = Machine::build(&boot);
-        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity }
+        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0 }
     }
 
     /// Back to power-on with the same firmware: the emulated flash returns to what the package carried, and the inputs are released.
@@ -155,6 +161,30 @@ impl Machine {
     }
 
     fn run(&mut self, n: u32) {
+        let (piece, ratio) = PACE[usize::from(self.pace)];
+        if piece == 0 || self.cpu1.is_some() {
+            return self.run_unpaced(n);
+        }
+        // Pacing: the main loop runs a piece, then stalls (the clock moves, no instruction runs) for `ratio` times as long, never past
+        // the next timed event and never inside an interrupt handler or with one pending. To the firmware that is a slower clock in its
+        // main loop only, which is a legal execution: interrupts, the SPI and the audio come when they would. What it skips is mostly
+        // busy-waiting on the emulated SPI and LCD, so the screen and the keys behave the same (docs/PERFORMANCE.md).
+        let mut left = n;
+        while left > 0 && !self.halted {
+            let k = left.min(piece);
+            self.run_unpaced(k);
+            left -= k;
+            let p = &mut self.soc.periph;
+            if !p.in_isr && !p.any_pending() {
+                p.room_cap = u64::MAX; // (the run set it to its own length; `run_dual` sets it again on the next call)
+                let stall = ((f64::from(k) * ratio) as u64).min(p.tick_room().saturating_sub(2));
+                p.cycles += stall;
+                p.skipped += stall;
+            }
+        }
+    }
+
+    fn run_unpaced(&mut self, n: u32) {
         let jit = self.cpu.jit_on;
         let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
         if machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick)).is_err() {
@@ -179,6 +209,17 @@ impl Machine {
             *o = if i / 2 < have { self.audio.pop_front().unwrap_or(0) } else { 0 };
         }
         have
+    }
+
+    /// Main-loop pacing, 0 (off, exact) to 3 (the most): the firmware's main loop is slowed to leave the host time, and nothing else is.
+    /// A firmware with one loop that never idles (the nine tried here: they redraw as fast as the SPI lets them) keeps every emulated
+    /// cycle busy, and a slow host cannot keep up; its interrupts (sound, keys, the SPI) are not slowed. Off by default, and
+    /// deterministic: the same level gives the same machine. Not used while core 1 runs (the stock firmware renders on it).
+    pub fn set_pace(&mut self, level: u8) {
+        self.pace = level.min(PACE_LEVELS);
+    }
+    pub fn pace(&self) -> u8 {
+        self.pace
     }
 
     /// Turns the second-by-second compile of hot code to native code on or off (off by default; speed on the R36S is untested).
@@ -427,6 +468,39 @@ mod tests {
             }
         });
         assert!(r.is_ok(), "the loader or the machine panicked ({} bytes)", bytes.len());
+    }
+
+    /// Pacing is a legal slower main loop: deterministic, and the sound is the sound (level within 10%), with far fewer
+    /// instructions run for the same emulated time. Measured on an M1 with three firmwares (docs/PERFORMANCE.md); this checks the bundled one.
+    #[test]
+    fn pacing_is_deterministic_keeps_the_sound_and_runs_fewer_instructions() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../bundled-firmware/haunted-fm1/untrue-0.1.fwsc");
+        let Ok(pkg) = std::fs::read(path) else { return };
+        let play = |level: u8| {
+            let mut m = Machine::from_package(&pkg).unwrap();
+            m.set_pace(level);
+            let mut out = vec![0i16; 1024];
+            while m.ms() < 3000 {
+                m.render(&mut out, 2_000_000);
+            }
+            m.key(devices::KEY_ID_BASE + 7, true);
+            let (i0, t0) = (m.cpu_view(0).unwrap().insns, m.ms());
+            let mut pcm: Vec<i16> = Vec::new();
+            while m.ms() < t0 + 1500 {
+                let n = m.render(&mut out, 2_000_000);
+                pcm.extend_from_slice(&out[..n * 2]);
+            }
+            assert!(!m.halted());
+            let insns = m.cpu_view(0).unwrap().insns - i0;
+            let rms = (pcm.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / pcm.len().max(1) as f64).sqrt();
+            (pcm, insns, rms)
+        };
+        let (a, ia, ra) = play(3);
+        let (b, _, _) = play(3);
+        assert!(a == b, "the same pace level must give the same sound");
+        let (_, i0, r0) = play(0);
+        assert!(ia * 3 < i0 * 2, "pace 3 ran {ia} instructions against {i0}");
+        assert!(r0 > 100.0 && (ra - r0).abs() < r0 * 0.1, "level {ra} against {r0}");
     }
 
     #[test]
