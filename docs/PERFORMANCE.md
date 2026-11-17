@@ -75,6 +75,26 @@ did hold the audio device's lock while it converted the whole screen every frame
 screen is redrawn at most 15 times a second, the panels 5 times (SOUND 10, for its meters) and at once for anything the person does. That is a power
 and a lock-time saving; it does **not** move the emulation's speed. Not measured on the unit.
 
+### What the interrupt handlers spend their time on (kernel replacement tested, not worth it)
+
+The floor is the interrupt handlers, so the question was whether a few hot routines in them could be replaced by native code (as the vendored
+SoC already does for the hardware sample-rate converter). Sampled on the Mac, the interpreter, twelve notes held, the program counter taken only
+while a handler runs:
+
+| firmware | time in handlers | distinct 128-byte regions | top 12 regions hold | notes |
+|---|---|---|---|---|
+| UNTRUE STEP | 38% | 105 | 30% | flat |
+| Omni | 28% | 70 | 66% | one ~1 KB routine (`0x8100`-`0x8400`) is 42% |
+| Felucca | 18% | 156 | 50% | flat |
+| Skiff | 23% (core 1 released) | 157 | 57% | flat |
+
+**Almost none of that code is shared between firmwares:** looking for the hot regions' exact bytes (24-byte windows) in the other firmwares' images found
+0% for Omni, 0% between UNTRUE STEP and Felucca, Skiff or Omni, and 4-15% only between Felucca and Skiff (one is derived from the other) and between UNTRUE STEP and WORN
+TAPE (the same author). There is no common SDK routine to replace. So a native kernel would be **per firmware**, found by hashing its code, and only Omni has a
+routine big enough to matter: replacing it would remove perhaps a quarter of what Omni still executes at pace 3, 1.3x at most. For the others the profile is flat and the
+gain would be a few percent per routine. **Not built.** This also means Neumetik's chip and FM code has nothing here to stand in for: the FM-1's FM is firmware code
+on the emulated CPU, not a chip. The faster JIT remains the only general lever.
+
 ## What would
 
 In order of what is known:
