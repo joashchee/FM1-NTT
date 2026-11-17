@@ -1255,6 +1255,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn packing_is_the_inverse_of_unpacking() {
         let mut x = 0x1357_9bdf_2468_ace0u64;
         for _ in 0..200 {
