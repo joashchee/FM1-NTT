@@ -784,11 +784,35 @@ impl Voice {
     }
 }
 
-/// Felucca's master volume as measured in the emulator (docs/FM6.md): the FM-1's pot, 0 to 1023 (the emulator's default is 900), sets an amplitude gain of about
-/// (pot / 1070)^2 relative to msfa's own output scale, so 0.912 at full volume (-0.8 dB) and 0.708 at the emulator's 900 (-3.0 dB). Within 0.1 dB from 100 up (below
-/// 60 the firmware is quieter than this by up to 3 dB: not modelled). A fit to measurements of three firmwares, not read from any of them.
+/// Felucca's master volume as measured in the emulator (docs/FM6.md): the FM-1's pot, 0 to 1023 (the emulator's default is 900), gives an amplitude gain of
+/// `floor(pot * pot / 256) / 4468` relative to msfa's own output scale (the integer square steps match the measured steps to 0.0002 dB at pot 600 to 617, and give no
+/// change from 100 to 101, 105 to 106 and 112 to 113): 0.915 at full volume (-0.77 dB, of which -0.02 dB is the square and the rest a fixed output scale), 0.708 at the
+/// emulator's 900 (-3.0 dB). Within 0.09 dB from pot 100 up; below that it is quieter than this by up to 1.6 dB (pot 20), and silent below pot 16 (the square shifted
+/// down is 0). A fit to measurements of three firmwares, not read from any of them.
 pub fn felucca_master_gain(pot: u16) -> f64 {
-    (pot.min(1023) as f64 / 1070.0).powi(2)
+    let p = pot.min(1023) as u32;
+    ((p * p) >> 8) as f64 / 4468.0
+}
+
+/// Felucca's mixer keeps the total power constant beyond six sounding voices (measured: no change up to six notes, then 10 log10(6 / n) dB more attenuation for n
+/// voices: -0.67 dB at 7, -1.25 at 8, -2.22 at 10, -3.01 at 12), so the amplitude is the square root of 6 / n for n > 6. What counts as a sounding voice (a
+/// released one?) was measured only with every note held.
+pub fn felucca_voice_gain(sounding: usize) -> f64 {
+    if sounding > 6 {
+        (6.0 / sounding as f64).sqrt()
+    } else {
+        1.0
+    }
+}
+
+/// The level of the output. `Msfa` is msfa's (the voices summed, 16 bits by `to_i16`). `Felucca { pot }` is the output stage of Felucca's firmware as measured:
+/// the master volume at this pot position (`felucca_master_gain`) and the polyphony normalisation (`felucca_voice_gain`). Not modelled: the nonlinearity at high
+/// levels (a limiter or saturation: twelve notes at full level came out 3.7 dB quieter than the linear model at lower level), the effects, the speaker EQ.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Output {
+    #[default]
+    Msfa,
+    Felucca { pot: u16 },
 }
 
 /// A block's sample (msfa's mix scale) as 16 bits.
@@ -824,7 +848,7 @@ pub struct Synth {
     current: usize,
     pitch_bend: i32,
     tuning: Tuning,
-    master: Option<f64>,
+    output: Output,
     spare: Vec<i16>,
 }
 
@@ -836,7 +860,7 @@ impl Synth {
         lfo.reset(&t, lfo_params(&patch));
         let blank = Voice::new(&t, &patch, 60, 100);
         let slots = (0..VOICES).map(|_| Slot { voice: blank.clone(), midi_note: 0, keydown: false, live: false, quiet: 0 }).collect();
-        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, master: None, spare: Vec::new() })
+        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, output: Output::Msfa, spare: Vec::new() })
     }
 
     pub fn set_voice(&mut self, voice: &[u8; 128]) {
@@ -849,9 +873,9 @@ impl Synth {
         self.tuning = tuning;
     }
 
-    /// Scales the output by Felucca's master volume at this pot position (`felucca_master_gain`), or by nothing with `None`, the default: msfa's own level.
-    pub fn set_master_pot(&mut self, pot: Option<u16>) {
-        self.master = pot.map(felucca_master_gain);
+    /// How the output is scaled (`Output`): msfa's own level by default.
+    pub fn set_output(&mut self, output: Output) {
+        self.output = output;
     }
 
     pub fn set_pitch_bend(&mut self, bend: i32) {
@@ -916,9 +940,13 @@ impl Synth {
                 }
             }
         }
+        let gain = match self.output {
+            Output::Msfa => None,
+            Output::Felucca { pot } => Some(felucca_master_gain(pot) * felucca_voice_gain(self.slots.iter().filter(|s| s.live).count())),
+        };
         let mut out = [0i16; N];
         for (o, m) in out.iter_mut().zip(mix) {
-            *o = to_i16(match self.master {
+            *o = to_i16(match gain {
                 Some(g) => (m as f64 * g) as i32,
                 None => m,
             });
@@ -1087,26 +1115,49 @@ mod tests {
     }
 
     #[test]
-    fn the_master_volume_is_the_measured_law_and_off_by_default() {
-        assert!((20.0 * felucca_master_gain(1023).log10() - -0.78).abs() < 0.01);
-        assert!((20.0 * felucca_master_gain(900).log10() - -3.01).abs() < 0.01);
-        assert!((20.0 * felucca_master_gain(500).log10() - -13.22).abs() < 0.01);
+    fn the_felucca_output_stage_is_the_measured_law_and_off_by_default() {
+        let db = |g: f64| 20.0 * g.log10();
+        assert!((db(felucca_master_gain(1023)) - -0.774).abs() < 0.005);
+        assert!((db(felucca_master_gain(900)) - -2.998).abs() < 0.005);
+        assert!((db(felucca_master_gain(500)) - -13.21).abs() < 0.01);
         assert_eq!(felucca_master_gain(5000), felucca_master_gain(1023), "the pot stops at 1023");
-        let render = |pot: Option<u16>| {
-            let mut s = Synth::new(44100.0, &voice(31)).unwrap();
-            s.set_master_pot(pot);
-            s.note_on(60, 100);
+        // the integer square: no change between 100 and 101, 105 and 106, 112 and 113 (measured), steps of 4 and 5 near 600
+        assert_eq!(felucca_master_gain(100), felucca_master_gain(101));
+        assert_eq!(felucca_master_gain(105), felucca_master_gain(106));
+        assert_eq!(felucca_master_gain(112), felucca_master_gain(113));
+        assert_ne!(felucca_master_gain(102), felucca_master_gain(103));
+        assert_eq!(felucca_master_gain(10), 0.0, "silent below pot 16");
+        // the voice count: none up to six, then the power stays constant
+        for n in 0..=6 {
+            assert_eq!(felucca_voice_gain(n), 1.0);
+        }
+        for (n, want) in [(7, -0.669), (8, -1.249), (10, -2.218), (12, -3.010)] {
+            assert!((db(felucca_voice_gain(n)) - want).abs() < 0.005, "{n} voices");
+        }
+        let mut quiet_voice = voice(31);
+        for op in 0..6 {
+            quiet_voice[op * 17 + 14] = 45;   // quiet enough that twelve of them do not clip at 16 bits (a clipped sum is not a linear gain)
+        }
+        let render = |output: Output, notes: &[u8]| {
+            let mut s = Synth::new(44100.0, &quiet_voice).unwrap();
+            s.set_output(output);
+            for &n in notes {
+                s.note_on(n, 100);
+            }
             let mut out = vec![0i16; 4000];
             s.render(&mut out);
             out
         };
-        assert_eq!(render(None), render(None));
-        let (plain, loud) = (render(None), render(Some(1023)));
-        assert_ne!(plain, loud);
+        assert_eq!(render(Output::Msfa, &[60]), render(Output::default(), &[60]), "msfa's level by default");
         let peak = |v: &[i16]| v.iter().map(|x| (*x as i32).abs()).max().unwrap() as f64;
-        assert!((peak(&loud) / peak(&plain) - 0.9126).abs() < 0.003, "{} {}", peak(&loud), peak(&plain));
-        let quiet = render(Some(0));
-        assert!(quiet.iter().all(|&x| x == 0), "a pot at 0 is silent");
+        let (plain, loud) = (render(Output::Msfa, &[60]), render(Output::Felucca { pot: 1023 }, &[60]));
+        assert!((peak(&loud) / peak(&plain) - felucca_master_gain(1023)).abs() < 0.003, "{} {}", peak(&loud), peak(&plain));
+        assert!(render(Output::Felucca { pot: 0 }, &[60]).iter().all(|&x| x == 0), "a pot at 0 is silent");
+        // twelve voices are 3 dB quieter than a plain sum of twelve (and a thirteenth note adds nothing: the 13th is refused by the allocation)
+        let twelve: Vec<u8> = (50..62).collect();
+        let (sum, mixed) = (render(Output::Msfa, &twelve), render(Output::Felucca { pot: 1023 }, &twelve));
+        let rms = |v: &[i16]| (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        assert!((db(rms(&mixed) / rms(&sum)) - db(felucca_master_gain(1023)) - db(felucca_voice_gain(12))).abs() < 0.2);
     }
 
     #[test]

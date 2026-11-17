@@ -229,6 +229,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut file, mut note, mut vel, mut voice, mut program, mut hold, mut out) = (None, 60u8, 100u8, 0usize, None::<u8>, 1.5f64, None);
     let (mut brief, mut no_lfo, mut no_peg, mut make) = (false, false, false, None::<String>);
+    let (mut gain, mut chord) = (false, Vec::<u8>::new());
     let (mut shot, mut dtun, mut pot, mut master) = (None::<String>, 0u8, None::<u16>, None::<u16>);
     let (mut put, mut strip, mut beat, mut partials, mut peaks, mut tuning) = (false, String::new(), false, false, false, fm6::Tuning::Msfa);
     let (mut steps, mut channel, mut by_key, mut fm6_note) = (Vec::<(bool, usize, i32)>::new(), 0u8, false, None::<u8>);
@@ -261,6 +262,8 @@ fn main() -> ExitCode {
             "--brief" => brief = true,
             "--beat" => beat = true,
             "--partials" => partials = true,
+            "--gain" => gain = true,
+            "--chord" => chord = next(&mut i).split(',').filter_map(|n| n.parse().ok()).collect(),
             "--pot" => pot = next(&mut i).parse().ok(),
             "--master" => master = next(&mut i).parse().ok(),
             "--shot" => shot = Some(next(&mut i)),
@@ -375,9 +378,9 @@ fn main() -> ExitCode {
     }
     let boot_peak = boot.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
     let key_id = devices::KEY_ID_BASE + note.saturating_sub(53).min(26);
-    if by_key { m.key(key_id, true) } else { m.midi_in(0x90 | channel); m.midi_in(note); m.midi_in(vel); }
+    if by_key { m.key(key_id, true) } else { m.midi_in(0x90 | channel); m.midi_in(note); m.midi_in(vel); for &c in &chord { m.midi_in(0x90 | channel); m.midi_in(c); m.midi_in(vel); } }
     run(&mut m, hold, &mut emu, &mut sd);
-    if by_key { m.key(key_id, false) } else { m.midi_in(0x80 | channel); m.midi_in(note); m.midi_in(0); }
+    if by_key { m.key(key_id, false) } else { m.midi_in(0x80 | channel); m.midi_in(note); m.midi_in(0); for &c in &chord { m.midi_in(0x80 | channel); m.midi_in(c); m.midi_in(0); } }
     run(&mut m, 1.5, &mut emu, &mut sd);
     if m.halted() { eprintln!("the emulated machine halted"); return ExitCode::from(1) }
 
@@ -385,12 +388,14 @@ fn main() -> ExitCode {
     let mut syn = fm6::Synth::new(SR as f64, &vbytes).unwrap();
     if let fm6::Tuning::Felucca { .. } = tuning { tuning = fm6::Tuning::Felucca { dtun }; }
     syn.set_tuning(tuning);
-    syn.set_master_pot(master);                       // --master POT: fm6 at Felucca's master volume for that pot (the emulator's is --pot, default 900)
+    if let Some(pot) = master { syn.set_output(fm6::Output::Felucca { pot }); }   // --master POT: fm6 with Felucca's output stage at that pot (the emulator's is --pot, default 900)
     let note = fm6_note.unwrap_or(note);
     syn.note_on(note, vel);
+    for &c in &chord { syn.note_on(c, vel); }
     let mut f6 = vec![0i16; (hold * SR as f64) as usize];
     syn.render(&mut f6);
     syn.note_off(note);
+    for &c in &chord { syn.note_off(c); }
     let mut tail = vec![0i16; (1.5 * SR as f64) as usize];
     syn.render(&mut tail);
     let f6: Vec<f64> = f6.iter().chain(tail.iter()).map(|&v| v as f64 / 32768.0).collect();
@@ -422,6 +427,13 @@ fn main() -> ExitCode {
             }
         }
         println!("worst frequency difference of the matched peaks above -50 dBFS: {worst:.2} cents");
+        return ExitCode::SUCCESS;
+    }
+    if gain {
+        // the steady level difference to 0.001 dB, fm6 minus emulator, RMS over 0.3 s to 1.3 s of the held note (a pure tone: this is its gain)
+        let at = |t: f64| (t * SR as f64) as usize;
+        let (e, f) = (rms_db(&emu[at(0.3)..at(1.3)]), rms_db(&f6[at(0.3)..at(1.3)]));
+        println!("GAIN {:.4}", f - e);
         return ExitCode::SUCCESS;
     }
     if partials {
