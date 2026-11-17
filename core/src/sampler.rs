@@ -276,6 +276,7 @@ pub struct Sampler {
     clock: u64,
     /// notes held as a one-shot play to the end; a looped sample plays until released
     one_shot_ignores_release: bool,
+    retrigger_restarts: bool,
 }
 
 impl Sampler {
@@ -297,6 +298,7 @@ impl Sampler {
             velocity: std::array::from_fn(|v| velocity_gain(v as u8)),
             clock: 0,
             one_shot_ignores_release: true,
+            retrigger_restarts: false,
         })
     }
 
@@ -327,6 +329,12 @@ impl Sampler {
         self.one_shot_ignores_release = on;
     }
 
+    /// With true a note struck again while it still sounds restarts its own voice instead of taking another (X0X's drums do: a crash struck three times is never
+    /// louder than one; `docs/SAMPLER.md`); with false (the default) the two sound together.
+    pub fn set_retrigger_restarts(&mut self, on: bool) {
+        self.retrigger_restarts = on;
+    }
+
     pub fn sounding(&self) -> usize {
         self.voices.iter().filter(|v| v.live).count()
     }
@@ -337,7 +345,13 @@ impl Sampler {
         }
         let note = note.min(127);
         let ratio = 2f64.powf((note as f64 - self.root as f64) / 12.0) * self.sample.rate as f64 / self.out_rate;
-        let mut slot = self.voices[..self.max_voices].iter().position(|v| !v.live);
+        let mut slot = None;
+        if self.retrigger_restarts {
+            slot = self.voices[..self.max_voices].iter().position(|v| v.live && v.note == note);
+        }
+        if slot.is_none() {
+            slot = self.voices[..self.max_voices].iter().position(|v| !v.live);
+        }
         if slot.is_none() {
             slot = (0..self.max_voices).min_by_key(|&i| self.voices[i].age);
         }
@@ -617,6 +631,25 @@ mod tests {
         };
         let r = rms_at(&mut s, 64) / rms_at(&mut s, 127);
         assert!((r - 0.5789).abs() < 0.005, "{r}");
+    }
+
+    #[test]
+    fn a_retrigger_restarts_its_voice_when_asked() {
+        let smp = Sample::new(44100, sine(44100, 441.0, 44100, 3000.0)).with_loop(0, 44100);
+        let level = |restart: bool| {
+            let mut s = Sampler::new(smp.clone(), 44100.0, 60).unwrap();
+            s.set_retrigger_restarts(restart);
+            for _ in 0..3 {
+                s.note_on(60, 127);
+                s.render(&mut [0i16; 100]);
+            }
+            let sounding = s.sounding();
+            (sounding, rms(&{ let mut o = vec![0i16; 2205]; s.render(&mut o); o }))
+        };
+        let (n1, l1) = level(true);
+        let (n3, l3) = level(false);
+        assert_eq!((n1, n3), (1, 3));
+        assert!(l3 > l1 * 2.5, "three voices at once are louder: {l3} against {l1}");
     }
 
     #[test]

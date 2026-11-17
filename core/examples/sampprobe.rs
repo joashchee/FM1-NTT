@@ -13,12 +13,14 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let (mut hold, mut secs, mut wav, mut vel) = (0.3f64, 2.0f64, None::<String>, 100u8);
+    let mut then: Vec<(u8, f64)> = Vec::new();   // further note-ons: NOTE@SECONDS after the first
     let mut i = 3;
     while i < a.len() {
         match a[i].as_str() {
             "--hold" => { i += 1; hold = a.get(i).and_then(|s| s.parse().ok()).unwrap_or(hold); }
             "--secs" => { i += 1; secs = a.get(i).and_then(|s| s.parse().ok()).unwrap_or(secs); }
             "--vel" => { i += 1; vel = a.get(i).and_then(|s| s.parse().ok()).unwrap_or(vel); }
+            "--then" => { i += 1; if let Some((n, t)) = a.get(i).and_then(|s| s.split_once('@')) { if let (Ok(n), Ok(t)) = (n.parse(), t.parse()) { then.push((n, t)); } } }
             "--wav" => { i += 1; wav = a.get(i).cloned(); }
             _ => {}
         }
@@ -46,9 +48,21 @@ fn main() -> ExitCode {
     for (k, &n) in notes.iter().enumerate() {
         let mut x = Vec::new();
         m.midi_in(0x90 | channel); m.midi_in(n); m.midi_in(vel);
-        run(&mut m, hold, &mut x);
+        let mut t = 0.0;
+        let mut later = then.clone();
+        later.sort_by(|p, q| p.1.partial_cmp(&q.1).unwrap());
+        for (nn, at) in later {
+            if at > t { run(&mut m, at - t, &mut x); t = at; }
+            m.midi_in(0x90 | channel); m.midi_in(nn); m.midi_in(vel);
+        }
+        if hold > t { run(&mut m, hold - t, &mut x); t = hold; }
         m.midi_in(0x80 | channel); m.midi_in(n); m.midi_in(0);
-        run(&mut m, secs - hold, &mut x);
+        run(&mut m, (secs - t).max(0.0), &mut x);
+        if !then.is_empty() {
+            let w = SR / 20;
+            let line: Vec<String> = (0..x.len() / w).map(|k| format!("{:.0}", 20.0 * ((x[k * w..(k + 1) * w].iter().map(|v| v * v).sum::<f64>() / w as f64).sqrt().max(1e-9)).log10())).collect();
+            println!("rms dBFS per 50 ms: {}", line.join(" "));
+        }
         let peak = x.iter().fold(0.0f64, |p, v| p.max(v.abs()));
         let rms = (x.iter().map(|v| v * v).sum::<f64>() / x.len().max(1) as f64).sqrt();
         // the sound lasts until the last 10 ms window above -60 dB of the peak

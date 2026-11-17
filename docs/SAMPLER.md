@@ -34,7 +34,10 @@ hat and 1/160 on the crash, so the firmware scales by an integer; a straight-lin
 is within 0.7 dB of the measurement for velocity 4 to 127 on both (RMS error 0.11 dB on the hat, 0.45 dB on the crash). A power law is not near (the best, `(v/127)^0.9`, is
 0.8 dB out at the hat and fails at the crash's top).
 
-Not yet measured on X0X: choke (a closed hat cutting an open one), retrigger, the voice count and mixer rule, whether notes pitch (a drum map suggests not), the
+**Choke and retrigger** (`sampprobe --then NOTE@SECONDS`, level per 50 ms): a closed hat (42) struck 0.2 s into an open hat (46) leaves **digital silence** (-180 dBFS) once it
+has ended, where the open hat alone is still at -46 to -72 dBFS, so the closed hat **chokes the open hat** (the hat group). A crash (49) struck again at 0.2 s and 0.4 s repeats the
+first hit's level pattern each time (-22 -21 -25 -27) rather than adding to the earlier ones: **a note struck again restarts its own voice** (`Sampler::set_retrigger_restarts`).
+A crash and a ride struck together add. Not yet measured on X0X: a choke group in the `Sampler` (one sample per instance has no other note to cut), the voice count and mixer rule, whether notes pitch (a drum map suggests not), the
 sample rate and interpolation (a recorded hit's spectrum), and the sample data itself (recorded as untested here; it is third-party data and is not kept).
 
 ## What is not measured
