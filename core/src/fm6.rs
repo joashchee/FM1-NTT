@@ -583,7 +583,36 @@ const COARSEMUL: [i32; 32] = [
     75892776, 76922906, 77910978, 78860292, 79773775, 80654032, 81503396, 82323963, 83117622,
 ];
 
-fn osc_freq(midinote: i32, mode: i32, coarse: i32, fine: i32, detune: i32) -> i32 {
+/// How an operator's frequency is tuned. `Msfa` is msfa's: a ratio from the coarse and fine values, and detune a fixed 0.9 cent a step. `Felucca` is what the
+/// FM6 engine of Felucca 1.8.2 was measured to do in the emulator (docs/FM6.md): a model fitted to those measurements and not read from its source, in ratio
+/// mode only. Two things: (1) **the detune step depends on the note** (always), and (2) **the DTUN macro** (`dtun`, 0 to 127, the PATCH page's DTUN; 0 is none) spreads
+/// the carriers: each carrier is tuned off by `0.0945 * min(dtun, 64)` cents times 0, +1, -1, +2, -2, +3 by its place among the carriers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tuning {
+    #[default]
+    Msfa,
+    Felucca { dtun: u8 },
+}
+
+/// The pattern the DTUN spread gives the carriers, by the carrier's place among the algorithm's carriers taken in operator order (measured to within 0.012 cent;
+/// on algorithm 32 the carriers are operators 1 to 6, on algorithm 5 operators 1, 3 and 5). A modulator has none (its sidebands sit at exact multiples of its frequency).
+const FELUCCA_CARRIER_UNITS: [i32; 6] = [0, 1, -1, 2, -2, 3];
+/// One DTUN step is this many cents of the spread's unit (0.0942 to 0.0946 measured at 12, 24 and 48 steps), and the spread stops growing at 64 steps (6.05 cents).
+const FELUCCA_DTUN_CENTS: f64 = 0.0945;
+const FELUCCA_DTUN_MAX: u8 = 64;
+/// ln of Felucca's detune step in cents, as a quadratic in x = (note - 72) / 12, fitted to the steps measured at notes 36 to 108 every 6 (maximum error
+/// 0.008 cent a step, which is 0.11 cent at the extreme detune): 1.98 cents a step at note 36, 0.905 at 72, 0.37 at 108. Notes outside 36..108 use the nearest measured note's step.
+fn felucca_detune_step_cents(midinote: i32) -> f64 {
+    let x = (midinote.clamp(36, 108) - 72) as f64 / 12.0;
+    (-0.09936 - 0.28199 * x - 0.00654 * x * x).exp()
+}
+
+fn cents_to_logfreq(cents: f64) -> i32 {
+    (cents * (1u32 << 24) as f64 / 1200.0).round() as i32
+}
+
+/// `carrier` is the operator's place among the algorithm's carriers (0 for the first), or `None` for a modulator.
+fn osc_freq(midinote: i32, mode: i32, coarse: i32, fine: i32, detune: i32, carrier: Option<usize>, tuning: Tuning) -> i32 {
     if mode == 0 {
         let mut logfreq = midinote_to_logfreq(midinote);
         logfreq += COARSEMUL[(coarse & 31) as usize];
@@ -591,8 +620,15 @@ fn osc_freq(midinote: i32, mode: i32, coarse: i32, fine: i32, detune: i32) -> i3
             // (1 << 24) / log(2)
             logfreq += (24204406.323123 * (1.0 + 0.01 * fine as f64).ln() + 0.5).floor() as i32;
         }
-        // measured at 7.213 Hz per count at 9600 Hz (msfa's note)
-        logfreq + 12606 * (detune - 7)
+        match tuning {
+            // measured at 7.213 Hz per count at 9600 Hz (msfa's note)
+            Tuning::Msfa => logfreq + 12606 * (detune - 7),
+            Tuning::Felucca { dtun } => {
+                let steps = (detune.clamp(0, 14) - 7) as f64;
+                let unit = FELUCCA_DTUN_CENTS * dtun.min(FELUCCA_DTUN_MAX) as f64;
+                logfreq + cents_to_logfreq(steps * felucca_detune_step_cents(midinote) + carrier.map_or(0, |c| FELUCCA_CARRIER_UNITS[c.min(5)]) as f64 * unit)
+            }
+        }
     } else {
         // ((1 << 24) * log(10) / log(2) * .01) << 3
         let mut logfreq = (4458616 * ((coarse & 3) * 100 + fine)) >> 3;
@@ -671,6 +707,11 @@ pub const PITCH_CENTRE: i32 = 0x2000;
 impl Voice {
     /// A note of an unpacked patch (`unpack_patch`), for a MIDI note 0 to 127 and velocity 0 to 127.
     pub fn new(t: &Tables, patch: &[u8; 156], midinote: i32, velocity: i32) -> Voice {
+        Voice::with_tuning(t, patch, midinote, velocity, Tuning::Msfa)
+    }
+
+    /// `new`, tuned as `tuning` says.
+    pub fn with_tuning(t: &Tables, patch: &[u8; 156], midinote: i32, velocity: i32, tuning: Tuning) -> Voice {
         let midinote = midinote.clamp(0, 127);
         let g = |i: usize| patch[i] as i32;
         let mut v = Voice {
@@ -684,7 +725,17 @@ impl Voice {
             pitchmoddepth: 0,
             pitchmodsens: 0,
         };
-        for op in 0..6 {
+        // each carrier's place among the carriers, taken in operator order (the record holds operator 6 first): Felucca's tuning uses it
+        let alg = (g(134) & 31) as usize;
+        let mut carrier_place = [None; 6];
+        let mut seen = 0;
+        for opnum in 1..=6usize {
+            if ALGORITHMS[alg][6 - opnum] & 7 == OUT_BUS_ADD {
+                carrier_place[6 - opnum] = Some(seen);
+                seen += 1;
+            }
+        }
+        for (op, place) in carrier_place.iter().enumerate() {
             let off = op * 21;
             let rates = [g(off), g(off + 1), g(off + 2), g(off + 3)];
             let levels = [g(off + 4), g(off + 5), g(off + 6), g(off + 7)];
@@ -695,7 +746,7 @@ impl Voice {
             outlevel = outlevel.max(0);
             let rate_scaling = scale_rate(midinote, g(off + 13));
             v.env[op].init(rates, levels, outlevel, rate_scaling);
-            v.basepitch[op] = osc_freq(midinote, g(off + 17), g(off + 18), g(off + 19), g(off + 20));
+            v.basepitch[op] = osc_freq(midinote, g(off + 17), g(off + 18), g(off + 19), g(off + 20), *place, tuning);
         }
         let rates = [g(126), g(127), g(128), g(129)];
         let levels = [g(130), g(131), g(132), g(133)];
@@ -706,16 +757,6 @@ impl Voice {
         v.pitchmoddepth = (g(139) * 165) >> 6;
         v.pitchmodsens = PITCHMODSENS[(g(143) & 7) as usize] as i32;
         v
-    }
-
-    /// Tunes each operator (1 to 6) by a fixed offset in cents, on top of its detune. Zero for all, the default, is msfa's own tuning. On test voices (algorithm 32)
-    /// Felucca's FM6 measured operators 4, 5 and 6 about +5.65, -5.65 and +8.5 cents from operator 1 at the centre detune; adding that here fixed one real
-    /// voice and made two others worse (docs/FM6.md), so it is an experiment, not a model.
-    pub fn with_op_cents(mut self, cents: [f64; 6]) -> Voice {
-        for (b, c) in self.basepitch.iter_mut().zip(cents) {
-            *b = b.wrapping_add((c.clamp(-1200.0, 1200.0) * (1u32 << 24) as f64 / 1200.0).round() as i32);
-        }
-        self
     }
 
     /// Adds one block of this note to `buf`. `lfo_val` and `lfo_delay` come from the shared `Lfo` once per block;
@@ -775,7 +816,7 @@ pub struct Synth {
     slots: Vec<Slot>,
     current: usize,
     pitch_bend: i32,
-    op_cents: [f64; 6],
+    tuning: Tuning,
     spare: Vec<i16>,
 }
 
@@ -787,7 +828,7 @@ impl Synth {
         lfo.reset(&t, lfo_params(&patch));
         let blank = Voice::new(&t, &patch, 60, 100);
         let slots = (0..VOICES).map(|_| Slot { voice: blank.clone(), midi_note: 0, keydown: false, live: false, quiet: 0 }).collect();
-        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, op_cents: [0.0; 6], spare: Vec::new() })
+        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, spare: Vec::new() })
     }
 
     pub fn set_voice(&mut self, voice: &[u8; 128]) {
@@ -795,9 +836,9 @@ impl Synth {
         self.lfo.reset(&self.t, lfo_params(&self.patch));
     }
 
-    /// A fixed tuning offset per operator in cents for the notes played from now on (`Voice::with_op_cents`).
-    pub fn set_op_cents(&mut self, cents: [f64; 6]) {
-        self.op_cents = cents;
+    /// How the notes played from now on are tuned (`Tuning`).
+    pub fn set_tuning(&mut self, tuning: Tuning) {
+        self.tuning = tuning;
     }
 
     pub fn set_pitch_bend(&mut self, bend: i32) {
@@ -814,7 +855,7 @@ impl Synth {
                 self.current = (i + 1) % VOICES;
                 self.lfo.keydown();
                 self.slots[i] = Slot {
-                    voice: Voice::new(&self.t, &self.patch, note as i32, velocity as i32).with_op_cents(self.op_cents),
+                    voice: Voice::with_tuning(&self.t, &self.patch, note as i32, velocity as i32, self.tuning),
                     midi_note: note,
                     keydown: true,
                     live: true,
@@ -979,32 +1020,54 @@ mod tests {
     }
 
     #[test]
-    fn operator_offsets_default_to_none_and_move_the_pitch() {
-        let patch = unpack_patch(&voice(31));
+    fn felucca_tuning_is_the_measured_model() {
+        // the detune step: 1.98 cents at note 36, 0.905 at 72, 0.37 at 108 (the measured values), clamped outside
+        assert!((felucca_detune_step_cents(36) - 1.9812).abs() < 0.01);
+        assert!((felucca_detune_step_cents(72) - 0.9054).abs() < 0.01);
+        assert!((felucca_detune_step_cents(108) - 0.3677).abs() < 0.01);
+        assert_eq!(felucca_detune_step_cents(0), felucca_detune_step_cents(36));
+        assert_eq!(felucca_detune_step_cents(127), felucca_detune_step_cents(108));
+        let cents_of = |x: i32| x as f64 * 1200.0 / (1u32 << 24) as f64;
+        let base = osc_freq(60, 0, 1, 0, 7, None, Tuning::Msfa);
+        let cents = |carrier: Option<usize>, note: i32, detune: i32, dtun: u8| cents_of(osc_freq(note, 0, 1, 0, detune, carrier, Tuning::Felucca { dtun }) - osc_freq(note, 0, 1, 0, 7, None, Tuning::Msfa));
+        // DTUN 0: no spread, whatever the note; the spread grows by 0.0945 cent a step to 64 and stops there, and a modulator has none
+        for note in [36, 60, 96] {
+            for place in 0..6 {
+                assert!(cents(Some(place), note, 7, 0).abs() < 0.001, "no spread at DTUN 0");
+            }
+            for (place, units) in FELUCCA_CARRIER_UNITS.iter().enumerate() {
+                assert!((cents(Some(place), note, 7, 30) - *units as f64 * 0.0945 * 30.0).abs() < 0.001, "carrier {place} note {note}");
+                assert!((cents(Some(place), note, 7, 64) - *units as f64 * 6.048).abs() < 0.001);
+                assert_eq!(cents(Some(place), note, 7, 64), cents(Some(place), note, 7, 127), "the spread stops at 64");
+            }
+            assert!(cents(None, note, 7, 100).abs() < 0.001, "a modulator has no spread");
+        }
+        // the carriers' places: algorithm 32 has six, algorithm 5 has operators 1, 3 and 5 (the record holds operator 6 first)
         let t = Tables::new(44100.0).unwrap();
-        let play = |cents: [f64; 6]| {
-            let mut v = Voice::new(&t, &patch, 60, 100).with_op_cents(cents);
-            let mut out = Vec::new();
-            for _ in 0..40 {
-                let mut b = [0i32; N];
-                v.compute(&t, &mut b, 1 << 23, 0, PITCH_CENTRE);
-                out.extend(b);
+        let basepitch = |alg: u8, dtun: u8| { let mut patch = unpack_patch(&voice(alg)); for op in 0..6 { patch[op * 21 + 20] = 7; } Voice::with_tuning(&t, &patch, 60, 100, Tuning::Felucca { dtun }).basepitch };   // the centre detune
+        let (a32, a5) = (basepitch(31, 30), basepitch(4, 30));
+        let m = |n: usize, v: [i32; 6]| cents_of(v[6 - n] - base);
+        for (n, units) in [(1, 0), (2, 1), (3, -1), (4, 2), (5, -2), (6, 3)] { assert!((m(n, a32) - units as f64 * 2.835).abs() < 0.01, "alg 32 operator {n}"); }
+        for (n, units) in [(1, 0), (3, 1), (5, -1)] { assert!((m(n, a5) - units as f64 * 2.835).abs() < 0.01, "alg 5 carrier {n}"); }
+        for n in [2, 4, 6] { assert!(m(n, a5).abs() < 0.01, "alg 5 modulator {n}"); }
+        // a detune step is larger on a low note, and detune 14 against 7 moves seven steps
+        assert!(cents(Some(0), 36, 14, 0) > cents(Some(0), 96, 14, 0));
+        assert!((cents(Some(0), 72, 14, 0) - 7.0 * 0.9054).abs() < 0.02);
+        // msfa's own tuning is untouched, and fixed-frequency mode is the same under both
+        assert_eq!(osc_freq(60, 0, 1, 0, 10, Some(3), Tuning::Msfa), osc_freq(60, 0, 1, 0, 7, None, Tuning::Msfa) + 3 * 12606);
+        assert_eq!(osc_freq(60, 1, 1, 50, 10, Some(4), Tuning::Msfa), osc_freq(60, 1, 1, 50, 10, Some(4), Tuning::Felucca { dtun: 40 }));
+        // it never panics, detune and DTUN out of range included, and plays
+        for d in [-5, 0, 14, 15, 99] {
+            for dt in [0u8, 64, 255] {
+                let _ = osc_freq(60, 0, 1, 0, d, Some(5), Tuning::Felucca { dtun: dt });
             }
-            out
-        };
-        assert_eq!(play([0.0; 6]), {
-            let mut v = Voice::new(&t, &patch, 60, 100);
-            let mut out = Vec::new();
-            for _ in 0..40 {
-                let mut b = [0i32; N];
-                v.compute(&t, &mut b, 1 << 23, 0, PITCH_CENTRE);
-                out.extend(b);
-            }
-            out
-        }, "no offset is no change");
-        assert_ne!(play([0.0; 6]), play([0.0, 0.0, 0.0, 5.0, -5.0, 8.0]));
-        // a whole octave up in one operator doubles that carrier's frequency: the output differs a lot, and nothing panics at the limits
-        let _ = play([1200.0, -1200.0, 1e9, -1e9, f64::NAN, 0.0]);
+        }
+        let mut s = Synth::new(44100.0, &voice(31)).unwrap();
+        s.set_tuning(Tuning::Felucca { dtun: 30 });
+        s.note_on(60, 100);
+        let mut out = [0i16; 300];
+        s.render(&mut out);
+        assert!(out.iter().any(|&x| x != 0));
     }
 
     #[test]

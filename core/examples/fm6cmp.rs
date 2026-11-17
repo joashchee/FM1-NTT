@@ -52,6 +52,22 @@ fn spectrum(x: &[f64], at: usize) -> Vec<f64> {
     (0..N / 2).map(|k| 20.0 * ((re[k].hypot(im[k]) / (N as f64 / 4.0)).max(1e-9)).log10()).collect()
 }
 
+/// The frequency of the strongest peak within 3% of `f` in a 65536-point (1.5 s) spectrum from `at`, parabolic interpolation: about 0.02 Hz.
+fn peak_near(x: &[f64], at: usize, f: f64) -> Option<(f64, f64)> {
+    const N: usize = 65536;
+    let mut re = vec![0.0; N];
+    let mut im = vec![0.0; N];
+    for (i, r) in re.iter_mut().enumerate() { *r = x.get(at + i).copied().unwrap_or(0.0) * (0.5 - 0.5 * (2.0 * PI * i as f64 / N as f64).cos()); }
+    fft(&mut re, &mut im);
+    let mag: Vec<f64> = (0..N / 2).map(|k| re[k].hypot(im[k])).collect();
+    let bin = SR as f64 / N as f64;
+    let (lo, hi) = (((f * 0.97 / bin) as usize).max(2), ((f * 1.03 / bin) as usize).min(N / 2 - 2));
+    let k = (lo..hi).max_by(|&a, &b| mag[a].partial_cmp(&mag[b]).unwrap())?;
+    if mag[k] < 1e-4 { return None }
+    let (a, b, g) = (mag[k - 1].ln(), mag[k].ln(), mag[k + 1].ln());
+    Some(((k as f64 + 0.5 * (a - g) / (a - 2.0 * b + g)) * bin, 20.0 * (mag[k] / (N as f64 / 4.0)).log10()))
+}
+
 /// The two strongest peaks within 10% of `f0` in a 65536-point (1.5 s) spectrum from `at`: their frequencies in Hz, parabolic interpolation (0.67 Hz bins, so about 0.05 Hz).
 fn two_peaks(x: &[f64], at: usize, f0: f64) -> Option<(f64, f64, f64)> {
     const N: usize = 65536;
@@ -105,6 +121,25 @@ fn make_voice(kind: &str) -> Option<[u8; 128]> {
     let (mut alg, mut fb) = (31u8, 0u8);
     let mut ops = [Op { ol: 0, coarse: 1, fine: 0, det: 7, kvs: 0, bp: 39, ld: 0, rd: 0, lc: 0, rc: 0 }; 6];   // ops[k] is operator k + 1
     ops[0].ol = 99;
+    if let Some(rest) = kind.strip_prefix("solo") {
+        // "solo32:K" or "solo5:K": operator K alone, as a carrier, on algorithm 32 or algorithm 5 (coarse 1, detune 7)
+        let (a, k) = rest.split_once(':')?;
+        alg = match a { "32" => 31, "5" => 4, _ => return None };
+        ops[0].ol = 0;
+        ops[k.parse::<usize>().ok().filter(|k| (1..=6).contains(k))? - 1].ol = 99;
+    } else if let Some(rest) = kind.strip_prefix("pair") {
+        // "pair12" "pair34" "pair56" (optionally ":D"): algorithm 5, the second operator modulates the first, both at detune D (7 by default), the others silent
+        let (pr, d) = rest.split_once(':').map(|(a, b)| (a, b.parse().unwrap_or(7u8))).unwrap_or((rest, 7));
+        let (c, m) = match pr { "12" => (0, 1), "34" => (2, 3), "56" => (4, 5), _ => return None };
+        alg = 4;
+        ops[0].ol = 0;
+        ops[c].ol = 99; ops[m].ol = 75;
+        ops[c].det = d.min(14); ops[m].det = d.min(14);
+    } else if let Some(d) = kind.strip_prefix("six:") {
+        let d: u8 = d.parse().ok().filter(|d| *d <= 14)?;
+        for (k, op) in ops.iter_mut().enumerate() { op.ol = 85; op.coarse = k as u8 + 1; op.det = d; }
+        // fall through to the build below with the default envelope and algorithm 32
+    } else {
     match kind {
         "fast" => {}
         "slowatk" => { rates = [30, 99, 99, 60]; }
@@ -138,6 +173,7 @@ fn make_voice(kind: &str) -> Option<[u8; 128]> {
         "keysc" => { ops[0].rd = 99; ops[0].rc = 0; ops[0].ld = 99; ops[0].lc = 3; }     // level falls to the right of the break point (-LIN) and to the left (+LIN)
         _ => return None,
     }
+    }
     let mut v = [0u8; 128];
     for (k, op) in ops.iter().enumerate() {
         let o = &mut v[(5 - k) * 17..(5 - k) * 17 + 17];             // the record holds operator 6 first
@@ -164,11 +200,37 @@ fn make_voice(kind: &str) -> Option<[u8; 128]> {
     Some(v)
 }
 
+fn crc32(d: &[u8]) -> u32 {
+    let mut c = !0u32;
+    for &b in d { c ^= b as u32; for _ in 0..8 { c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 }; } }
+    !c
+}
+fn write_png(path: &str, px: &[u32], w: usize, h: usize, scale: usize) -> std::io::Result<()> {
+    let mut raw = Vec::new();
+    for y in 0..h * scale { raw.push(0); for x in 0..w * scale { let p = px[(y / scale) * w + x / scale]; raw.extend([(p >> 16) as u8, (p >> 8) as u8, p as u8]); } }
+    let mut z = vec![0x78, 0x01];
+    let chunks: Vec<&[u8]> = raw.chunks(65535).collect();
+    for (i, c) in chunks.iter().enumerate() { z.push(u8::from(i + 1 == chunks.len())); z.extend((c.len() as u16).to_le_bytes()); z.extend((!(c.len() as u16)).to_le_bytes()); z.extend(*c); }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &v in &raw { a = (a + v as u32) % 65521; b = (b + a) % 65521; }
+    z.extend(((b << 16) | a).to_be_bytes());
+    let chunk = |tag: &[u8; 4], data: &[u8]| { let mut c = (data.len() as u32).to_be_bytes().to_vec(); c.extend(tag); c.extend(data); let crc = crc32(&c[4..]); c.extend(crc.to_be_bytes()); c };
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = ((w * scale) as u32).to_be_bytes().to_vec();
+    ihdr.extend(((h * scale) as u32).to_be_bytes());
+    ihdr.extend([8, 2, 0, 0, 0]);
+    out.extend(chunk(b"IHDR", &ihdr));
+    out.extend(chunk(b"IDAT", &z));
+    out.extend(chunk(b"IEND", &[]));
+    fs::write(path, out)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut file, mut note, mut vel, mut voice, mut program, mut hold, mut out) = (None, 60u8, 100u8, 0usize, None::<u8>, 1.5f64, None);
     let (mut brief, mut no_lfo, mut no_peg, mut make) = (false, false, false, None::<String>);
-    let (mut put, mut strip, mut beat, mut op_cents) = (false, String::new(), false, [0.0f64; 6]);
+    let (mut shot, mut dtun) = (None::<String>, 0u8);
+    let (mut put, mut strip, mut beat, mut partials, mut peaks, mut tuning) = (false, String::new(), false, false, false, fm6::Tuning::Msfa);
     let (mut steps, mut channel, mut by_key, mut fm6_note) = (Vec::<(bool, usize, i32)>::new(), 0u8, false, None::<u8>);
     let mut i = 0;
     while i < args.len() {
@@ -193,7 +255,11 @@ fn main() -> ExitCode {
             "--key" => by_key = true,
             "--brief" => brief = true,
             "--beat" => beat = true,
-            "--op-cents" => { let v: Vec<f64> = next(&mut i).split(',').filter_map(|c| c.parse().ok()).collect(); if v.len() == 6 { op_cents = v.try_into().unwrap(); } else { eprintln!("--op-cents wants six numbers: operator 1 to 6, in cents"); return ExitCode::from(2) } }
+            "--partials" => partials = true,
+            "--shot" => shot = Some(next(&mut i)),
+            "--peaks" => peaks = true,
+            "--tuning" => tuning = match next(&mut i).as_str() { "felucca" => fm6::Tuning::Felucca { dtun: 0 }, "msfa" => fm6::Tuning::Msfa, x => { eprintln!("--tuning msfa or felucca, not {x}"); return ExitCode::from(2) } },
+            "--dtun" => dtun = next(&mut i).parse().unwrap_or(0),
             "--make" => make = Some(next(&mut i)),
             "--put" => put = true,
             "--strip" => strip = next(&mut i),
@@ -284,6 +350,13 @@ fn main() -> ExitCode {
         if !ok { return ExitCode::from(1) }
         run(&mut m, 0.5, &mut boot, &mut sd);
     }
+    if let Some(path) = &shot {
+        let mut px = vec![0u32; 240 * 240];
+        m.screen(&mut px);
+        if let Err(e) = write_png(path, &px, 240, 240, 2) { eprintln!("{path}: {e}"); return ExitCode::from(1) }
+        println!("wrote {path}");
+        return ExitCode::SUCCESS;
+    }
     let boot_peak = boot.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
     let key_id = devices::KEY_ID_BASE + note.saturating_sub(53).min(26);
     if by_key { m.key(key_id, true) } else { m.midi_in(0x90 | channel); m.midi_in(note); m.midi_in(vel); }
@@ -294,7 +367,8 @@ fn main() -> ExitCode {
 
     // fm6: the same voice, note and release time
     let mut syn = fm6::Synth::new(SR as f64, &vbytes).unwrap();
-    syn.set_op_cents(op_cents);
+    if let fm6::Tuning::Felucca { .. } = tuning { tuning = fm6::Tuning::Felucca { dtun }; }
+    syn.set_tuning(tuning);
     let note = fm6_note.unwrap_or(note);
     syn.note_on(note, vel);
     let mut f6 = vec![0i16; (hold * SR as f64) as usize];
@@ -304,6 +378,47 @@ fn main() -> ExitCode {
     syn.render(&mut tail);
     let f6: Vec<f64> = f6.iter().chain(tail.iter()).map(|&v| v as f64 / 32768.0).collect();
 
+    if peaks {
+        // the strongest peaks of each, from a long spectrum (1.5 s from 0.4 s), matched by frequency: where the sidebands sit, emulator against fm6
+        let spec = |x: &[f64]| -> Vec<(f64, f64)> {
+            const N: usize = 65536;
+            let mut re = vec![0.0; N];
+            let mut im = vec![0.0; N];
+            for (i, r) in re.iter_mut().enumerate() { *r = x.get((0.4 * SR as f64) as usize + i).copied().unwrap_or(0.0) * (0.5 - 0.5 * (2.0 * PI * i as f64 / N as f64).cos()); }
+            fft(&mut re, &mut im);
+            let mag: Vec<f64> = (0..N / 2).map(|k| re[k].hypot(im[k])).collect();
+            let bin = SR as f64 / N as f64;
+            let mut p: Vec<(f64, f64)> = (40..N / 2 - 2).filter(|&k| mag[k] > mag[k - 1] && mag[k] >= mag[k + 1] && 20.0 * (mag[k] / (N as f64 / 4.0)).log10() > -70.0)
+                .map(|k| { let (a, b, g) = (mag[k - 1].ln(), mag[k].ln(), mag[k + 1].ln()); ((k as f64 + 0.5 * (a - g) / (a - 2.0 * b + g)) * bin, 20.0 * (mag[k] / (N as f64 / 4.0)).log10()) }).collect();
+            p.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            p.truncate(10);
+            p.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            p
+        };
+        let (pe, pf) = (spec(&emu), spec(&f6));
+        println!("peaks above -70 dBFS, emulator against the nearest fm6 peak (Hz, dB, then the frequency difference in cents and the level difference):");
+        let mut worst = 0.0f64;
+        for (f, d) in &pe {
+            match pf.iter().min_by(|a, b| (a.0 - f).abs().partial_cmp(&(b.0 - f).abs()).unwrap()) {
+                Some((g, h)) if (g / f - 1.0).abs() < 0.02 => { let c = 1200.0 * (f / g).log2(); if *d > -50.0 { worst = worst.max(c.abs()); } println!("  {:9.3} Hz {:6.1} dB   fm6 {:9.3} Hz {:6.1} dB   {:+7.2} cents {:+6.1} dB", f, d, g, h, c, h - d) }
+                _ => println!("  {:9.3} Hz {:6.1} dB   no fm6 peak within 2%", f, d),
+            }
+        }
+        println!("worst frequency difference of the matched peaks above -50 dBFS: {worst:.2} cents");
+        return ExitCode::SUCCESS;
+    }
+    if partials {
+        // one row per partial k = 1..6 (operator k at ratio k): emulator Hz, fm6 Hz, the emulator against fm6 in cents (CSV: note, k, emu_hz, fm6_hz, cents, emu_db)
+        let f0 = 440.0 * 2f64.powf((fm6_note.unwrap_or(note) as f64 - 69.0) / 12.0);
+        let at = (0.4 * SR as f64) as usize;
+        for k in 1..=6usize {
+            match (peak_near(&emu, at, f0 * k as f64), peak_near(&f6, at, f0 * k as f64)) {
+                (Some((e, ed)), Some((f, _))) => println!("P,{},{},{:.3},{:.3},{:.2},{:.0}", note, k, e, f, 1200.0 * (e / f).log2(), ed),
+                _ => println!("P,{},{},,,,", note, k),
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
     if beat {
         // the two carriers' frequencies from a long spectrum (1.5 s from 0.3 s), and so how far apart the detune put them
         let f0 = 440.0 * 2f64.powf((fm6_note.unwrap_or(note) as f64 - 69.0) / 12.0);
