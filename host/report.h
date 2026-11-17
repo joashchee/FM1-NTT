@@ -20,7 +20,27 @@
 #define BENCH_RUNS 3
 
 /* ---- progress for Settings > Device reports (r3i6nos's three files) --------------------------------------------------------- */
+/* The same progress, in the process, for the window's progress box (a job runs on its own thread; the main thread reads this). */
+static SDL_SpinLock g_prog_lock;
+static int g_prog_step, g_prog_steps;
+static char g_prog_doing[96];
+static uint32_t g_prog_since, g_prog_step_since;
+static void prog_get(int *step, int *steps, char *doing, size_t n, uint32_t *since, uint32_t *step_since) {
+    SDL_AtomicLock(&g_prog_lock);
+    *step = g_prog_step; *steps = g_prog_steps; *since = g_prog_since; *step_since = g_prog_step_since;
+    snprintf(doing, n, "%s", g_prog_doing);
+    SDL_AtomicUnlock(&g_prog_lock);
+}
+static void prog_reset(void) {
+    SDL_AtomicLock(&g_prog_lock);
+    g_prog_step = 0; g_prog_steps = 0; g_prog_doing[0] = 0; g_prog_since = g_prog_step_since = SDL_GetTicks();
+    SDL_AtomicUnlock(&g_prog_lock);
+}
 static void report_progress(const char *doing, int step, int steps, const char *file) {
+    SDL_AtomicLock(&g_prog_lock);
+    g_prog_step = step; g_prog_steps = steps; g_prog_step_since = SDL_GetTicks();
+    snprintf(g_prog_doing, sizeof g_prog_doing, "%s", doing);
+    SDL_AtomicUnlock(&g_prog_lock);
     const char *p = getenv("R3I6NOS_REPORT_PROGRESS");
     if (!p || !*p) return;
     char body[512], tmp[400];
@@ -538,16 +558,20 @@ static void job_start(App *a, int kind) {
     a->job_seconds = 1.0;
     a->job_result[0] = 0;
     SDL_AtomicSet(&a->job_done, 0);
+    prog_reset();
+    report_progress("starting", 0, kind == JOB_REPORT ? 10 : 12, NULL);
     a->job = SDL_CreateThread(job_thread, "fm1ntt-job", a);
     if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); a->job_kind = JOB_NONE; say(a, a->job_style, "%s", a->job_result); return; }
     say(a, 0, kind == JOB_REPORT ? "Device report running (about a minute): the emulation is paused while it measures" : "Benchmark running (about half a minute)", NULL);
 }
 /* Called by the main loop each pass: reaps a finished job and says how it went. */
-static void job_poll(App *a) {
+static int job_poll(App *a) {                  /* 1 when a job just finished: the caller must redraw (the box goes away) */
     if (a->job && SDL_AtomicGet(&a->job_done)) {
         SDL_WaitThread(a->job, NULL);
         a->job = NULL;
         a->job_kind = JOB_NONE;
         say(a, a->job_style, "%s", a->job_result);
+        return 1;
     }
+    return 0;
 }

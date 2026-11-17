@@ -16,6 +16,8 @@
  * Files are only written under the app's folder ($FM1NTT_DIR, else /roms/FM1-NTT on the R36S, else ~/FM1-NTT), to a temporary name
  * and then renamed. Nothing here has run on an R36S. */
 #define _GNU_SOURCE
+#include <math.h>
+#include <stdarg.h>
 #include <SDL.h>
 #include <dirent.h>
 #include <errno.h>
@@ -991,6 +993,28 @@ static void present(SDL_Renderer *r, SDL_Texture *t, const uint32_t *c) {
 #include "report.h"
 #include "demo.h"
 
+/* ---- the progress box: shown over the window for as long as a job (Device report, Benchmark) runs, so a wait is never silent ---- */
+static void draw_job_progress(uint32_t *c, const App *a) {
+    if (!a->job) return;
+    int step, steps; char doing[96]; uint32_t since, step_since;
+    prog_get(&step, &steps, doing, sizeof doing, &since, &step_since);
+    uint32_t now = SDL_GetTicks();
+    if (steps < 1) steps = 1;
+    double within = 1.0 - exp(-(double)(now - step_since) / 3000.0);       /* the current step creeps toward its end, never reaching it */
+    int pct = (int)(100.0 * ((double)step + 0.9 * within) / steps);
+    if (pct > 99) pct = 99;
+    PxRect box = {PX_W / 2 - 220, PX_H / 2 - 56, 440, 112};
+    px_rect(c, (PxRect){box.x - 2, box.y - 2, box.w + 4, box.h + 4}, C_BG);
+    px_box(c, box, a->job_kind == JOB_REPORT ? "DEVICE REPORT" : "BENCHMARK");
+    char line[160];
+    snprintf(line, sizeof line, "STEP %d OF %d: %s", step < steps ? step + 1 : steps, steps, doing[0] ? doing : "starting");
+    px_text(c, box.x + 14, box.y + 20, line, C_TEXT, 1, 0);
+    px_meter(c, (PxRect){box.x + 14, box.y + 44, box.w - 28, 14}, pct, C_HEAD);
+    snprintf(line, sizeof line, "%d%%   %us elapsed   the emulation is paused while it measures", pct, (now - since) / 1000);
+    px_text(c, box.x + 14, box.y + 68, line, C_DIM, 1, 0);
+    px_text(c, box.x + 14, box.y + 86, "Nothing is wrong: wait for the result", C_DIM, 1, 0);
+}
+
 /* ---- the self-test ----------------------------------------------------------------------------------------------------- */
 static int selftest(void) {
     int bad = 0;
@@ -1550,17 +1574,42 @@ static unsigned parse_features(const char *csv, int *bad) {
     return m;
 }
 
+/* ---- the input trace: make an empty file `trace.on` in the app's folder and run the app; `trace.txt` there then holds every event and
+ * every draw with milliseconds (4000 lines at most), to find a press that is handled but not shown. Off otherwise. ------------------ */
+static FILE *g_trace; static int g_trace_n;
+static void trace_open(void) {
+    char on[320], out[320];
+    sub_path(on, sizeof on, "trace.on", NULL);
+    if (!is_file(on)) return;
+    sub_path(out, sizeof out, "trace.txt", NULL);
+    g_trace = fopen(out, "w");
+}
+static void trace(const char *fmt, ...) {
+    if (!g_trace || g_trace_n >= 4000) { if (g_trace && g_trace_n == 4000) { fclose(g_trace); g_trace = NULL; } return; }
+    va_list ap; va_start(ap, fmt);
+    fprintf(g_trace, "%8u ", SDL_GetTicks());
+    vfprintf(g_trace, fmt, ap);
+    fputc('\n', g_trace); fflush(g_trace);
+    va_end(ap);
+    g_trace_n++;
+}
+
 /* SDL_WaitEventTimeout is a 1 ms poll loop on KMSDRM (SDL 2.26: ~1000 wake-ups/s, 15% of a core idle, the R36S report of
-   2026-11-17). Sleep in coarse slices and poll between them: idle costs ~25 wake-ups/s, and a key waits at most one slice. */
+   2026-11-17). There, sleep in short slices and poll between them; elsewhere block (the key wakes it at once). */
 static int wait_event(SDL_Event *e, int ms) {
+    static int blocking = -1;                    /* a real blocking wait wakes on the key itself: no slice of lag (everywhere but KMSDRM) */
+    if (blocking < 0) { const char *d = SDL_GetCurrentVideoDriver(); blocking = !(d && !strcasecmp(d, "KMSDRM")); }
+    if (blocking) return SDL_WaitEventTimeout(e, ms);
+    static uint32_t last_act;                    /* when a key last arrived */
     uint32_t end = SDL_GetTicks() + (uint32_t)ms;
-    int slice = ms >= 200 ? 40 : 16;
     for (;;) {
-        if (SDL_PollEvent(e)) return 1;
+        if (SDL_PollEvent(e)) { last_act = SDL_GetTicks(); return 1; }
         uint32_t now = SDL_GetTicks();
         if ((int32_t)(end - now) <= 0) return 0;
         uint32_t left = end - now;
-        SDL_Delay(left < (uint32_t)slice ? left : (uint32_t)slice);
+        /* 8 ms for 3 s after a key (it feels instant), 16 ms while a firmware runs, else 40 ms: idle stays near the 25 wake-ups/s goal (R36S report, 2026-11-17) */
+        uint32_t slice = now - last_act < 3000 ? 8 : ms < 100 ? 16 : 40;
+        SDL_Delay(left < slice ? left : slice);
     }
 }
 
@@ -1680,24 +1729,32 @@ int main(int argc, char **argv) {
         present(ren, tex, canvas);
         if (load_firmware(&a, path, raw, entry) != 0) a.panel = PANEL_FILES;
     }
+    trace_open();
     toast_init(&a.toast, "/run/r3i6nos-hotplug/events", SDL_GetTicks());
     if (a.dev) SDL_PauseAudioDevice(a.dev, 0);
+    draw_splash(canvas, "READY", 100);                    /* the last splash frame, held for no time: the app is drawn on the next pass */
+    present(ren, tex, canvas);
+    SDL_PumpEvents();
 
-    uint32_t last_draw = 0;
-    int dirty = 1;
+    uint32_t last_draw = 0, last_settle = 0;
+    int dirty = 1, settle = 0;     /* settle: re-presents of the last frame still owed (a page flip can hold a frame back until the next present) */
     for (int run = 1; run && !a.quit;) {
         SDL_Event e;
         /* idle: block, never spin; with a firmware running the panels are redrawn about ten times a second */
-        int wait = sticks_active(&a) ? 16 : fm1ntt_loaded(a.m) || a.job ? 60 : toast_active(&a.toast) ? 100 : 250;
-        if (wait_event(&e, wait)) {
-            do { dispatch(&a, &e); dirty = 1; } while (SDL_PollEvent(&e));
+        int wait = settle ? 16 : sticks_active(&a) ? 16 : a.job ? 100 : fm1ntt_loaded(a.m) ? 60 : toast_active(&a.toast) ? 100 : 250;
+        if (dirty ? SDL_PollEvent(&e) : wait_event(&e, wait)) {
+            do {
+                if (e.type == SDL_JOYBUTTONDOWN || e.type == SDL_JOYBUTTONUP) trace("event %s button %d (panel %d)", e.type == SDL_JOYBUTTONDOWN ? "down" : "up", e.jbutton.button, a.panel);
+                else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) trace("event key %s %d", e.type == SDL_KEYDOWN ? "down" : "up", (int)e.key.keysym.sym);
+                dispatch(&a, &e); dirty = 1;
+            } while (SDL_PollEvent(&e));
         }
         if (sticks_active(&a)) dirty = 1;
         if (toast_poll(&a.toast, SDL_GetTicks())) dirty = 1;
         sticks_tick(&a, SDL_GetTicks());
         rec_pump(&a);
         speed_tick(&a);
-        job_poll(&a);
+        if (job_poll(&a)) dirty = 1;
         if (a.want_demo) {                                /* Rec demo owns the unit until it ends */
             a.want_demo = 0;
             char dflt[300];
@@ -1721,14 +1778,24 @@ int main(int argc, char **argv) {
         uint32_t now = SDL_GetTicks();
         /* Redraw rates (audio comes first, and a repaint costs ~3.5 ms of the unit's time and a lock on the audio): the firmware's screen at most 15 times a
          * second, the panels and the clock 5 times (the SOUND meters 10), and at once for anything the person did. */
-        uint32_t panel_ms = a.panel == PANEL_SOUND ? 100 : 200;
+        uint32_t panel_ms = a.panel == PANEL_SOUND ? 100 : a.job ? 250 : 200;       /* a job's progress box moves 4 times a second: the report measures idle while it shows */
         if (dirty || (rev != a.rev && now - last_draw >= 60) || ((fm1ntt_loaded(a.m) || a.job) && now - last_draw > panel_ms)) {
+            uint32_t t0 = SDL_GetTicks();
+            int by_input = dirty;
             fill_ui(&a, &u, 1);
             px_draw(canvas, a.mode, &u);
+            draw_job_progress(canvas, &a);
             toast_draw(&a.toast, canvas);
             present(ren, tex, canvas);
-            last_draw = now;
+            if (dirty) trace("draw (by input) took %u ms, sel %d/%d", SDL_GetTicks() - t0, a.tool_sel, a.file_sel);
+            last_draw = last_settle = now;
             dirty = 0;
+            if (by_input) settle = 3;                         /* only a press needs it: the periodic redraws are followed by another soon enough */
+        } else if (settle && now - last_settle >= 16) {     /* the same pixels again: it costs a texture copy, no repaint and no lock */
+            present(ren, tex, canvas);
+            trace("re-present");
+            last_settle = now;
+            settle--;
         }
     }
     rec_stop(&a);

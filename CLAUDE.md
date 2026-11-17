@@ -57,7 +57,7 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
    **The Benchmark report** (`fm1ntt --bench`, TOOLS > Benchmark, `docs/BENCHMARKS.md`) is the cross-platform comparison: bump
    `WORKLOAD_VERSION` (core/src/bench.rs) whenever a workload changes and `format` when the grammar does, and keep `scripts/bench-compare.py`
    and its tests in step.
-8. **Fast start:** the splash shows at once, before any heavy work; slow work runs off the UI thread; any load error shows on the splash.
+8. **Fast start:** the splash shows at once, before any heavy work; slow work runs off the UI thread; any load error shows on the splash. **Progress is always visible** (the maintainer, 2026-11-17): anything the person waits for (start-up, a firmware load, Device report, Benchmark, Rec demo, any new job) shows a progress box on screen with the step, a bar and the elapsed time, and a press is answered on the next frame (the first frame is drawn before the first wait; never block the loop on a job). Not just a status line, not just a file.
 9. **The web build is an installable PWA from the first commit** (`web/`): manifest, icons by `scripts/build-icons.ts`, no service worker,
    `manifest-src 'self'`, and a test that fetches the manifest and every icon. Say untested what was not tried on a phone (Add to Home Screen on iOS and Android).
 10. **A free macOS app ships twice:** the Mac App Store and a signed, notarized direct download (**the App Store build has no copyleft firmware: rule 2**), published as ANSI Apps, bundle id `com.ansiapps.fm1ntt`, signed and notarized by Scoreless Music (the only Apple account),
