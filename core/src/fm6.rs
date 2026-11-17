@@ -708,6 +708,16 @@ impl Voice {
         v
     }
 
+    /// Tunes each operator (1 to 6) by a fixed offset in cents, on top of its detune. Zero for all, the default, is msfa's own tuning. On test voices (algorithm 32)
+    /// Felucca's FM6 measured operators 4, 5 and 6 about +5.65, -5.65 and +8.5 cents from operator 1 at the centre detune; adding that here fixed one real
+    /// voice and made two others worse (docs/FM6.md), so it is an experiment, not a model.
+    pub fn with_op_cents(mut self, cents: [f64; 6]) -> Voice {
+        for (b, c) in self.basepitch.iter_mut().zip(cents) {
+            *b = b.wrapping_add((c.clamp(-1200.0, 1200.0) * (1u32 << 24) as f64 / 1200.0).round() as i32);
+        }
+        self
+    }
+
     /// Adds one block of this note to `buf`. `lfo_val` and `lfo_delay` come from the shared `Lfo` once per block;
     /// `pitch_bend` is the MIDI wheel, 0 to 16383 (`PITCH_CENTRE` is none): a 3 semitone range, as msfa fixes it.
     pub fn compute(&mut self, t: &Tables, buf: &mut [i32; N], lfo_val: i32, lfo_delay: i32, pitch_bend: i32) {
@@ -765,6 +775,7 @@ pub struct Synth {
     slots: Vec<Slot>,
     current: usize,
     pitch_bend: i32,
+    op_cents: [f64; 6],
     spare: Vec<i16>,
 }
 
@@ -776,12 +787,17 @@ impl Synth {
         lfo.reset(&t, lfo_params(&patch));
         let blank = Voice::new(&t, &patch, 60, 100);
         let slots = (0..VOICES).map(|_| Slot { voice: blank.clone(), midi_note: 0, keydown: false, live: false, quiet: 0 }).collect();
-        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, spare: Vec::new() })
+        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, op_cents: [0.0; 6], spare: Vec::new() })
     }
 
     pub fn set_voice(&mut self, voice: &[u8; 128]) {
         self.patch = unpack_patch(voice);
         self.lfo.reset(&self.t, lfo_params(&self.patch));
+    }
+
+    /// A fixed tuning offset per operator in cents for the notes played from now on (`Voice::with_op_cents`).
+    pub fn set_op_cents(&mut self, cents: [f64; 6]) {
+        self.op_cents = cents;
     }
 
     pub fn set_pitch_bend(&mut self, bend: i32) {
@@ -798,7 +814,7 @@ impl Synth {
                 self.current = (i + 1) % VOICES;
                 self.lfo.keydown();
                 self.slots[i] = Slot {
-                    voice: Voice::new(&self.t, &self.patch, note as i32, velocity as i32),
+                    voice: Voice::new(&self.t, &self.patch, note as i32, velocity as i32).with_op_cents(self.op_cents),
                     midi_note: note,
                     keydown: true,
                     live: true,
@@ -960,6 +976,35 @@ mod tests {
             s.all_off();
             s.render(&mut out);
         }
+    }
+
+    #[test]
+    fn operator_offsets_default_to_none_and_move_the_pitch() {
+        let patch = unpack_patch(&voice(31));
+        let t = Tables::new(44100.0).unwrap();
+        let play = |cents: [f64; 6]| {
+            let mut v = Voice::new(&t, &patch, 60, 100).with_op_cents(cents);
+            let mut out = Vec::new();
+            for _ in 0..40 {
+                let mut b = [0i32; N];
+                v.compute(&t, &mut b, 1 << 23, 0, PITCH_CENTRE);
+                out.extend(b);
+            }
+            out
+        };
+        assert_eq!(play([0.0; 6]), {
+            let mut v = Voice::new(&t, &patch, 60, 100);
+            let mut out = Vec::new();
+            for _ in 0..40 {
+                let mut b = [0i32; N];
+                v.compute(&t, &mut b, 1 << 23, 0, PITCH_CENTRE);
+                out.extend(b);
+            }
+            out
+        }, "no offset is no change");
+        assert_ne!(play([0.0; 6]), play([0.0, 0.0, 0.0, 5.0, -5.0, 8.0]));
+        // a whole octave up in one operator doubles that carrier's frequency: the output differs a lot, and nothing panics at the limits
+        let _ = play([1200.0, -1200.0, 1e9, -1e9, f64::NAN, 0.0]);
     }
 
     #[test]

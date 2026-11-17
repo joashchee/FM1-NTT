@@ -262,6 +262,29 @@ impl Machine {
         self.soc.periph.apply(&Action::Midi { b });
     }
 
+    /// Plugs the USB cable to a host (the vendored `usb.rs` enumerates the device and talks USB-MIDI to it). Off by default: with a cable the firmware's USB
+    /// code runs and costs CPU time, and a firmware that starts its USB driver with no cable gives up on it, so call this before the first `render`.
+    pub fn usb_plug(&mut self) {
+        self.soc.usb_plug();
+    }
+    /// One complete MIDI message (SysEx included, `F0 .. F7`) from the host to the device over USB-MIDI. Bounded: a message over 4 KiB, or one sent while
+    /// 64 KiB are still waiting, is dropped (the firmware is untrusted and so is the caller).
+    pub fn usb_midi_send(&mut self, msg: &[u8]) -> bool {
+        if msg.len() > 4096 || self.soc.usb.midi_pending() > 65_536 {
+            return false;
+        }
+        self.soc.usb.midi_send(msg);
+        true
+    }
+    /// What the device has sent the host over USB-MIDI since the last call: complete messages.
+    pub fn usb_midi_take(&mut self) -> Vec<Vec<u8>> {
+        self.soc.usb.midi_take()
+    }
+    /// The device's USB product string once the host has read it (enumeration done), else `None`.
+    pub fn usb_product(&self) -> Option<String> {
+        self.soc.usb.product().map(str::to_string)
+    }
+
     pub fn halted(&self) -> bool {
         self.halted
     }
@@ -379,6 +402,22 @@ mod tests {
         let real = m.render(&mut out, 100_000);
         assert!(real <= 32);
         assert!(out[real * 2..].iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn usb_midi_is_bounded_and_safe_on_garbage() {
+        let mut m = Machine::from_raw(vec![0xFF; 4096], 0x0200_0120).unwrap();
+        assert!(m.usb_midi_take().is_empty());
+        assert!(m.usb_product().is_none());
+        m.usb_plug();
+        assert!(m.usb_midi_send(&[0xF0, 0x7D, 0x46, 0x4C, 1, 0xF7]));
+        assert!(!m.usb_midi_send(&vec![0x55; 5000]), "a message over 4 KiB is refused");
+        for _ in 0..40 {
+            m.usb_midi_send(&[0x90, 60, 100]);                         // the queue is bounded: this cannot grow without limit
+        }
+        let mut out = vec![0i16; 2048];
+        m.render(&mut out, 2_000_000);                                 // a garbage image halts; nothing here may panic or hang
+        let _ = m.usb_midi_take();
     }
 
     #[test]
