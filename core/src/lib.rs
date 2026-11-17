@@ -7,6 +7,7 @@
 
 pub mod bench;
 pub mod capi;
+pub mod capi_sound;
 pub mod devices;
 pub mod extract;
 pub mod firmware;

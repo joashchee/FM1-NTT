@@ -728,10 +728,24 @@ const VELOCITY_DATA: [u8; 64] = [
     235, 237, 238, 240, 241, 242, 243, 244, 246, 246, 248, 249, 250, 251, 252, 253, 254,
 ];
 
+/// The stock engine's velocity curve, one entry for every velocity (msfa's `VELOCITY_DATA` has one for each pair), **read back from DX747's levels** at velocity sensitivities 7, 3 and 1
+/// (the value that gives all three levels, `fm6cmp --gain`, docs/FM6.md): above velocity 40 it is a step or two under msfa's (3 at 100), below 20 up to 9 over. Where the three levels
+/// left two values (1 in 4) the lower is taken; velocities 0 to 2 are not measured (msfa's). With this table fm6 is within one microstep of the stock engine at every velocity.
+const STOCK_VELOCITY_DATA: [u8; 128] = [
+    0, 0, 70, 86, 86, 86, 102, 102, 113, 113, 113, 122, 122, 130, 130, 130,
+    137, 137, 142, 142, 142, 148, 148, 148, 154, 154, 158, 158, 158, 164, 164, 168,
+    168, 168, 172, 172, 176, 176, 176, 179, 179, 182, 182, 182, 186, 186, 186, 189,
+    189, 190, 190, 190, 194, 194, 197, 197, 197, 200, 200, 202, 202, 202, 205, 205,
+    206, 206, 206, 210, 210, 210, 212, 212, 214, 214, 214, 216, 216, 218, 218, 218,
+    221, 221, 222, 222, 222, 225, 225, 225, 227, 227, 230, 230, 230, 232, 232, 234,
+    234, 234, 236, 236, 238, 238, 238, 240, 240, 241, 241, 241, 243, 243, 243, 245,
+    245, 246, 246, 246, 248, 248, 249, 249, 249, 251, 251, 253, 253, 253, 254, 254,
+];
+
 /// The velocity's change of an operator's level, in microsteps.
-fn scale_velocity(velocity: i32, sensitivity: i32, reference: i32) -> i32 {
+fn scale_velocity(velocity: i32, sensitivity: i32, stock: bool) -> i32 {
     let vel = velocity.clamp(0, 127);
-    let vel_value = VELOCITY_DATA[(vel >> 1) as usize] as i32 - reference;
+    let vel_value = if stock { STOCK_VELOCITY_DATA[vel as usize] as i32 - 255 } else { VELOCITY_DATA[(vel >> 1) as usize] as i32 - 239 };
     ((sensitivity * vel_value + 7) >> 3) << 4
 }
 
@@ -846,7 +860,7 @@ impl Voice {
             let mut outlevel = scale_out_level(g(off + 16));
             outlevel += scale_level(midinote, g(off + 8), g(off + 9), g(off + 10), g(off + 11), g(off + 12), tuning == Tuning::Stock);
             outlevel = outlevel.min(127) << 5;
-            outlevel += scale_velocity(velocity, g(off + 15), if tuning == Tuning::Stock { 255 } else { 239 });
+            outlevel += scale_velocity(velocity, g(off + 15), tuning == Tuning::Stock);
             outlevel = outlevel.max(0);
             let rate_scaling = scale_rate(midinote, g(off + 13));
             v.env[op].init(rates, levels, outlevel, rate_scaling);
@@ -1446,6 +1460,18 @@ mod tests {
         assert_eq!(param_name(144), "TRANSPOSE");
         assert_eq!(param_name(145), "NAME 1");
         assert_eq!(param_name(155), "");
+    }
+
+    #[test]
+    fn the_stock_velocity_curve_rises_and_is_msfas_at_the_top() {
+        assert!(STOCK_VELOCITY_DATA.windows(2).all(|w| w[0] <= w[1]), "the curve never falls");
+        assert_eq!(STOCK_VELOCITY_DATA[127], 254);
+        // the stock reference is 255: full velocity changes nothing, and each step down is quieter, at every sensitivity
+        for sens in 1..=7 {
+            assert_eq!(scale_velocity(127, sens, true), 0);
+            assert!(scale_velocity(100, sens, true) <= scale_velocity(127, sens, true));
+            assert!(scale_velocity(40, sens, true) <= scale_velocity(100, sens, true));
+        }
     }
 
     #[test]

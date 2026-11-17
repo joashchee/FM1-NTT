@@ -59,4 +59,30 @@ size_t fm1ntt_bench_image(uint8_t *out, size_t cap);                            
 uint32_t fm1ntt_bench_version(void);                                                        /* bump = reports are not comparable */
 int fm1ntt_jit_available(void);                                                            /* 1 when the build's CPU supports the native JIT */
 uint32_t fm1ntt_clock_mhz(void);                                                            /* 240: instructions a second real time needs */
+/* The sound engines (core/src/capi_sound.rs): fm6 (a DX7 voice from the keys) and the sampler. All mono 16-bit; null-safe; a render of more than 1 << 20 frames returns 0. */
+typedef struct Fm6Handle fm1ntt_fm6;
+typedef struct SamplerHandle fm1ntt_sampler;
+typedef struct KitHandle fm1ntt_kit;
+fm1ntt_fm6 *fm1ntt_fm6_new(double sample_rate, const uint8_t *voice128);                    /* a packed DX7 voice (128 bytes) or NULL for a plain sine; NULL on failure */
+void fm1ntt_fm6_free(fm1ntt_fm6 *h);
+int fm1ntt_fm6_set_voice_sysex(fm1ntt_fm6 *h, const uint8_t *bytes, size_t len);           /* a 163-byte DX7 single-voice dump; 0 ok, -1 */
+void fm1ntt_fm6_set_model(fm1ntt_fm6 *h, int output, int pot, int tuning, int dtun);       /* output 0 msfa 1 Felucca 2 stock (pot 0..1023); tuning 0 msfa 1 Felucca (dtun) 2 stock */
+void fm1ntt_fm6_note_on(fm1ntt_fm6 *h, int note, int velocity);
+void fm1ntt_fm6_note_off(fm1ntt_fm6 *h, int note);
+void fm1ntt_fm6_pitch_bend(fm1ntt_fm6 *h, int value);                                      /* 0..16383, 8192 centre */
+void fm1ntt_fm6_all_off(fm1ntt_fm6 *h);
+size_t fm1ntt_fm6_render(fm1ntt_fm6 *h, int16_t *out, size_t frames);
+size_t fm1ntt_fm6_sounding(const fm1ntt_fm6 *h);
+fm1ntt_sampler *fm1ntt_sampler_new(const uint8_t *wav, size_t len, double out_rate, int root); /* a WAV (PCM or IMA ADPCM) played from the keys; NULL on failure */
+void fm1ntt_sampler_free(fm1ntt_sampler *h);
+void fm1ntt_sampler_note_on(fm1ntt_sampler *h, int note, int velocity);
+void fm1ntt_sampler_note_off(fm1ntt_sampler *h, int note);
+void fm1ntt_sampler_all_off(fm1ntt_sampler *h);
+size_t fm1ntt_sampler_render(fm1ntt_sampler *h, int16_t *out, size_t frames);
+fm1ntt_kit *fm1ntt_kit_new(double out_rate, double ceiling);                                /* a drum map; ceiling is the peak limit as a fraction of full scale, 0 for none (X0X: 0.4) */
+void fm1ntt_kit_free(fm1ntt_kit *h);
+int fm1ntt_kit_add_wav(fm1ntt_kit *h, int note, const uint8_t *wav, size_t len, const uint8_t *chokes, size_t n_chokes); /* 0 ok, -1; striking the note cuts the notes in chokes */
+void fm1ntt_kit_note_on(fm1ntt_kit *h, int note, int velocity);
+void fm1ntt_kit_all_off(fm1ntt_kit *h);
+size_t fm1ntt_kit_render(fm1ntt_kit *h, int16_t *out, size_t frames);
 #endif

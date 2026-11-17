@@ -435,7 +435,7 @@ thread_local! {
     static LAST_ERROR: std::cell::RefCell<std::ffi::CString> = std::cell::RefCell::new(Default::default());
 }
 
-fn set_error(e: Option<String>) -> c_int {
+pub(crate) fn set_error(e: Option<String>) -> c_int {
     let failed = e.is_some();
     let text = e.unwrap_or_default().replace('\0', " ");
     LAST_ERROR.with(|l| *l.borrow_mut() = std::ffi::CString::new(text).unwrap_or_default());

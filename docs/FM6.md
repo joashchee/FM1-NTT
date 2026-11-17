@@ -134,7 +134,7 @@ difference to 0.001 dB):
    nothing (12 voices). Measured with every note held and the voices at a low level; whether a released voice counts was not.
 4. **A limiter or saturation near 0.3 of full scale, after the master volume** (not modelled): twelve notes at full level peak at 0.296, 0.292, 0.264, 0.153 and 0.056 in the emulator at pots 1023, 900, 700, 500 and 300,
    where the linear model says 0.675, 0.522, 0.316, 0.161 and 0.058; so the ceiling is the same whatever the pot (about 0.30), the level departs from linear from a model peak of about 0.2 and the loudest
-   chord is 3.6 dB quieter than the linear model at pot 900. A soft clip like 0.3 tanh(x / 0.3) is near (0.282 where 0.280 was read at 0.522; 0.235 where 0.264 was read at 0.316), not exact.
+   chord is 3.6 dB quieter than the linear model at pot 900. A soft clip like 0.3 tanh(x / 0.3) is near (0.282 where 0.280 was read at 0.522; 0.235 where 0.264 was read at 0.316), not exact. **A try, 2026-11-18, not kept:** `y = x / (1 + (|x| / 0.295)^5)^(1/5)` fits the five peaks above to a few percent (0.300, 0.297, 0.267, 0.160, 0.058 for 0.296, 0.292, 0.264, 0.153, 0.056), but a loud chord on a Felucca preset could not be compared with it (the preset's own effects and the chord's partials differ from fm6's in the emulator), so it was not put in `Output::Felucca`: it needs a chord of the plain test voice (`--make`) sent to Felucca, as the level work above did.
 
 `fm6::Output::Felucca { pot }` (set with `Synth::set_output`; the default `Output::Msfa` is msfa's own level, bit for bit) applies 1 and 3: `felucca_master_gain(pot)` and `felucca_voice_gain(n)`. **With it fm6 matches
 the emulator to 0.07 dB from one to thirteen notes at a low level, and to 0.08 dB from pot 100 to 1023** (`fm6cmp --master POT`, `--chord`), and on the five Felucca presets at the default pot to -0.1 to +0.2 dB. A chip's
@@ -146,7 +146,7 @@ DX747 runs M-VAVE's stock DX7 engine and accepts a standard DX7 single-voice dum
 (`fm6cmp --make KIND`, `--track` for pitch and level over time), the stock engine **equals msfa except for**:
 
 1. **Detune and pitch**: Felucca's note-dependent detune step law is the stock engine's, so it was never Felucca's own (`Tuning::Stock`; only the DTUN carrier spread is Felucca's).
-2. **Velocity**: the reference is 255 rather than 239 (`scale_velocity`). Most velocities match to one microstep; a few table entries differ (13, 16, 19, 31, 76, 79, 88, 94, 97: up to 3 dB at 13) and velocities under 10 diverge; not refined.
+2. **Velocity** (`STOCK_VELOCITY_DATA`, 2026-11-18): the reference is 255 rather than 239, **and the curve is its own, with one entry for each of the 128 velocities** (msfa's has one for each pair). It was read back from DX747's levels at velocity sensitivities 7, 3 and 1 (every velocity, `fm6cmp --gain --make vel7|vel3|vel1`): the value that gives all three. Above velocity 40 it is one or two steps under msfa's (240 against 238 at velocity 100), below 20 up to 9 over. **With it fm6 is within 0.002 dB of the emulator at velocities 6 to 127** (the earlier msfa table was out by up to 1.9 dB in the middle, not only at a few entries as first thought), 0.17 dB at 3 to 5; velocities 0 to 2 are not measured (velocity 2 is 11.7 dB off). Where the three levels allowed two values (1 in 4) the lower is taken.
 3. **Keyboard level scaling left of the break point** counts groups of three semitones rounded up (msfa rounds down); right of it is msfa's. Verified on -LIN, -EXP, +LIN and +EXP: 0.0 dB across notes 30 to 78.
 4. **Output stage** (`Output::Stock { pot }`): the master volume is **linear in the pot** (amplitude 0.000764 * pot of msfa's scale, -2.14 dB at 1023, -3.25 dB at the default 900, within 0.1 dB from pot 150 up), total power constant beyond **four** voices (sqrt(4/n)), and a one-pole low-cut near 20 Hz (1.4 dB down at 33 Hz). With all three fm6 is within 0.03 dB of the emulator for notes 24 to 96, 1 to 16 notes, and pots 200 to 1023 (0.3 dB at 100).
 
@@ -155,6 +155,12 @@ Pitch-modulation wave 5 (sample and hold) differs, as it is random.
 
 **Amplitude modulation (AMS)** is modelled for `Tuning::Stock` only (msfa leaves it unused, and msfa's tuning stays bit for bit). Measured on DX747 with a square LFO, the attenuation of an operator at the LFO's peak is a convex function of `depth * sensitivity` (depth 0 to 99; AMS 1, 2, 3 = 0.2588, 0.4275, 1.0 of it, which the AMS 1 and 2 data confirm): 0.6 dB at 10, 1.6 at 20, 3.1 at 30, 5.4 at 40, 9.0 at 50, 14.8 at 60, 23.9 at 70, 38.3 at 80, 61 at 90 (`AM_DB`, a table, interpolated: an exponential fit left 0.3 dB, so none is claimed). The modulating wave is the **inverted** LFO (attenuation at its low end) scaled by the delay ramp, and the attenuation of a partial wave follows the same table. fm6 matches the emulator's level swing to 0.1 dB on triangle, saw, square and sine at depths 20 to 80 and AMS 1 to 3 (1% at the worst, 20.7 against 20.6 dB), with correlation 0.85 to 0.94, and with an LFO delay (4.60 against 4.54 dB). The 0.2 to 14 cent "pitch side effect" is the pitch tracker's, and fm6 shows it too. Not measured: sample and hold, key sync off, below d = 1.
 SLOOP, sloopDX and Melodee were compared through their own presets (the scripts in `scripts/fm6-compare.sh`, `FM6_FIRMWARE=sloop`); their per-preset gain trims and FX state explain the level differences. sloopDX stores factory voices as 156-byte unpacked records (`extract::find_unpacked`, `fwx --stride`). Nothing here ran on a real FM-1.
+
+## DX7 sysex and named parameters (2026-11-18)
+
+`fm6::vced_sysex(&patch, channel)` writes a voice as a DX7 single-voice dump (`F0 43 0n 00 01 1B`, 155 bytes, checksum, `F7`: 163 bytes, what DX747 and the DX7 take); `parse_vced_sysex` reads one back
+(framing and checksum checked; a field is passed through packing, so it is in range); `param_name(i)` names byte `i` of an unpacked voice the DX7's way (`OP6 EG R1` ... `OP1 DETUNE`, `ALGORITHM`, `LFO PM SENS`, `TRANSPOSE`, `NAME 1`...)
+and `voice_name` gives the ten characters. The C face is in `fm1ntt.h` (`fm1ntt_fm6_*`, `fm1ntt_sampler_*`, `fm1ntt_kit_*`).
 
 ## The API
 
