@@ -1,8 +1,21 @@
 # Performance: playing firmware live on the R36S
 
-**Status (2026-11-17):** the first real R36S reports (`r36s-report.txt`, a benchmark file, build `2641dd3`) show the core does **not** keep up:
-UNTRUE STEP runs at **0.033x** real time in the interpreter and **0.29x** with the native JIT (goal 1x). Nothing below has run on the unit
-after that report: every figure for the changes is from an Apple M1 and says "Mac"; the unit's figure is **untested** until a new report comes back.
+**Status (2026-11-17, R36S benchmark workload 2): live play is not in reach with the current core. Steady state, UNTRUE STEP, after a warm-up past
+its boot: interpreter 0.036x, native JIT 0.177x, JIT with pacing 1 / 2 / 3: 0.240x / 0.233x / 0.241x (goal 1x; min and max within 5% of the median).**
+Every earlier unit figure here (0.29x, the Device report's 0.64x at pace 3, the first benchmark's 1.37x) timed the firmware's cheap first seconds: a firmware's
+boot and idle cost little and it gets heavier after that (on the Mac the interpreter goes 1.08x over a 1 s run, 0.78x over 3 s, 0.76x over 6 s). The benchmark
+now warms up first (workload 2); **the Device report still runs 3 s from a cold start and overstates (0.64x): to change.** Pacing, which looked worth 1.4x on the
+Mac and in those early figures, is worth only 1.35x over the unpaced JIT in steady state, and levels 1 to 3 are the same, so **pacing alone does not get near 1x.**
+
+**The gap is about 4x at the best setting.** The projections further down (0.34x, 0.47x with pace 3) were made from the early figures and are superseded.
+
+**Tried and dropped (2026-11-17, Mac): `lto = "fat"` with `codegen-units = 1` for the core**: no gain (nop loop 32.1 / 31.7 Minsn/s, UNTRUE STEP JIT 4.80x / 4.66x, interpreter 0.700x / 0.699x; within noise). Not adopted, and not worth measuring on the unit.
+
+**What the figures imply (arithmetic, not a profile of the unit):** UNTRUE STEP unpaced runs about 0.177 x 235M = 42M guest instructions a second, about 36 unit cycles each: at about 12 host
+instructions per guest instruction (above) that is an IPC near 0.3 on the in-order A35, so the JIT's code is stalled on something (loads and stores to the register file in memory, the RAM and XIP checks,
+a mispredicted indirect branch at each block exit) as much as it is long. At pace 3 the unit executes only about 20M guest instructions a second yet goes faster in emulated time, since pacing removes the
+main loop's work and what is left is the interrupt handlers' flat, many-block code. **Not known:** whether the unit is spending its time compiling (the 105+ handler regions), in block entry and exit, or in memory stalls: that needs
+a profile of the unit, which does not exist (the Mac's sampler is blocked here and the unit has no `perf`).
 
 ## What the measurements say
 
