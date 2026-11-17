@@ -8,6 +8,13 @@ fm1-emu (core/vendor/fm1-emu/): the crates fm1-isa, fm1-core and fm1-soc, and do
   Changed: only the workspace Cargo.toml's `members` (three crates); no source file is edited. core/vendor/fm1-emu/VENDORED.md has the detail.
   Any package or binary that carries it must carry this notice and that licence text (r36s/package/build-deb.sh copies both).
 
+msfa (core/vendor/msfa/, and its port to Rust, core/src/fm6.rs): Google's music-synthesizer-for-android, a DX7-class 6-operator FM engine
+  Copyright 2012, 2013 Google Inc. Licence: Apache-2.0 (core/vendor/msfa/COPYING, copied unchanged; the files keep their headers).
+  Source: https://github.com/google/music-synthesizer-for-android , commit f67d41d313b7dc85f6fb99e79e515cc9d208cfff (2017-09-13); no NOTICE file upstream.
+  Changed: sin.cc lost an unused #if 0 block (noted in its header); core/src/fm6.rs is our Rust port of the integer path (a derived work, also Apache-2.0).
+  core/vendor/msfa/VENDORED.md has the detail. Any package that carries fm6.rs (the core's library) must carry this notice and that licence text
+  (r36s/package/build-deb.sh copies both).
+
 r3i6nos_report.h (host/vendor/r3i6nos_report.h): the device-report writer, system and card sections and power windows
   Copyright (c) 2026 ANSI Apps (the same holder as this repository). Licence: MIT. Source: https://github.com/joashchee/r3i6nos ,
   theme/r3i6nos_report.h at commit 8d1c3d844a15e14c479b5a3b5a5c48007cdbfe5e (2026-11-16), copied unchanged. It is vendored so this

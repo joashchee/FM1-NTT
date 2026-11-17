@@ -64,6 +64,8 @@ per block); that is noted in the file and tracked in ROADMAP section 5.
 
 **The `# jit` lines** (with `--fw`, the best setting, pace 3, JIT counters on so never one of the timed runs): the JIT's state after the warm-up and after one window, as JSON: `blocks_cold` / `blocks_compiled` / `blocks_given_up`, `cache_bytes`, `entries` (times compiled code was entered from Rust), `jit_insns` (guest instructions run compiled) and `insns` (in all). Read the second line minus the first: `jit_insns` over `insns` is the share running compiled, and `blocks_compiled` still growing says the unit is compiling in steady state. They are notes, not `BENCH` lines, and are not compared.
 
+**The `# threads` and `# thread placement` lines** (with `--fw`; comment lines, no result: the comparison script ignores them): `# threads during the firmware runs, over 7.6 s: fm1ntt-job 98.2% (cpu 3), main 9.1% (cpu 0); all 2 threads 107.3% of 4 cores` is the CPU time by thread over the five firmware settings (Linux only, 10 ms ticks), `# thread pin: on|off` says whether `--pin` was given, and `# thread placement (native JIT, pace 3): free 0.241x (...), pinned 0.249x (...): ...` is the free-against-pinned test (`docs/PERFORMANCE.md`, "Using the other cores"). A command-line `--bench` is on the main thread, so its placement line says to use TOOLS.
+
 ## Rules for changing it
 
 - **Bump `WORKLOAD_VERSION`** (core/src/bench.rs) whenever the workload's bytes or a benchmark's definition change, and add a line to the

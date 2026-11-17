@@ -140,15 +140,16 @@ static void cpufreq_text(char *out, size_t n) {
  * `warm_ms` and `warm_s` say what was reached. 0 when the firmware did not boot. */
 #define FW_WARMUP_EMU_MS 2000
 #define FW_WARMUP_WALL_S 20.0
-static int speed_firmware_windows(const char *path, int raw, int jit, int pace, double seconds, double xs[BENCH_RUNS], double *emu_ms, int *halted, double *warm_ms, double *warm_s) {
+/* Loads a firmware and brings it past its boot with the JIT (the warm-up above); `warm_ms` and `warm_s` say what was reached. NULL when it does not load. */
+static fm1ntt_machine *fw_boot_warm(const char *path, int raw, double *warm_ms, double *warm_s) {
     char why[128];
     size_t n = 0;
     uint8_t *buf = read_file(path, &n, why, sizeof why);
-    if (!buf) return 0;
+    if (!buf) return NULL;
     fm1ntt_machine *m = fm1ntt_new();
     int rc = raw ? fm1ntt_load_raw(m, buf, n, FM1_ENTRY_FELUCCA) : fm1ntt_load_package(m, buf, n);
     free(buf);
-    if (rc != 0) { fm1ntt_free(m); return 0; }
+    if (rc != 0) { fm1ntt_free(m); return NULL; }
     static int16_t pcm[1024 * 2];
     fm1ntt_jit(m, fm1ntt_jit_available());
     fm1ntt_pace(m, 0);
@@ -156,6 +157,13 @@ static int speed_firmware_windows(const char *path, int raw, int jit, int pace, 
     while (fm1ntt_ms(m) < FW_WARMUP_EMU_MS && t - w0 < FW_WARMUP_WALL_S * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
     *warm_ms = (double)fm1ntt_ms(m);
     *warm_s = (t - w0) / 1000.0;
+    return m;
+}
+static int speed_firmware_windows(const char *path, int raw, int jit, int pace, double seconds, double xs[BENCH_RUNS], double *emu_ms, int *halted, double *warm_ms, double *warm_s) {
+    double t = 0;
+    fm1ntt_machine *m = fw_boot_warm(path, raw, warm_ms, warm_s);
+    if (!m) return 0;
+    static int16_t pcm[1024 * 2];
     fm1ntt_jit(m, jit);
     fm1ntt_pace(m, pace);
     double emu = 0;
@@ -179,6 +187,50 @@ static double median3(double v[BENCH_RUNS]) {
 }
 static double min3(const double v[BENCH_RUNS]) { double m = v[0]; for (int i = 1; i < BENCH_RUNS; i++) if (v[i] < m) m = v[i]; return m; }
 static double max3(const double v[BENCH_RUNS]) { double m = v[0]; for (int i = 1; i < BENCH_RUNS; i++) if (v[i] > m) m = v[i]; return m; }
+
+/* Thread placement, measured (docs/PERFORMANCE.md, "Using the other cores"): one machine, warmed up once, then windows of `seconds` that alternate between the
+ * scheduler's free choice and the emulating (calling) thread pinned to the last core with the main thread on the first. The order is free-pinned, pinned-free,
+ * free-pinned, so a firmware that gets heavier as it runs does not favour one side. Only a job thread can do this (the main thread cannot be both). */
+typedef struct { double free_x[BENCH_RUNS], pin_x[BENCH_RUNS], emu_ms; int emu_cpu, ui_cpu, ncpu; char why[112]; } PinAB;
+/* 1 done, 0 the firmware did not boot, -1 not possible (r->why says why). */
+static int speed_firmware_pin_ab(const char *path, int raw, int jit, int pace, double seconds, PinAB *r) {
+    memset(r, 0, sizeof *r);
+    r->ncpu = thr_ncpu();
+    if (!thr_choose(r->ncpu, &r->emu_cpu, &r->ui_cpu)) { snprintf(r->why, sizeof r->why, "one core: nothing to keep apart"); return -1; }
+    ThrPin pin;
+    int pb = thr_pin_begin(&pin, r->emu_cpu, r->ui_cpu, r->ncpu);
+    if (pb != 0) { snprintf(r->why, sizeof r->why, pb == -2 ? "this run is on the main thread (a command-line run): use TOOLS in the app, where the main thread draws" : "this system gives no thread placement control"); return -1; }
+    double wm = 0, ws = 0;
+    fm1ntt_machine *m = fw_boot_warm(path, raw, &wm, &ws);
+    if (!m) { thr_pin_end(&pin); return 0; }
+    static int16_t pcm[1024 * 2];
+    fm1ntt_jit(m, jit);
+    fm1ntt_pace(m, pace);
+    int ok = 1;
+    for (int i = 0; i < BENCH_RUNS && ok && !fm1ntt_halted(m); i++) {
+        for (int k = 0; k < 2 && ok; k++) {
+            int mode = (i & 1) ? 1 - k : k;
+            if (thr_pin_set(&pin, mode) != 0) { snprintf(r->why, sizeof r->why, "the kernel refused to place the threads"); ok = 0; break; }
+            double t0 = r3_report_ms(), t = t0;
+            uint64_t ms0 = fm1ntt_ms(m);
+            while (t - t0 < seconds * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
+            r->emu_ms = (double)(fm1ntt_ms(m) - ms0);
+            (mode ? r->pin_x : r->free_x)[i] = r->emu_ms / (t - t0);
+        }
+    }
+    if (fm1ntt_halted(m) && ok) { snprintf(r->why, sizeof r->why, "the firmware halted during the run"); ok = 0; }
+    thr_pin_end(&pin);
+    fm1ntt_free(m);
+    return ok ? 1 : -1;
+}
+/* "free 0.241x (0.238-0.243), pinned 0.249x (0.247-0.251): pinned is faster in every window; the emulating thread on cpu 3, the main thread on cpu 0 of 4 cores" */
+static void pin_ab_text(const PinAB *r, char *out, size_t n) {
+    double fm = median3((double *)r->free_x), pm = median3((double *)r->pin_x);
+    double fl = min3(r->free_x), fh = max3(r->free_x), pl = min3(r->pin_x), ph = max3(r->pin_x);
+    const char *v = pl > fh ? "pinned is faster in every window" : fl > ph ? "pinned is slower in every window" : "the ranges overlap: no clear difference";
+    snprintf(out, n, "free %.3fx (%.3f-%.3f), pinned %.3fx (%.3f-%.3f): %s; the emulating thread on cpu %d, the main thread on cpu %d, of %d cores; %d windows of %.0f emulated ms each per side",
+             fm, fl, fh, pm, pl, ph, v, r->emu_cpu, r->ui_cpu, r->ncpu, BENCH_RUNS, r->emu_ms);
+}
 
 /* ---- the benchmark report ---------------------------------------------------------------------------------------------------- */
 typedef struct { FILE *f; char path[512], tmp[524]; int n; } Bench;
@@ -246,7 +298,7 @@ static unsigned long long fnv64_file(const char *path, size_t *size) {
 /* The whole benchmark. `seconds` is per workload per run (default 1.0 so the three runs of the speed tests take about 3 s each);
  * `fw` (may be NULL) is a firmware to time too. Writes $BASE/bench/bench-<platform>-<stamp>.txt (and latest.txt); returns 0 when written. */
 static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *result, size_t rn) {
-    const int steps = 13;
+    const int steps = 14;
     char dir[300], plat[64], st[32], name[160];
     sub_path(dir, sizeof dir, "bench", NULL);
     if (mkdir_p(dir) != 0) { snprintf(result, rn, "Cannot make the bench folder"); return -1; }
@@ -379,6 +431,8 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
         if (cf[0]) bench_note(&b, "# cpu0 before the firmware runs: %s\n", cf);
         /* (jit, pace): the interpreter, the native JIT, and the JIT with the main loop paced at 1, 2 and 3 (what the app's PACE does) */
         static const int var[5][2] = {{0, 0}, {1, 0}, {1, 1}, {1, 2}, {1, 3}};
+        ThrSnap th0, th1;
+        thr_snapshot(&th0, r3_report_ms());
         for (int v = 0; v < 5; v++) {
             int jit = var[v][0], pace = var[v][1];
             if (jit && !fm1ntt_jit_available()) break;
@@ -393,6 +447,19 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
             else bench_note(&b, ok ? "SKIP fw: the firmware halted before the run ended%s\n" : "SKIP fw: it did not boot (see the app's log)%s\n", "");
         }
         if (fm1ntt_jit_available()) { report_progress("the firmware, where the JIT's time goes", 12, steps, b.path); fw_jit_diag(&b, fw, fw_raw, 3, seconds); }
+        {   /* the CPU time by thread over the firmware runs (comment lines: no result, so the comparison script is unchanged) and the placement test */
+            char tx[500], line2[700];
+            thr_snapshot(&th1, r3_report_ms());
+            thr_describe(&th0, &th1, (int)getpid(), thr_ncpu(), tx, sizeof tx);
+            snprintf(line2, sizeof line2, "# threads during the firmware runs, %s\n# thread pin: %s\n", tx, a && a->pin ? "on (--pin)" : "off");
+            bench_note(&b, "%s", line2);
+            report_progress("the firmware, thread placement", 13, steps, b.path);
+            PinAB ab;
+            int g = speed_firmware_pin_ab(fw, fw_raw, fm1ntt_jit_available(), fm1ntt_jit_available() ? 3 : 0, seconds, &ab);
+            if (g == 1) { char pt[500]; pin_ab_text(&ab, pt, sizeof pt); snprintf(line2, sizeof line2, "# thread placement (%s): %s\n", fm1ntt_jit_available() ? "native JIT, pace 3" : "interpreter", pt); }
+            else snprintf(line2, sizeof line2, "# thread placement: %s\n", g == 0 ? "the firmware did not boot" : ab.why);
+            bench_note(&b, "%s", line2);
+        }
     } else bench_note(&b, "SKIP fw: no firmware given (--fw FILE): only the synthetic workloads were run%s\n", "");
     report_progress("done", steps, steps, b.path);
     fputs("end\n", b.f);
@@ -503,6 +570,8 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
             /* (jit, pace): the interpreter, the JIT, and the JIT with the main loop paced 1..3 (the app's PACE). Only the first two are gates; the goal
              * is that SOME setting keeps up, which the "firmware, best setting" line below judges. */
             static const int var[5][2] = {{0, 0}, {1, 0}, {1, 1}, {1, 2}, {1, 3}};
+            ThrSnap th0, th1;
+            thr_snapshot(&th0, r3_report_ms());
             for (int v = 0; v < 5; v++) {
                 int jit = var[v][0], pace = var[v][1];
                 char what[48];
@@ -520,6 +589,21 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
                 else r3_report_line(&r, halted ? R3_FAIL : (xrt >= 1.0 ? R3_PASS : R3_FAIL), what, "%s: %.2fx real time over %.0f emulated ms%s (goal 1x: the unit must keep up with the firmware's audio)", fb ? fb + 1 : fw, xrt, emu, halted ? "; it HALTED" : "");
             }
             r3_report_line(&r, best >= 1.0 ? R3_PASS : R3_FAIL, "firmware, best setting", "%s: %.2fx real time with %s%s (goal 1x: live play)", fb ? fb + 1 : fw, best, best_jit ? "the native jit" : "the interpreter", best_pace ? (best_pace == 1 ? ", pace 1" : best_pace == 2 ? ", pace 2" : ", pace 3") : "");
+            {   /* where the CPU time went by thread over all the firmware runs above, and whether the app was asked to pin its threads (--pin) */
+                char tx[500];
+                thr_snapshot(&th1, r3_report_ms());
+                thr_describe(&th0, &th1, (int)getpid(), thr_ncpu(), tx, sizeof tx);
+                r3_report_line(&r, R3_INFO, "threads", "the firmware runs, %s", tx);
+                r3_report_line(&r, R3_INFO, "thread pin", "%s (--pin or FM1NTT_PIN=1 puts the emulating thread on the last core and the main thread on the first)", a && a->pin ? "on for this run" : "off");
+            }
+            if (best > 0) {   /* the same firmware at its best setting, free against pinned (docs/PERFORMANCE.md) */
+                report_progress("speed: thread placement", 4, steps, r.path);
+                PinAB ab;
+                int g = speed_firmware_pin_ab(fw, fw_raw, best_jit, best_pace, secs / BENCH_RUNS, &ab);
+                if (g == 1) { char pt[500]; pin_ab_text(&ab, pt, sizeof pt); r3_report_line(&r, R3_INFO, "thread placement", "%s: %s", fb ? fb + 1 : fw, pt); }
+                else if (g == 0) r3_report_line(&r, R3_INFO, "thread placement", "%s did not boot", fb ? fb + 1 : fw);
+                else r3_report_line(&r, R3_SKIP, "thread placement", "%s", ab.why);
+            }
         } else r3_report_line(&r, R3_SKIP, "firmware", "no firmware: give one (--report FILE) for its speed against real time");
     }
     r3_report_section(&r, "screen");
@@ -587,6 +671,7 @@ static int job_thread(void *p) {
     App *a = p;
     char how[64];
     int rc;
+    if (a->pin) { int e, u; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }    /* the job emulates: it would else inherit the main thread's core */
     if (a->job_kind == JOB_REPORT) {
         snprintf(how, sizeof how, "TOOLS > Device report");
         char dflt[300];
@@ -610,7 +695,7 @@ static void job_start(App *a, int kind) {
     a->job_result[0] = 0;
     SDL_AtomicSet(&a->job_done, 0);
     prog_reset();
-    report_progress("starting", 0, kind == JOB_REPORT ? 10 : 13, NULL);
+    report_progress("starting", 0, kind == JOB_REPORT ? 10 : 14, NULL);
     a->job = SDL_CreateThread(job_thread, "fm1ntt-job", a);
     if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); a->job_kind = JOB_NONE; say(a, a->job_style, "%s", a->job_result); return; }
     say(a, 0, kind == JOB_REPORT ? "Device report running (about two minutes): the emulation is paused while it measures" : "Benchmark running (about two minutes)", NULL);

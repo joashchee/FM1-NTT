@@ -30,7 +30,9 @@ emulation with nothing skipped and is the figure to trust; "pace 3" skips the fi
 | Mocky 0.9.2 | `mocky-0.9.2.fwsc` | GPL-3.0 | 0.16x | 0.61x | charlesvestal/fm1-mocky |
 
 Compás and Sidou were booted and their screens looked at (`--screenshot`): both run and draw. Compás is the only one above 1.0x on both settings, so it is the one worth
-putting on a unit first; its licence (GPL-3.0-only) would put it in the Firmware Pack, with its source, if you want it shipped (`docs/FIRMWARE.md`).
+putting on a unit first. **It is not in the Firmware Pack, by the maintainer's choice (2026-11-17):** its code is GPL-3.0-only but its `LICENSING.md` lists third-party data outside the
+pack's allowlist (Hanan Cumbia sounds and patterns under CC BY-SA 3.0, three songs under CC BY-SA 3.0, CC BY 4.0 and CC BY-SA 4.0, a portrait and photograph, and TR-727 recordings),
+so it is on the watchlist (`firmware-watchlist.tsv`) until the data is shown to be separable or the allowlist is widened on purpose. To try it on a unit, download it from its release yourself.
 
 **What the firmwares FM1-NTT already ships predict** (none gets above 0.5x): Omni 0.46x (pace 3), Halflight 0.37x, Felucca 0.31x, Midnight 0.30x, UNTRUE STEP 0.25x
 (measured on the unit: 0.235x), Voicemail 0.22x, WORN TAPE 0.21x, Skiff 0.19x, Jangada 0.15x.
@@ -46,6 +48,8 @@ putting on a unit first; its licence (GPL-3.0-only) would put it in the Firmware
 3. **The prediction**: on the unit UNTRUE STEP ran at 0.178x (exact) and 0.235x (pace 3), at about 2.97G and 1.9G host instructions per emulated second (the JIT
    of that build, on the Mac), so the estimate for any firmware is 0.53G / (its exact figure) and 0.44G / (its pace-3 figure), the larger of the two. The six-notes-held figure is used (a synth costs
    more sounding than idle: for SikkenWorks's drawbar organ, idle said 1.21x and held said 0.63x).
+
+**Checked afterwards:** the benchmark of the new JIT on the unit (UNTRUE STEP: 0.1859x exact, 0.2478x pace 3, at 2.79G and 1.76G host instructions per emulated second) gives 0.52G and 0.44G for the two constants, within 2% of the ones used; the method is consistent for the one firmware it was fitted on.
 
 **Not known, and why the numbers are an estimate:** one calibration firmware; the Cortex-A35 may spend its time differently on a peripheral-heavy firmware than on
 UNTRUE STEP; the unit was measured on the JIT before the 2026-11-17 second part (5-7% fewer instructions), so the estimates are a little optimistic about the old

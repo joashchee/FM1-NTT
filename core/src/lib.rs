@@ -8,7 +8,9 @@
 pub mod bench;
 pub mod capi;
 pub mod devices;
+pub mod extract;
 pub mod firmware;
+pub mod fm6;
 pub mod machine;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

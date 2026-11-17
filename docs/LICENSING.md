@@ -6,6 +6,7 @@ the `awesome-fm-1` list and each project's page state them; **check the reposito
 | Project | Licence | What we may do |
 |---|---|---|
 | `joakimeriksson/fm1-emu` (Rust emulator and plugin) | MIT | **Vendored** (2026-11-16): `fm1-isa`, `fm1-core`, `fm1-soc` in `core/vendor/fm1-emu/` at a pinned commit (`VENDORED.md`, `NOTICE`). Its sibling `fm1-sid`, `fm1-dock` and Felucca-derived firmware are GPL-3.0: not covered by that, and not vendored |
+| `google/music-synthesizer-for-android` (msfa, a DX7-class engine) | Apache-2.0 | **Vendored** (2026-11-17) in `core/vendor/msfa/` at a pinned commit as a reference, and **ported to Rust** in `core/src/fm6.rs`; compatible with MIT (it keeps its notices; `VENDORED.md`, `NOTICE`). Take it from Google's repository, **never from Felucca's tree** (there it sits beside GPL-3.0 files) and not from Dexed (GPL-3.0) |
 | `simonjohansson/fm1-emulator` | GPL-3.0 | **Black box only:** run it, compare behaviour, never read or copy its source |
 | `shcherbakov7/m-wave-fm1-browser-emulator` | GPL-3.0 | Black box only |
 | `spinkham/felucca-try`, Felucca, other GPL firmware | GPL-3.0 | They are *firmware* run by the user, never part of this repo |

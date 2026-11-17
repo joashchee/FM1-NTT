@@ -151,12 +151,50 @@ at pace 3 the blocks are 54%, `run_blocks` (the machine loop, with the JIT entry
 11% are the limit or a computed jump with no body in the table, 5% a bus access that made a tick due, and 0.1% an unlinked chain. Each is a trip through Rust of well over a thousand host instructions. 99% of guest instructions run compiled,
 and one block in 2,400 was given up on, so the interpreter is not the cost.
 
-**What the unit shows** (benchmark with `# jit` lines, pace 3, one second): 98.9% of instructions compiled; 240 blocks compiled in the second (under 5% of it); 192,000 entries; 21M guest instructions a second.
+**Measured on the unit (2026-11-17, benchmark workload 2, UNTRUE STEP, build `70384b1` plus these changes): the JIT is 4.4% faster unpaced (0.1781x to 0.1859x), 4.0% at pace 1 and 2 (0.2390x to 0.2485x, 0.2296x to 0.2388x) and 5.5% at pace 3 (0.2349x to 0.2478x);
+the interpreter is unchanged (0.0365x).** A little under the 6% fewer host instructions measured on the Mac, so **the cold-code layout (aimed at the A35's small instruction cache) added nothing visible**: instruction-cache misses are not a major cost there. The audit's calibration
+held: 0.1859x at 2.79G host instructions per emulated second and 0.2478x at 1.76G give 0.52G and 0.44G, against the 0.53G and 0.44G used for the predictions (`docs/R36S-FIRMWARE.md`).
+
+**What the unit shows** (benchmark with `# jit` lines, pace 3, one second; the build before this part, unchanged by it): 98.9% of instructions compiled; 240 blocks compiled in the second (under 5% of it); 192,000 entries; 21M guest instructions a second.
 The generated code is not the problem alone and compiling is not the problem: the unit is simply about 20x slower than an M1 on all of it.
 
 **What is left, and what each is worth** (measured on the Mac, to be confirmed on the unit): a compiled path for interrupt delivery (the Rust trip per interrupt is the largest single item, perhaps 10-15% at pace 3, and a risky change to the machine loop);
 guest registers kept in host registers across chained blocks (about 2-3 of the 10 hot instructions per block); longer blocks through `if { }` (the earlier attempt gained nothing); loads and stores with their slow path out of line.
 None of these is 4x, and together they are perhaps 1.3x on top of this part.
+
+## Using the other cores (2026-11-17: looked at, two measurements built, no gain claimed)
+
+**How the cores are used.** The whole emulated machine (both emulated cores and every peripheral) runs on **one host thread**: SDL's audio callback in the app (`audio_step`),
+the job thread in a Device report or benchmark. The main thread draws and takes input (about 10% of a core at 30 fps). The unit's four Cortex-A35s share one cluster and one
+clock, so two of the four are idle. Nothing set thread affinity or priority before this. (The GPU, a Mali-G31, does not help: the work is one dependent instruction stream.)
+
+**What could use them, from this document's own figures** (arithmetic and the profile above, not measurements of the unit):
+
+| Idea | At most | Risk |
+|---|---|---|
+| Pin the emulating thread to the last core, the main thread to the first | a few percent (a guess) | low; **built, off by default** (below) |
+| Compile JIT blocks on a spare core | 5% (240 blocks a second is under 5% of the time) | medium: upstream's code cache, chain patching |
+| Move the LCD pixel feed to a worker | under the 15% that peripherals and the LCD take together; the per-byte SPI register path stays | medium, vendored |
+| An optimizing JIT tier compiled on a spare core (registers kept across blocks, longer blocks) | about 1.3x, as the list above says, and it makes the compile cost affordable | high effort |
+| Run the main loop and the interrupt handlers on two threads | the only one of the size needed: the interrupt handlers are 12% (Omni), 15% (Felucca) and 31% (UNTRUE STEP) of the instructions, 29M, 35M and 73M a second against the unit's about 42M unpaced, so Omni and Felucca might keep audio at real time on one core, UNTRUE STEP not | very high: shared memory, interrupt masking would have to become a lock, and it breaks the deterministic core (CLAUDE.md rule 4); at most a separate, non-deterministic fast mode, as a spike in a scratch copy first |
+
+**Built (host only, nothing in the core):**
+
+- **CPU time by thread** (`host/threads.h`: `/proc/self/task/<tid>/stat`, utime + stime in 10 ms ticks; "not available" off Linux). The Device report has a
+  `threads` line over all its firmware runs ("over 12.3 s: fm1ntt-job 98.2% (cpu 3), main 9.1% (cpu 0), ...; all N threads X% of 4 cores") and a `thread pin` line;
+  the benchmark file has the same as `# threads` and `# thread pin` comment lines (no result lines: `bench-compare.py` is unchanged). **What to read:** the busiest thread should be the
+  emulating one at about 100%; the main thread's share is what competes with it if the scheduler puts them on one core; a total well over 100% says another core is already in use.
+- **Thread placement, measured:** one warmed-up machine, then six windows that alternate between the scheduler's free choice and the emulating thread pinned to the last core with
+  the main thread on the first, in the order free-pinned, pinned-free, free-pinned. The Device report's `thread placement` line (best setting) and the benchmark's `# thread placement` line (JIT, pace 3) give
+  both medians and ranges and say "pinned is faster in every window", "slower in every window" or "the ranges overlap: no clear difference". **It needs a job thread** (TOOLS > Device report or Benchmark): a
+  command-line run is on the main thread and says so. It adds about 20 s to each (one warm-up and six windows).
+- **`--pin` (or `FM1NTT_PIN=1`)** pins for real: the audio thread (and the job thread) to the last core, the window's thread to the first. **Off by default until the unit's report says it helps.**
+
+**Checked:** the parser and sums in the self-test on any system; on Linux the self-test also reads `/proc`, pins the calling thread and puts it back, and runs the placement test end to end on a job thread with the
+bundled firmware (Debian 12 arm64 in Docker, on an Apple chip: free 6.887x against pinned 6.894x, ranges overlapping: it shows the machinery works, **not** what the R36S will do). **Untested on the unit.**
+
+**Next:** run the Device report and the benchmark on the unit and read `threads` and `thread placement`; if pinning is faster in every window, make it the default; if the main thread is already apart, the cores are not the limit and the
+remaining levers are the JIT's, above.
 
 ## What would
 

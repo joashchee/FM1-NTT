@@ -92,6 +92,7 @@ echo "[*] Licences..."
 cp "$HERE/copyright" "$pkg/usr/share/doc/fm1ntt/copyright"
 cp "$REPO/LICENSE" "$REPO/NOTICE" "$pkg/usr/share/doc/fm1ntt/"
 cp "$REPO/core/vendor/fm1-emu/LICENSE" "$pkg/usr/share/doc/fm1ntt/LICENSE.fm1-emu"
+cp "$REPO/core/vendor/msfa/COPYING" "$pkg/usr/share/doc/fm1ntt/LICENSE.msfa-Apache-2.0"
 
 size_kb="$(du -sk "$pkg/usr" | cut -f1)"
 cat > "$pkg/DEBIAN/control" <<CONTROL

@@ -7,6 +7,7 @@
  *   fm1ntt --report [FIRMWARE]         the Device report (r3i6nos rule 9) to $BASE/r36s-report.txt, with the power windows
  *   fm1ntt --bench [--seconds N] [--fw FILE]   the Benchmark report to $BASE/bench/ (compare with scripts/bench-compare.py)
  *   fm1ntt --rec-demo [--features a,b] [--no-video] [FIRMWARE]   Rec demo (rule 11) to $BASE/Demo/
+ *   fm1ntt --pin ...                   (or FM1NTT_PIN=1) the emulating (audio) thread on the last core, the main thread on the first: off by default, to be measured
  *   fm1ntt --version
  *
  * The FM-1's 240x240 screen sits flush top left, pixel for pixel. Fn (raw button 16, Tab or F1) toggles Standard (1x, panels right and
@@ -32,6 +33,7 @@
 
 #include "fm1ntt.h"
 #include "pix.h"
+#include "threads.h"
 #include "toast.h"
 
 #ifndef FM1NTT_BUILD
@@ -117,6 +119,7 @@ typedef struct {
     int job_kind, job_style, want_demo;
     double job_seconds;
     char job_result[200];
+    int pin, pinned;                    /* --pin: the audio (emulating) thread on the last core, the main thread on the first; pinned: the audio thread has done it */
     uint32_t budget;                    /* instructions a buffer may spend (0: MAX_INSNS_PER_BUFFER); Rec demo's self-test lowers it */
 } App;
 
@@ -441,6 +444,7 @@ static int g_quiet_logs;                /* the self-test keeps report text off s
 static void audio_cb(void *ud, Uint8 *stream, int len) {
     App *a = ud;
     SDL_AtomicAdd(&a->callbacks, 1);
+    if (a->pin && !a->pinned) { int e, u; a->pinned = 1; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }   /* the emulation runs here: the last core */
     audio_step(a, (int16_t *)stream, (size_t)len / 4);
 }
 
@@ -1016,6 +1020,15 @@ static void draw_job_progress(uint32_t *c, const App *a) {
 }
 
 /* ---- the self-test ----------------------------------------------------------------------------------------------------- */
+#ifdef __linux__
+/* the placement test on a job thread, as the app runs it (the self-test checks it end to end with short windows) */
+typedef struct { char fw[300]; PinAB ab; int rc; } PinJob;
+static int pin_job(void *p) {
+    PinJob *j = p;
+    j->rc = speed_firmware_pin_ab(j->fw, 0, fm1ntt_jit_available(), fm1ntt_jit_available() ? 3 : 0, 0.05, &j->ab);
+    return 0;
+}
+#endif
 static int selftest(void) {
     int bad = 0;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL: %s (line %d)\n", #c, __LINE__); bad++; } } while (0)
@@ -1547,6 +1560,70 @@ static int selftest(void) {
     b.m = fm1ntt_new();
     CHECK(load_firmware(&b, "/nonexistent/x.fwsc", 0, 0) == -1 && b.msg_style == 3);
     fm1ntt_free(b.m);
+    /* threads.h: the /proc parser, the per-thread sums and the placement choice (the parts that are plain functions, on any system), and /proc and the
+     * affinity calls themselves where there is a Linux */
+    {
+        ThrCpu t;
+        char line[800], num[24];
+        snprintf(line, sizeof line, "1234 (tmux: srv (x)) S");
+        for (int f = 4; f <= 52; f++) { snprintf(num, sizeof num, " %d", f == 14 ? 250 : f == 15 ? 50 : f == 39 ? 3 : 0); strcat(line, num); }
+        CHECK(thr_parse_stat(line, &t) && t.tid == 1234 && !strcmp(t.name, "tmux: srv (x)") && t.ticks == 300 && t.cpu == 3);
+        CHECK(thr_parse_stat("5 (a) S 1 1 1 0 0 0 0 0 0 0 10 20", &t) && t.ticks == 30 && t.cpu == -1);      /* a short line: no processor field */
+        CHECK(!thr_parse_stat("garbage", &t) && !thr_parse_stat("1 (x", &t) && !thr_parse_stat("5 (a) S 1 1", &t) && !thr_parse_stat("", &t));
+        long hz = sysconf(_SC_CLK_TCK);
+        ThrSnap sa = {0}, sb = {0};
+        sa.wall_ms = 1000; sb.wall_ms = 5000;                                  /* 4 s */
+        sa.n = 1; sa.t[0] = (ThrCpu){.tid = 100, .ticks = 10, .cpu = 0}; strcpy(sa.t[0].name, "fm1ntt");
+        sb.n = 3;
+        sb.t[0] = (ThrCpu){.tid = 100, .ticks = 10 + (unsigned long long)hz * 4 / 10, .cpu = 0}; strcpy(sb.t[0].name, "fm1ntt");          /* 0.4 s: 10% */
+        sb.t[1] = (ThrCpu){.tid = 200, .ticks = (unsigned long long)hz * 2, .cpu = 3}; strcpy(sb.t[1].name, "fm1ntt-job");              /* 2 s: 50% */
+        sb.t[2] = (ThrCpu){.tid = 300, .ticks = 0, .cpu = 1}; strcpy(sb.t[2].name, "idle");
+        char tx[400];
+        thr_describe(&sa, &sb, 100, 4, tx, sizeof tx);
+        CHECK(strstr(tx, "over 4.0 s: fm1ntt-job 50.0% (cpu 3), main 10.0% (cpu 0)") && strstr(tx, "all 3 threads 60.0% of 4 cores") && !strstr(tx, "idle"));
+        ThrSnap none = {0};
+        thr_describe(&sa, &none, 100, 4, tx, sizeof tx);
+        CHECK(strstr(tx, "not available"));
+        int e = -1, u = -1;
+        CHECK(!thr_choose(1, &e, &u) && thr_choose(4, &e, &u) && e == 3 && u == 0 && thr_choose(2, &e, &u) && e == 1 && u == 0);
+#ifdef __linux__
+        ThrSnap live;
+        int found = 0;
+        CHECK(thr_snapshot(&live, 0) >= 1);
+        for (int i = 0; i < live.n; i++) if (live.t[i].tid == (int)getpid()) found = 1;
+        CHECK(found);                                                                          /* the main thread is a task of this process */
+        cpu_set_t old, now;
+        CHECK(sched_getaffinity(0, sizeof old, &old) == 0);
+        int first = -1;
+        for (int i = 0; i < CPU_SETSIZE && first < 0; i++) if (CPU_ISSET(i, &old)) first = i;
+        CHECK(first >= 0 && thr_pin_self(first) == 0 && sched_getaffinity(0, sizeof now, &now) == 0 && CPU_COUNT(&now) == 1 && CPU_ISSET(first, &now));
+        sched_setaffinity(0, sizeof old, &old);                                                 /* put it back */
+        ThrPin pp;
+        CHECK(thr_pin_begin(&pp, 0, 0, 2) == -2);                                              /* this IS the main thread */
+        char fw[300];
+        unsetenv("FM1NTT_BUNDLED");                                                            /* (the user-folder tests above pointed it at an empty folder) */
+        default_firmware(fw, sizeof fw);
+        if (getenv("FM1NTT_VERBOSE")) fprintf(stderr, "pin test: firmware '%s', %d cpus\n", fw, thr_ncpu());
+        if (fw[0] && thr_ncpu() >= 2) {                                                        /* end to end, on a job thread, with the bundled firmware */
+            cpu_set_t main_before, main_after;
+            sched_getaffinity((pid_t)getpid(), sizeof main_before, &main_before);
+            PinJob *pj = calloc(1, sizeof *pj);
+            snprintf(pj->fw, sizeof pj->fw, "%s", fw);
+            SDL_Thread *jt = SDL_CreateThread(pin_job, "pin-test", pj);
+            if (jt) SDL_WaitThread(jt, NULL);
+            sched_getaffinity((pid_t)getpid(), sizeof main_after, &main_after);
+            CHECK(jt && pj->rc == 1);
+            for (int i = 0; i < BENCH_RUNS; i++) CHECK(pj->ab.free_x[i] > 0 && pj->ab.pin_x[i] > 0);
+            CHECK(pj->ab.emu_cpu == thr_ncpu() - 1 && pj->ab.ui_cpu == 0);
+            CHECK(CPU_EQUAL(&main_before, &main_after));                                       /* the main thread's mask is put back */
+            char pt[500];
+            pin_ab_text(&pj->ab, pt, sizeof pt);
+            CHECK(strstr(pt, "free ") && strstr(pt, "pinned ") && strstr(pt, "cpu "));
+            if (getenv("FM1NTT_VERBOSE")) fprintf(stderr, "pin test: %s\n", pt);
+            free(pj);
+        }
+#endif
+    }
     /* clean up the temporary folder (and only it) */
     char cmd[400];
     if (!getenv("FM1NTT_KEEP") && strstr(root, "fm1ntt-selftest-")) { snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); if (system(cmd) != 0) fprintf(stderr, "could not remove %s\n", root); }
@@ -1615,7 +1692,7 @@ static int wait_event(SDL_Event *e, int ms) {
 
 int main(int argc, char **argv) {
     const char *path = NULL, *shot = NULL, *fwopt = NULL, *features = NULL;
-    int raw = 0, zoomed = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pace_opt = PACE_AUTO;
+    int raw = 0, zoomed = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, pace_opt = PACE_AUTO;
     double seconds = 1.0;
     uint32_t entry = FM1_ENTRY_FELUCCA;
     for (int i = 1; i < argc; i++) {
@@ -1631,6 +1708,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fw") && i + 1 < argc) fwopt = argv[++i];
         else if (!strcmp(argv[i], "--pace") && i + 1 < argc) { const char *v = argv[++i]; pace_opt = !strcmp(v, "auto") ? PACE_AUTO : atoi(v) % 4; }
         else if (!strcmp(argv[i], "--no-jit")) no_jit = 1;
+        else if (!strcmp(argv[i], "--pin")) pin_opt = 1;
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
         else if (!strcmp(argv[i], "--features") && i + 1 < argc) features = argv[++i];
         else if (!strcmp(argv[i], "--no-video")) no_video = 1;
@@ -1647,6 +1725,7 @@ int main(int argc, char **argv) {
     a.midi_note = 60; a.midi_vel = 100; a.slot = 1;
     a.jit_pref = !no_jit && !getenv("FM1NTT_NO_JIT");     /* on wherever the CPU supports it: the interpreter cannot keep up on a handheld */
     a.pace_mode = pace_opt;
+    a.pin = pin_opt || (getenv("FM1NTT_PIN") && *getenv("FM1NTT_PIN") && strcmp(getenv("FM1NTT_PIN"), "0"));
     say(&a, 0, "Pick a firmware in FILES, or give a path on the command line", NULL);
 
     /* the three runs with no window (over SSH): each prints what it did and exits 0 when its file is written */
@@ -1718,6 +1797,7 @@ int main(int argc, char **argv) {
     draw_splash(canvas, "STARTING", 20);                 /* at once, before anything heavy */
     present(ren, tex, canvas);
 
+    if (a.pin) { int e, u; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(u); }       /* the window's thread: the first core (the audio thread takes the last) */
     SDL_AudioSpec want = {.freq = FM1_SAMPLE_RATE, .format = AUDIO_S16SYS, .channels = 2, .samples = AUDIO_FRAMES, .callback = audio_cb, .userdata = &a}, got;
     a.dev = SDL_OpenAudioDevice(NULL, 0, &want, &got, 0);
     if (!a.dev) say(&a, 2, "No sound device: %s", SDL_GetError());
