@@ -724,6 +724,12 @@ struct Gen<'a> {
     itab: u64,
     /// the runner's stop checks are compiled (`Jit::stops`)
     stops: bool,
+    /// The budget. `DONE` (x26) holds the room left of the call's limit (`LIMIT`, x27, kept as it came): a block takes its whole count off at its entry
+    /// (`subs`, one test), so a chain adds nothing, and the instructions done in the call are `LIMIT - DONE`. `n` is the count taken for the block being
+    /// emitted (0 before its entry check): what an exit or a helper's index gives back (`done_at`, `chain`).
+    n: u32,
+    /// The chain exits' slow halves (their `back` label, their `site`, the pc), emitted after the block's hot code: the hot path stays dense in the instruction cache
+    cold: Vec<(Label, Label, u32)>,
     rc: RegCache,
     /// emitting a probe copy (`emit_ops`): the block's instructions
     probe_copy: Option<u32>,
@@ -883,6 +889,18 @@ impl Gen<'_> {
         self.rc.dirty[i] = true;
         h
     }
+    /// rd = op(rn, v) with v an immediate of the instruction, when one instruction does it (a bitmask immediate for and / or / xor, 12 bits for add / sub);
+    /// false, nothing emitted, when not.
+    fn alu_imm(&mut self, op: Op, rd: Reg, rn: Reg, v: u32) -> bool {
+        match op {
+            Op::And => self.a.logic_imm(0, rd, rn, v),
+            Op::Or => self.a.logic_imm(1, rd, rn, v),
+            Op::Xor => self.a.logic_imm(2, rd, rn, v),
+            Op::Add if v < 4096 => { self.a.add_imm(rd, rn, v); true }
+            Op::Sub if v < 4096 => { self.a.sub_imm(rd, rn, v); true }
+            _ => false,
+        }
+    }
     /// rd = op(rn, rm), as `alu` but between any registers.
     fn alu3(&mut self, op: Op, rd: Reg, rn: Reg, rm: Reg) {
         let a = &mut self.a;
@@ -1013,12 +1031,26 @@ impl Gen<'_> {
         self.a.blr(9);
         self.reload();
     }
+    /// rd = the instructions done in this call before this block, plus `i` (the budget, `Gen::n`).
+    fn done_at(&mut self, rd: Reg, i: u32) {
+        self.a.sub(rd, LIMIT, DONE);
+        let adj = i.wrapping_sub(self.n);
+        self.add_imm(rd, rd, adj);
+    }
+    /// Give back what the block took at its entry and did not run (`count` of `n` done).
+    fn give_back(&mut self, count: u32) {
+        debug_assert!(count <= self.n);
+        let back = self.n.saturating_sub(count);
+        if back > 0 {
+            self.add_imm(DONE, DONE, back);
+        }
+    }
     /// Leave with pc = imm, `count` instructions of this block done.
     fn exit_imm(&mut self, pc: u32, count: u32) {
         self.flush();
         self.a.mov32(9, pc);
         self.a.str(9, CPU, off_pc());
-        self.a.add_imm(0, DONE, count);
+        self.done_at(0, count);
         self.a.b(self.exit);
     }
     /// Continue at a fixed pc: straight into its compiled body when the slot holds one,
@@ -1029,16 +1061,22 @@ impl Gen<'_> {
     fn chain(&mut self, pc: u32, count: u32) {
         self.flush();
         let (site, back) = (self.a.label(), self.a.label());
-        self.a.add_imm(DONE, DONE, count);
+        self.give_back(count);
         self.a.bind(site);
         self.a.b(back);
-        self.a.bind(back);
-        self.a.mov32(9, pc);
-        self.a.str(9, CPU, off_pc());
-        self.a.adr(10, site);
-        self.a.str_x(10, CTX, OFF_SLOT);
-        self.a.mov(0, DONE);
-        self.a.b(self.exit);
+        self.cold.push((back, site, pc));
+    }
+    /// The chain exits' slow halves, after everything else: to Rust with pc and the slot, until `link` has patched the site into a branch to the target.
+    fn emit_cold(&mut self) {
+        for (back, site, pc) in std::mem::take(&mut self.cold) {
+            self.a.bind(back);
+            self.a.mov32(9, pc);
+            self.a.str(9, CPU, off_pc());
+            self.a.adr(10, site);
+            self.a.str_x(10, CTX, OFF_SLOT);
+            self.a.sub(0, LIMIT, DONE);
+            self.a.b(self.exit);
+        }
     }
     /// Continue at pc = w(reg), a computed target: straight into its compiled body when the
     /// table holds one for that pc, else back to Rust.
@@ -1052,7 +1090,7 @@ impl Gen<'_> {
         self.flush();
         let back = self.a.label();
         self.a.mov(12, reg);
-        self.a.add_imm(DONE, DONE, count);
+        self.give_back(count);
         if brk {
             self.a.ldr(9, CTX, OFF_BRK);
             self.a.cbnz(9, back);
@@ -1067,12 +1105,12 @@ impl Gen<'_> {
         self.a.br(9);
         self.a.bind(back);
         self.a.str(12, CPU, off_pc());
-        self.a.mov(0, DONE);
+        self.a.sub(0, LIMIT, DONE);
         self.a.b(self.exit);
     }
     /// The helpers' instruction index of op `i` of this block: w2 = DONE + i.
     fn idx_w2(&mut self, i: u32) {
-        self.a.add_imm(2, DONE, i);
+        self.done_at(2, i);
     }
 
     /// w3 = guest address w0 - `base`, and a branch to `miss` unless the `w` bytes at it lie inside [base, base + len) (a halfword is the one at
@@ -1170,7 +1208,7 @@ impl Gen<'_> {
         self.a.mov(2, 1);
         self.a.mov(1, 0);
         self.a.mov_x(0, CTX);
-        self.a.add_imm(3, DONE, idx);
+        self.done_at(3, idx);
         self.a.mov32(4, w as u32);
         self.call(self.h_write);
         self.a.bind(done);
@@ -1247,7 +1285,7 @@ impl Gen<'_> {
         self.a.bind(on);
         self.a.ldr(9, CPU, off_stop_io());
         self.a.cbnz(9, out);
-        self.add_imm(9, DONE, ins + crate::STRETCH_ROOM);
+        self.done_at(9, ins + crate::STRETCH_ROOM);
         self.a.cmp(9, LIMIT);
         self.a.b_cond(AC::Lo, skip);
         self.a.bind(out);
@@ -1272,9 +1310,14 @@ impl Gen<'_> {
     /// Jump to `taken` when a predicated block's condition holds (`exec_fast`'s IfBlk).
     fn if_jump(&mut self, a: u8, rk: u8, fam: u8, alt: bool, rv: u32, taken: Label) {
         let c = if fam == 2 {
-            let rb = self.rhs_reg(rk, rv);
-            let ra = self.src(a);
-            self.a.tst(ra, rb);
+            if rk == 1 && crate::jit_a64::logical_imm(rv).is_some() {
+                let ra = self.src(a);
+                self.a.logic_imm(3, 31, ra, rv);
+            } else {
+                let rb = self.rhs_reg(rk, rv);
+                let ra = self.src(a);
+                self.a.tst(ra, rb);
+            }
             if alt { AC::Ne } else { AC::Eq }
         } else if rk == 1 && fam < 8 {
             let ra = self.src(a);
@@ -1348,10 +1391,12 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.alu3(op, rd, ra, rb);
         }
         Fast::Alu3I { d, a, v, op } => {
-            g.a.mov32(1, v);
             let ra = g.src(a);
             let rd = g.dst(d);
-            g.alu3(op, rd, ra, 1);
+            if !g.alu_imm(op, rd, ra, v) {
+                g.a.mov32(1, v);
+                g.alu3(op, rd, ra, 1);
+            }
         }
         Fast::Alu2 { d, b, op } => {
             let rb = g.src(b);
@@ -1364,10 +1409,19 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.alu3(op, rd, rd, 1);
         }
         Fast::A4 { d, s, op, rk, rv } => {
-            let rb = g.rhs_reg(rk, rv);
-            let ra = g.src(s);
-            let rd = g.dst(d);
-            g.alu3(op, rd, ra, rb);
+            if rk == 1 {
+                let ra = g.src(s);
+                let rd = g.dst(d);
+                if !g.alu_imm(op, rd, ra, rv) {
+                    g.a.mov32(1, rv);
+                    g.alu3(op, rd, ra, 1);
+                }
+            } else {
+                let rb = g.rhs_reg(rk, rv);
+                let ra = g.src(s);
+                let rd = g.dst(d);
+                g.alu3(op, rd, ra, rb);
+            }
         }
         Fast::Ext { d, s, part, signed } => {
             let rs = g.src(s);
@@ -1420,9 +1474,14 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         Fast::BitBr { r, mk, ne, mv, target } => {
             let t = g.a.label();
-            let rb = g.rhs_reg(mk, mv);
-            let ra = g.src(r);
-            g.a.tst(ra, rb);
+            if mk == 1 && crate::jit_a64::logical_imm(mv).is_some() {
+                let ra = g.src(r);
+                g.a.logic_imm(3, 31, ra, mv);
+            } else {
+                let rb = g.rhs_reg(mk, mv);
+                let ra = g.src(r);
+                g.a.tst(ra, rb);
+            }
             g.a.b_cond(if ne { AC::Ne } else { AC::Eq }, t);
             g.chain(next_pc, count);
             g.a.bind(t);
@@ -1457,26 +1516,31 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         // (the multiply-accumulates 7 / 8 read d too, and the rounding conversions other than
         // trunc have no single A64 instruction here: through the interpreter's executor)
         Fast::FOp { d, a, b, op } if matches!(op, 0..=6 | 0x1f | 0x5f | 0x8f | 0x9f) => {
-            g.ld_reg(0, a);
+            // (on the host registers that hold the guest ones: no copy through w0 / w1)
             match op {
                 0x1f | 0x5f => {
-                    g.a.fmov_s_w(0, 0);
-                    if op == 0x1f { g.a.fcvtzs(0, 0) } else { g.a.fcvtzu(0, 0) }
+                    let ra = g.src(a);
+                    g.a.fmov_s_w(0, ra);
+                    let rd = g.dst(d);
+                    if op == 0x1f { g.a.fcvtzs(rd, 0) } else { g.a.fcvtzu(rd, 0) }
                 }
                 0x8f | 0x9f => {
-                    if op == 0x8f { g.a.scvtf(0, 0) } else { g.a.ucvtf(0, 0) }
-                    g.a.fmov_w_s(0, 0);
+                    let ra = g.src(a);
+                    if op == 0x8f { g.a.scvtf(0, ra) } else { g.a.ucvtf(0, ra) }
+                    let rd = g.dst(d);
+                    g.a.fmov_w_s(rd, 0);
                 }
                 _ => {
-                    g.ld_reg(1, b);
-                    g.a.fmov_s_w(0, 0);
-                    g.a.fmov_s_w(1, 1);
+                    let ra = g.src(a);
+                    let rb = g.src(b);
+                    g.a.fmov_s_w(0, ra);
+                    g.a.fmov_s_w(1, rb);
                     let opc = match op { 0 => 0x1e20_2800, 1 => 0x1e20_3800, 2 => 0x1e20_0800, 3 => 0x1e20_1800, 5 => 0x1e20_7800, _ => 0x1e20_6800 };
                     g.a.fop(opc, 0, 0, 1);
-                    g.a.fmov_w_s(0, 0);
+                    let rd = g.dst(d);
+                    g.a.fmov_w_s(rd, 0);
                 }
             }
-            g.st_reg(0, d);
         }
         Fast::Rts => {
             g.a.ldr(9, CPU, off_rets());
@@ -1805,7 +1869,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::SetIe { on: false } if off_ie() < 4096 => g.a.strb(ZR, CPU, off_ie()),
         Fast::SetIe { on: true } => {
             g.a.mov_x(0, CTX);
-            g.a.add_imm(1, DONE, idx);
+            g.done_at(1, idx);
             g.call(h_sti::<B> as *const () as u64);
             bus_used = true;
         }
@@ -2001,6 +2065,8 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         h_pair: h_pair::<B> as *const () as u64,
         itab,
         stops: stops.is_some(),
+        n: 0,
+        cold: Vec::new(),
         rc: RegCache::default(),
         probe_copy: None,
     };
@@ -2013,21 +2079,12 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::Swap { .. } | Fast::IfBlk { has_else: true, .. }))
         && (ops.len() < 32 || ops.last().is_some_and(|o| o.fast.may_jump()));
     let probe_l = probe_ok.then(|| g.a.label());
-    // prologue (entry from Rust); chained blocks enter at the body
-    g.a.stp_pre(29, 30, SP, -FRAME);
-    g.a.stp(CPU, CTX, SP, 16);
-    g.a.stp(RAM, XIP, SP, 32);
-    g.a.stp(KEEP, KEEP2, SP, 48);
-    g.a.stp(25, DONE, SP, 64);
-    g.a.stp(LIMIT, 28, SP, 80);
-    g.a.mov_x(CPU, 0);
-    g.a.mov_x(CTX, 1);
-    g.a.mov_x(RAM, 2);
-    g.a.mov_x(XIP, 3);
-    g.a.mov(LIMIT, 4);
-    g.a.mov_x(FLAGS, 5);
-    g.a.movz(DONE, 0, 0);
+    // the entry from Rust is one branch to the prologue, which sits after the block (it runs once per call, the hot code is what chains reach);
+    // chained blocks enter at the body, right after it
+    let (prologue, body_l) = (g.a.label(), g.a.label());
+    g.a.b(prologue);
     let body = g.a.here();
+    g.a.bind(body_l);
     if probe_ok {
         g.a.movz(STOPI, 0, 0);
     }
@@ -2038,7 +2095,8 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
     // the limit), or this block isn't compiled whole (its rest runs interpreted)
     if let Some(whole) = stops {
         let (go, stop) = (g.a.label(), g.a.label());
-        g.a.cbz(DONE, go);
+        g.a.cmp(DONE, LIMIT);
+        g.a.b_cond(AC::Eq, go);
         g.a.ldr(9, CPU, off_stop_pc());
         g.a.cbz(9, go);
         if whole {
@@ -2077,9 +2135,8 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
             g.a.bind(on);
             g.a.ldr(9, CPU, off_stop_io());
             g.a.cbnz(9, stop);
-            g.a.add_imm(9, DONE, crate::STRETCH_ROOM);
-            g.a.cmp(9, LIMIT);
-            g.a.b_cond(AC::Lo, go);
+            g.a.cmp_imm(DONE, crate::STRETCH_ROOM);
+            g.a.b_cond(AC::Hi, go);
         }
         g.a.bind(stop);
         g.exit_imm(pc0, 0);
@@ -2088,11 +2145,13 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
     // the whole prefix must fit the call's limit, else back to Rust before running any of it
     {
         let fits = g.a.label();
-        g.a.add_imm(9, DONE, insns(ops) + then.len() as u32);
-        g.a.cmp(9, LIMIT);
-        g.a.b_cond(AC::Ls, fits);
+        let n = insns(ops) + then.len() as u32;
+        g.a.subs_imm(DONE, DONE, n);
+        g.a.b_cond(AC::Hs, fits);
+        g.a.add_imm(DONE, DONE, n);
         g.exit_imm(pc0, 0);
         g.a.bind(fits);
+        g.n = n;
     }
 
     if !(0x0200_0000..0x0400_0000).contains(&pc0) {
@@ -2146,6 +2205,7 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         g.a.bind(start);
         emit_ops::<B>(&mut g, ops, swaps, then, pc0, profile, true);
     }
+    g.emit_cold();
     g.a.bind(exit);
     g.a.ldp(LIMIT, 28, SP, 80);
     g.a.ldp(25, DONE, SP, 64);
@@ -2154,6 +2214,21 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
     g.a.ldp(CPU, CTX, SP, 16);
     g.a.ldp_post(29, 30, SP, FRAME);
     g.a.ret();
+    g.a.bind(prologue);
+    g.a.stp_pre(29, 30, SP, -FRAME);
+    g.a.stp(CPU, CTX, SP, 16);
+    g.a.stp(RAM, XIP, SP, 32);
+    g.a.stp(KEEP, KEEP2, SP, 48);
+    g.a.stp(25, DONE, SP, 64);
+    g.a.stp(LIMIT, 28, SP, 80);
+    g.a.mov_x(CPU, 0);
+    g.a.mov_x(CTX, 1);
+    g.a.mov_x(RAM, 2);
+    g.a.mov_x(XIP, 3);
+    g.a.mov(LIMIT, 4);
+    g.a.mov_x(FLAGS, 5);
+    g.a.mov(DONE, 4);
+    g.a.b(body_l);
     Some((g.a.finish().iter().flat_map(|w| w.to_le_bytes()).collect(), body * 4))
 }
 

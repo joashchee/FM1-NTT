@@ -148,6 +148,13 @@ impl Asm {
     pub fn bic(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x0a20_0000 | rm << 16 | rn << 5 | rd); }
     pub fn ands(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x6a00_0000 | rm << 16 | rn << 5 | rd); }
     pub fn tst(&mut self, rn: Reg, rm: Reg) { self.ands(ZR, rn, rm); }
+    /// `and` / `orr` / `eor` / `ands` of w(rn) with a bitmask immediate (`logical_imm`), None when `v` is not one. `kind`: 0 and, 1 orr, 2 eor, 3 ands.
+    pub fn logic_imm(&mut self, kind: u32, rd: Reg, rn: Reg, v: u32) -> bool {
+        let Some(bits) = logical_imm(v) else { return false };
+        let base = [0x1200_0000u32, 0x3200_0000, 0x5200_0000, 0x7200_0000][kind as usize];
+        self.e(base | bits << 10 | rn << 5 | rd);
+        true
+    }
     /// `and` with a contiguous mask `((1 << ones) - 1) << shift` (32-bit).
     pub fn and_mask(&mut self, rd: Reg, rn: Reg, ones: u32, shift: u32) {
         debug_assert!((1..=31).contains(&ones) && ones + shift <= 32);
@@ -234,4 +241,119 @@ impl Asm {
     pub fn ret(&mut self) { self.e(0xd65f_03c0); }
     /// `adr xd, label`
     pub fn adr(&mut self, rd: Reg, l: Label) { self.fixups.push((self.code.len(), l.0, Fix::Adr21)); self.e(0x1000_0000 | rd); }
+}
+
+/// The immr:imms field (12 bits, with N = 0 for 32-bit) of a bitmask immediate: `v` is a run of ones, rotated, repeated across the register in a
+/// power-of-two element size. None for 0 and for all ones (not encodable) and for anything that is not such a pattern.
+pub fn logical_imm(v: u32) -> Option<u32> {
+    if v == 0 || v == !0 {
+        return None;
+    }
+    let mut size = 32u32;
+    while size > 2 {
+        let half = size / 2;
+        let mask = (1u32 << half) - 1;
+        if v & mask == (v >> half) & mask {
+            size = half;
+        } else {
+            break;
+        }
+    }
+    let mask = if size == 32 { !0u32 } else { (1u32 << size) - 1 };
+    let e = v & mask;
+    let ones = e.count_ones();
+    let run = (1u32 << ones) - 1; // (ones < size <= 32 here: all ones was refused above, and an element of all ones repeats to all ones)
+    for immr in 0..size {
+        let rotated = if immr == 0 { run } else { ((run >> immr) | (run << (size - immr))) & mask };
+        if rotated == e {
+            let imms = ((!(size - 1) << 1) | (ones - 1)) & 0x3f;
+            return Some(immr << 6 | imms);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod logical_imm_tests {
+    use super::logical_imm;
+    /// What the A64 decoder makes of N = 0, immr, imms (DecodeBitMasks, 32-bit): None for a reserved encoding.
+    fn decode(immr: u32, imms: u32) -> Option<u32> {
+        let t = !imms & 0x3f;
+        if t == 0 {
+            return None;
+        }
+        let len = 31 - t.leading_zeros();
+        if len < 1 || len > 4 + 1 {
+            return None;
+        }
+        let size = 1u32 << len;
+        let levels = size - 1;
+        let (s, r) = (imms & levels, immr & levels);
+        if s == levels {
+            return None;
+        }
+        let welem = if s + 1 == 32 { !0 } else { (1u32 << (s + 1)) - 1 };
+        let mask = if size == 32 { !0u32 } else { (1u32 << size) - 1 };
+        let elem = if r == 0 { welem } else { ((welem >> r) | (welem << (size - r))) & mask };
+        let mut v = 0u32;
+        let mut i = 0;
+        while i < 32 {
+            v |= elem << i;
+            i += size;
+        }
+        Some(v)
+    }
+    /// Encodings from clang's assembler: `and w0, w1, #v` assembled, bits 21 to 10 of the word.
+    #[test]
+    fn matches_the_assembler() {
+        let cases: &[(u32, u32)] = &[
+        (0x00000001, 0x0),
+        (0x00000002, 0x7c0),
+        (0x000000ff, 0x7),
+        (0x0000ff00, 0x607),
+        (0x80000000, 0x40),
+        (0x55555555, 0x3c),
+        (0xaaaaaaaa, 0x7c),
+        (0x0000ffff, 0xf),
+        (0xfffffffe, 0x7de),
+        (0xf0f0f0f0, 0x133),
+        (0x0f0f0f0f, 0x33),
+        (0x7fffffff, 0x1e),
+        (0xfffffff0, 0x71b),
+        (0x00ff00ff, 0x27),
+        (0x00000003, 0x1),
+        (0x00000006, 0x7c1),
+        (0xc0000003, 0x83),
+        (0x00000018, 0x741),
+        (0x000001c0, 0x682),
+        (0xffff0000, 0x40f),
+        (0x01010101, 0x30),
+        (0x80000001, 0x41),
+        (0x000000fe, 0x7c6),
+        (0x7ffffffe, 0x7dd),
+        ];
+        for &(v, want) in cases {
+            assert_eq!(logical_imm(v), Some(want), "{v:#x}");
+        }
+        for v in [0u32, 0xffff_ffff, 0x1234_5678, 0x0000_0026, 0x0000_ff0f] {
+            assert_eq!(logical_imm(v), None, "{v:#x} must not encode");
+        }
+    }
+    /// Every canonical encoding the decoder accepts comes back from `logical_imm` as itself.
+    #[test]
+    fn every_encodable_value_round_trips() {
+        let mut n = 0;
+        for immr in 0..32u32 {
+            for imms in 0..64u32 {
+                let Some(v) = decode(immr, imms) else { continue };
+                let size = 1u32 << (31 - (!imms & 0x3f).leading_zeros());
+                if immr >= size {
+                    continue;
+                }
+                assert_eq!(logical_imm(v), Some(immr << 6 | imms), "immr {immr} imms {imms:#x} v {v:#x}");
+                n += 1;
+            }
+        }
+        assert_eq!(n, 2 + 12 + 56 + 240 + 992, "every element size from 2 to 32 bits");
+    }
 }

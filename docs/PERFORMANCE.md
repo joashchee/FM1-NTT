@@ -139,6 +139,25 @@ jumps and other `if`s, which the compiler leaves out, and the 800-odd sites it d
 The rest of the JIT's cost is structural: the block's limit check and flush at each boundary (about a quarter of the guest ops are branches, 0.27 blocks entered per guest instruction) and
 guest registers kept in memory between blocks. Keeping them in host registers across chained blocks, or compiling longer blocks, would take the sound of a rewrite of the compiler, for perhaps another 15%.
 
+## The JIT, second part (2026-11-17): 5-7% fewer instructions, and where the rest is
+
+Measured as host instructions per guest instruction on the M1 (UNTRUE STEP, pace 0): **12.62 before, 11.87 after** (Halflight 10.37 to 9.65, Midnight 11.66 to 10.81, WORN TAPE 12.06 to 11.32, Voicemail 12.15 to 11.35).
+What changed (`core/vendor/fm1-emu/VENDORED.md`): a block's budget is taken off once at its entry (2 instructions less per block), the float ops and the immediates use the held registers and
+immediate forms, and cold code (the prologue, the chain exits' slow halves) sits after the hot code.
+
+**Where the time is** (a sampling profile of the Mac, CPU time, UNTRUE STEP, interpreter off): at pace 0 the compiled blocks are 66% and the rest is the SoC (peripheral reads and writes through helpers, the machine loop);
+at pace 3 the blocks are 54%, `run_blocks` (the machine loop, with the JIT entry and the peripherals' advance inlined) 12.5%, and the peripherals' reads, writes, interrupt checks and the LCD another 15%.
+**Why compiled code leaves**: of 2.09M exits in 3 emulated seconds (pace 0), 1.74M (83%) are `stop`, an interrupt that became deliverable, one every 108 guest instructions at pace 3 (577,000 a second, from the SPI and the sound);
+11% are the limit or a computed jump with no body in the table, 5% a bus access that made a tick due, and 0.1% an unlinked chain. Each is a trip through Rust of well over a thousand host instructions. 99% of guest instructions run compiled,
+and one block in 2,400 was given up on, so the interpreter is not the cost.
+
+**What the unit shows** (benchmark with `# jit` lines, pace 3, one second): 98.9% of instructions compiled; 240 blocks compiled in the second (under 5% of it); 192,000 entries; 21M guest instructions a second.
+The generated code is not the problem alone and compiling is not the problem: the unit is simply about 20x slower than an M1 on all of it.
+
+**What is left, and what each is worth** (measured on the Mac, to be confirmed on the unit): a compiled path for interrupt delivery (the Rust trip per interrupt is the largest single item, perhaps 10-15% at pace 3, and a risky change to the machine loop);
+guest registers kept in host registers across chained blocks (about 2-3 of the 10 hot instructions per block); longer blocks through `if { }` (the earlier attempt gained nothing); loads and stores with their slow path out of line.
+None of these is 4x, and together they are perhaps 1.3x on top of this part.
+
 ## What would
 
 In order of what is known:

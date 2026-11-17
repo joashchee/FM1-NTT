@@ -26,6 +26,16 @@
 - **Changed, 2026-11-17 (by this project, a read-only addition for diagnostics):** `crates/fm1-core/src/jit.rs` gets `Jit::counts()` (blocks still cold, compiled,
   and given up on, and the code cache's bytes used) and `crates/fm1-core/src/lib.rs` gets `Cpu::jit_counts()` over it (zeros when there is no native JIT).
   Nothing executes differently; it is read by the benchmark (`fm1ntt_jit_report`) to say where the unit's time goes (blocks the JIT gave up on run in the interpreter).
+- **Changed, 2026-11-17, second part (by this project; AArch64 `Gen` in `jit.rs` and `jit_a64.rs` only, the x86-64 and wasm compilers untouched):**
+  - **The budget counts down** (`DONE`, x26, now holds the room left of the call's limit; `Gen::n`, `done_at`, `give_back`): a block takes its whole count off at its entry
+    (`subs` and one branch, where it was an add, a compare and a branch) and a chain adds nothing, so the per-block bookkeeping is 2 instructions less; exits and the helpers'
+    tick indexes give back what the block did not run (`LIMIT - DONE`). The stop checks (`cbz DONE`, `STRETCH_ROOM`) are the same tests on the new meaning.
+  - **Float ops on the held host registers** (`FOp`: no copy through w0 / w1), **immediate forms** for and / or / xor (a bitmask immediate: `jit_a64::logical_imm`, with two tests: 24 encodings
+    from clang's assembler, and every encodable 32-bit pattern round-tripped against a decoder), add / sub (12 bits), and bit-test branches (`tst` with an immediate).
+  - **Cold code out of line**: the entry from Rust is one branch to the prologue, which sits after the block; each chain exit's slow half (`back`: pc, slot, to Rust) is emitted after the
+    block's hot code (`Gen::cold`, `emit_cold`), so the hot path is dense in the instruction cache. Not measured on the unit.
+  - What it does: 5-7% fewer host instructions per guest instruction on seven firmwares (an Apple M1), the same audio, final pc and instruction count as the interpreter after 6 s on nine
+    firmwares at pace 0 and 3, and the vendored tests (74 with the two new ones) pass in debug and release.
 - **Updating:** fetch the new commit into an empty folder outside the repository, diff it against this tree, read the diff, copy, and change
   the commit above, `NOTICE`, `docs/LICENSING.md` and the changelog in the same commit. Run `scripts/check.sh`.
 - **Not ours to fix here:** a bug in these crates is reported or fixed upstream; a local fix is a recorded change above.
