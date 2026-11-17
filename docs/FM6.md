@@ -82,8 +82,38 @@ detune 0 to 14): 84 partials within 0.15 cent of the emulator, most within 0.05.
 for PAD and BRASS), and the level difference is a constant 2.8 to 3.2 dB, the output gain. The model is **fitted to measurements, not read from the firmware**, for ratio mode only (fixed-frequency mode is
 unmeasured), at 44.1 kHz, on one firmware; whether the FM-1's stock firmware has the same law is not known.
 
-**Not covered**: one firmware (Jangada and Skiff share the bank and were not compared), mono single notes (no chords, so no voice stealing), the pitch wheel, the modulation wheel, the LFO's effect, the 12 voice limit,
+**Not covered**: other firmwares than Felucca, Jangada and Skiff (SLOOP, Melodee and the rest of the Felucca family are not in the pack or not run), mono single notes (no chords, so no voice stealing), the pitch wheel, the modulation wheel, the LFO's effect, the 12 voice limit,
 the unit itself (nothing ran on an FM-1). The output gain (a constant 2.8 to 3.2 dB below fm6's: not looked for) and the firmware's 7 to 9 ms latency are the other differences.
+
+## Jangada and Skiff (2026-11-17)
+
+Both are Felucca forks (Jangada by zednaked, Skiff 2.6 by illuminus5 from Felucca 1.1.5, as the Pack's `SOURCES.md` say), run the same way (`FM6_FIRMWARE=jangada|skiff scripts/fm6-compare.sh`, optionally `FM6_TUNING=felucca`),
+and answer the same editor protocol (`FM6_PUT` replies `rc 0`; Jangada's USB product string is "Jangada", Skiff's "Felucca").
+
+**Reaching the FM6 engine differs.** Skiff: part 2 is FM6 at boot (its list screen says FM6, patch F5), PRESETS steps F1 to F8 (it names them FM BRASS, FM BASS...). Jangada: part 2 boots on its **DIGITAL** engine (the four-operator
+one Felucca replaced with FM6 in 1.0: IDX, MDEC, FB, REL), and **FM6 is far down the preset list**: 55 single clicks of PRESETS reach TINE EP (F1), after ANALOG, DIGITAL, PHASE, LOFI, SAMPLE, VOICE, TRIO, WHEEL and
+GRAIN; its FM6 presets are TINE EP, BELL, FM BASS, BRASS, PAD, MARIMBA, ORGAN, PLUCK and its own CARVAO. A big turn of an encoder is not taken one click for one (55 in a single step landed on a GRAIN preset), so
+`fm6cmp --encn NAME:N` turns it one click at a time. Both have the same FX page (chorus, delay and reverb on knobs 2 to 4; Skiff also has a second page, a send delay, not needed here: the tail after the
+key goes up is under -90 dB), and MIDI channel 2 plays part 2.
+
+**The engine is the same engine, and so is the tuning.** At DTUN 0 the detune step measured 1.978, 1.550, 1.197, 0.905, 0.677, 0.5005 and 0.367 cents at notes 36, 48, 60, 72, 84, 96 and 108 in **all three** firmwares, equal to
+four decimals; the DTUN spread is the same (only the F5 PAD preset has it, 30, unit 2.83 cents, the pattern 0, +1, -1, +2, -2, +3 on the carriers); the output is the same 3.0 dB below fm6; and `Tuning::Felucca` needed
+no change. Over the five presets all three have (TINE EP, BELL, FM BASS, BRASS, PAD; notes 36, 60, 84; velocity 40 and 100: 30 runs each):
+
+| | mean level spread, msfa tuning | with `Tuning::Felucca` | worst | level fm6 minus emulator | strongest partial |
+|---|---|---|---|---|---|
+| Felucca 1.8.2 | 7.6 dB | **0.8 dB** | 3.3 dB | +2.8 to +3.2 dB | within 0.1 cent |
+| Jangada 1.0.1 | 7.6 dB | **1.2 dB** | 5.6 dB (SOFT PAD, note 84) | +2.7 to +3.4 dB | within 0.1 cent |
+| Skiff 2.6 | 7.5 dB | **0.7 dB** | 2.9 dB | +2.8 to +3.2 dB | within 0.8 cent (GLASS BELL, note 36) |
+
+**What they add, F6 to F8** (both firmwares list them; Felucca's list has five): NYLON PICK matches (level +2.6 to +2.8 dB, spread 0.3 to 1.6 dB). **WOOD BARS** matches over its audible note (the curves are within about 2 dB
+for 0.4 s): its "spread" of 70 dB is the decayed tail, where one engine is at -112 dB and the other at digital silence, so the metric means nothing for a voice that dies in half a second. **DRAWBARS differs and is
+unexplained**: the shape matches (spread 0.1 to 1.4 dB) but the emulator is **1.0 to 3.1 dB quieter than the usual 3 dB** (+4.0 dB at notes 60 and 84, +6.1 dB at note 36, the same in both firmwares), and
+stripping the LFO, pitch envelope, feedback, detune, velocity, rate and level scaling changes nothing. It has six carriers (algorithm 32), a 0.5 ratio and a 1.5 ratio, but a plain six-carrier test voice (ratios 1 to 6) gives
+the usual +3.0 dB, so it is not the count of carriers; at note 36 the partials fall 1.3 to 3.4 dB further the lower they are. Not chased.
+
+**Differences between the three, none in the engine:** the note-on latency (first sample over 0.002: Felucca 7 to 9 ms, Skiff 7 ms, **Jangada 16 ms**), and what the panel offers. Nothing else was found. Still the emulator, one note at a time,
+and not the stock firmware or a unit.
 
 ## The API
 

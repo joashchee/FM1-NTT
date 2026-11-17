@@ -1,4 +1,4 @@
-//! `fm6cmp FIRMWARE.fwsc [--note N] [--vel V] [--voice I] [--enc NAME:CLICKS]... [--channel C] [--key] [--fm6-note N] [--hold S] [--out DIR]`: plays one note on a firmware in the emulator
+//! `fm6cmp FIRMWARE.fwsc [--note N] [--vel V] [--voice I] [--enc NAME:CLICKS]... [--encn NAME:CLICKS] [--channel C] [--key] [--fm6-note N] [--hold S] [--out DIR]`: plays one note on a firmware in the emulator
 //! and the same voice (the firmware's own bank, found by the extractor) on the fm6 engine, and compares the two (docs/FM6.md).
 //! The emulator only reads the firmware as data. Prints levels, pitch, spectrum and decay; `--out` writes both as WAV for listening.
 use fm1ntt::{devices, extract, fm6, machine::Machine};
@@ -251,6 +251,11 @@ fn main() -> ExitCode {
                 let n = next(&mut i);
                 match devices::BUTTON_NAMES.iter().position(|e| *e == n) { Some(b) => steps.push((false, b, 0)), None => { eprintln!("no button {n}"); return ExitCode::from(2) } }
             }
+            "--encn" => {
+                let v = next(&mut i);
+                let (n, c) = v.split_once(':').unwrap_or((&v, "1"));
+                match devices::ENCODER_NAMES.iter().position(|e| *e == n) { Some(e) => steps.push((true, e, 1_000_000 + c.parse::<i32>().unwrap_or(1))), None => { eprintln!("no encoder {n}"); return ExitCode::from(2) } }
+            }
             "--channel" => channel = next(&mut i).parse::<u8>().unwrap_or(1).saturating_sub(1).min(15),
             "--key" => by_key = true,
             "--brief" => brief = true,
@@ -333,7 +338,10 @@ fn main() -> ExitCode {
     run(&mut m, 3.0, &mut boot, &mut sd);
     if let Some(p) = program { m.midi_in(0xC0 | channel); m.midi_in(p); run(&mut m, 0.2, &mut boot, &mut sd); }
     for &(is_enc, n, c) in &steps {
-        if is_enc { m.encoder(n as u8, c); } else { m.key(n as u8, true); run(&mut m, 0.15, &mut boot, &mut sd); m.key(n as u8, false); }
+        if is_enc && c.abs() >= 1_000_000 - 4096 {
+            let clicks = if c > 0 { c - 1_000_000 } else { c + 1_000_000 };   // --encn: one click at a time
+            for _ in 0..clicks.abs() { m.encoder(n as u8, clicks.signum()); run(&mut m, 0.12, &mut boot, &mut sd); }
+        } else if is_enc { m.encoder(n as u8, c); } else { m.key(n as u8, true); run(&mut m, 0.15, &mut boot, &mut sd); m.key(n as u8, false); }
         run(&mut m, 1.2, &mut boot, &mut sd);
     }
     if put_voice {
