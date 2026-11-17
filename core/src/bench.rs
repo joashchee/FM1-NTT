@@ -8,7 +8,8 @@
 //! branch, 0x8076 found by running every candidate and keeping those that stay in the loop).
 
 /// Version of the workload below; a benchmark report records it.
-pub const WORKLOAD_VERSION: u32 = 1;
+/// 2: the firmware lines run after a warm-up past the firmware's boot (version 1 timed its cheap first seconds).
+pub const WORKLOAD_VERSION: u32 = 2;
 /// Where a raw image is entered (Felucca's entry; the same as `fm1ntt_load_raw`'s FM1_ENTRY_FELUCCA).
 pub const ENTRY: u32 = 0x0200_0120;
 

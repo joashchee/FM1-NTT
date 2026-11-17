@@ -1347,7 +1347,7 @@ static int selftest(void) {
         if (bt) {
             char *txt = malloc(bn + 1);
             memcpy(txt, bt, bn); txt[bn] = 0;
-            CHECK(strstr(txt, "# fm1ntt benchmark\nformat: 1\n") == txt && strstr(txt, "\nworkload: 1\n") && strstr(txt, "\nplatform: ") && strstr(txt, "\ncpu: ") && strstr(txt, "\n== results ==\n"));
+            CHECK(strstr(txt, "# fm1ntt benchmark\nformat: 1\n") == txt && strstr(txt, "\nworkload: 2\n") && strstr(txt, "\nplatform: ") && strstr(txt, "\ncpu: ") && strstr(txt, "\n== results ==\n"));
             CHECK(strstr(txt, "\nBENCH core.nop.interp: ") && strstr(txt, "\nBENCH core.boot: ") && strstr(txt, "\nBENCH core.reset: ") && strstr(txt, "\nBENCH mem.read: ") &&
                   strstr(txt, "\nBENCH screen.draw.standard: ") && strstr(txt, "\nBENCH screen.draw.zoomed: ") && strstr(txt, "\nBENCH io.flash.write: ") && strstr(txt, "\nBENCH io.flash.read: "));
             CHECK(strstr(txt, "\nend\n") && !strcmp(strstr(txt, "\nend\n"), "\nend\n"));

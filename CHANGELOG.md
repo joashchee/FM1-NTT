@@ -4,6 +4,8 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-17 (maintainer: "make the change", after the report-versus-benchmark speed investigation): **benchmark workload 2: the firmware lines are timed after a warm-up past the firmware's boot** (`speed_firmware_windows` in `host/report.h`: 2000 emulated ms with the JIT, at most 20 s of real time, then three consecutive windows of `seconds` in the setting asked for; a `# fw warm-up` line records what was reached). Workload 1 timed the cheap first seconds from a cold start: on the R36S it said 1.37x for UNTRUE STEP at JIT pace 3 where the Device report (3 s) said 0.64x; on the Mac the interpreter went 1.08x (1 s) to 0.78x (3 s) to 0.76x (6 s). `WORKLOAD_VERSION` is 2, so `bench-compare.py` refuses to mix the old files. The Device report is unchanged. **The benchmark now takes longer on the unit (about 40 s more, five warm-ups); the warm-up length is a first guess, not tuned; untested on the unit.**
+
 - 2026-11-17 (maintainer: "the end of device report and benchmark does not close progress box itself. i have to press a button"): **the progress box closes when the job ends**: `job_poll` reaped the job and said the result but never asked for a redraw, so the box stayed until the next press. It now returns 1 and the loop redraws. Self-test passes; untested on the unit.
 
 - 2026-11-17 (maintainer: "the missing 3rd button press is gone"): **confirmed on the R36S: the re-present after a press fixed the held-back frame** (the trace was not needed). The idle numbers are still to re-measure.

@@ -157,6 +157,45 @@ static int speed_firmware(const char *path, int raw, int jit, int pace, double s
     return 1;
 }
 
+/* The benchmark's firmware run: the firmware is first brought past its boot with the JIT (the first emulated seconds are cheap, then it gets heavier: a
+ * 1 s run from a cold start measured the cheap part, 2026-11-17), then BENCH_RUNS consecutive windows of `seconds` are timed in the setting asked for.
+ * The warm-up stops at FW_WARMUP_EMU_MS of emulated time or FW_WARMUP_WALL_S of real time, whichever is first (a machine with no JIT would take minutes);
+ * `warm_ms` and `warm_s` say what was reached. 0 when the firmware did not boot. */
+#define FW_WARMUP_EMU_MS 2000
+#define FW_WARMUP_WALL_S 20.0
+static int speed_firmware_windows(const char *path, int raw, int jit, int pace, double seconds, double xs[BENCH_RUNS], double *emu_ms, int *halted, double *warm_ms, double *warm_s) {
+    char why[128];
+    size_t n = 0;
+    uint8_t *buf = read_file(path, &n, why, sizeof why);
+    if (!buf) return 0;
+    fm1ntt_machine *m = fm1ntt_new();
+    int rc = raw ? fm1ntt_load_raw(m, buf, n, FM1_ENTRY_FELUCCA) : fm1ntt_load_package(m, buf, n);
+    free(buf);
+    if (rc != 0) { fm1ntt_free(m); return 0; }
+    static int16_t pcm[1024 * 2];
+    fm1ntt_jit(m, fm1ntt_jit_available());
+    fm1ntt_pace(m, 0);
+    double w0 = r3_report_ms(), t = w0;
+    while (fm1ntt_ms(m) < FW_WARMUP_EMU_MS && t - w0 < FW_WARMUP_WALL_S * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
+    *warm_ms = (double)fm1ntt_ms(m);
+    *warm_s = (t - w0) / 1000.0;
+    fm1ntt_jit(m, jit);
+    fm1ntt_pace(m, pace);
+    double emu = 0;
+    for (int i = 0; i < BENCH_RUNS && !fm1ntt_halted(m); i++) {
+        double t0 = r3_report_ms();
+        uint64_t ms0 = fm1ntt_ms(m);
+        t = t0;
+        while (t - t0 < seconds * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
+        emu = (double)(fm1ntt_ms(m) - ms0);
+        xs[i] = emu / (t - t0);
+    }
+    *emu_ms = emu;
+    *halted = fm1ntt_halted(m);
+    fm1ntt_free(m);
+    return 1;
+}
+
 static double median3(double v[BENCH_RUNS]) {
     double a = v[0], b = v[1], c = v[2];
     return a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b));
@@ -336,9 +375,9 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
             int jit = var[v][0], pace = var[v][1];
             if (jit && !fm1ntt_jit_available()) break;
             report_progress(!jit ? "the firmware, interpreter" : pace ? "the firmware, native JIT, paced" : "the firmware, native JIT", 7 + v, steps, b.path);
-            double xs[BENCH_RUNS], emu = 0;
-            int halted = 0, ok = 1;
-            for (int i = 0; i < BENCH_RUNS && ok; i++) ok = speed_firmware(fw, fw_raw, jit, pace, seconds, &xs[i], &emu, &halted);
+            double xs[BENCH_RUNS], emu = 0, warm_ms = 0, warm_s = 0;
+            int halted = 0, ok = speed_firmware_windows(fw, fw_raw, jit, pace, seconds, xs, &emu, &halted, &warm_ms, &warm_s);
+            if (ok) { char wl[160]; snprintf(wl, sizeof wl, "# fw warm-up: %.0f emulated ms in %.1f s, then %d windows of %.2f s\n", warm_ms, warm_s, BENCH_RUNS, seconds); bench_note(&b, "%s", wl); }
             char key[160];
             if (pace) snprintf(key, sizeof key, "fw.%016llx.jit.pace%d.xrt", h, pace);
             else snprintf(key, sizeof key, "fw.%016llx.%s.xrt", h, jit ? "jit" : "interp");
@@ -562,7 +601,7 @@ static void job_start(App *a, int kind) {
     report_progress("starting", 0, kind == JOB_REPORT ? 10 : 12, NULL);
     a->job = SDL_CreateThread(job_thread, "fm1ntt-job", a);
     if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); a->job_kind = JOB_NONE; say(a, a->job_style, "%s", a->job_result); return; }
-    say(a, 0, kind == JOB_REPORT ? "Device report running (about a minute): the emulation is paused while it measures" : "Benchmark running (about half a minute)", NULL);
+    say(a, 0, kind == JOB_REPORT ? "Device report running (about a minute): the emulation is paused while it measures" : "Benchmark running (about a minute and a half)", NULL);
 }
 /* Called by the main loop each pass: reaps a finished job and says how it went. */
 static int job_poll(App *a) {                  /* 1 when a job just finished: the caller must redraw (the box goes away) */

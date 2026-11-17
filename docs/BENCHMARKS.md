@@ -18,7 +18,7 @@ a report without its `end` line was cut short and is noted.
 ```
 # fm1ntt benchmark
 format: 1                 the file's layout
-workload: 1               the benchmark's version (core/src/bench.rs): bumped whenever the workloads change
+workload: 2               the benchmark's version (core/src/bench.rs): bumped whenever the workloads change
 app: FM1-NTT 0.2.0 (<commit> <date>)
 made: 2026-11-16 11:27:04
 platform: Darwin-arm64    <sysname>-<machine>, "-r36s" appended on an R36S
@@ -52,13 +52,15 @@ which is itself a result.
 | `mem.read` | 256-byte reads of the flash region, as the MEMORY panel does them | higher |
 | `screen.draw.standard`, `.zoomed` | the whole 640 x 480 canvas drawn, averaged over all eight panels, ms a frame | lower |
 | `io.flash.write`, `io.flash.read` | a 1 MiB flash slot written the way the app writes it (temporary name, flush, rename) and read back | lower |
-| `fw.<hash>.interp.xrt`, `.jit.xrt` | **with `--fw FILE`:** that firmware run flat out for the interval: emulated time over real time (1.0 is real time) | higher |
+| `fw.<hash>.interp.xrt`, `.jit.xrt`, `.jit.pace{1,2,3}.xrt` | **with `--fw FILE`:** that firmware, **after a warm-up past its boot** (2000 emulated ms with the JIT, at most 20 s of real time; the file says what was reached in a `# fw warm-up` line), then three consecutive windows run flat out: emulated time over real time (1.0 is real time) | higher |
 
 **What it does not say.** The nop loop is a *ceiling for dispatch speed*, not a prediction of how any firmware runs: a real firmware
 mixes loads, stores and peripheral accesses (slower per instruction) and idles most of the time (the core skips idle). So the headline for
 "will it run on the R36S" is the `fw.*` line. **With no `--fw`, the benchmark runs the bundled UNTRUE STEP**, so every platform times the same real firmware (the hash in the name proves it) and the line is always there; give `--fw FILE` to time another, compared across platforms by the hash in its name (the same hash
 means the same file). `core.nop.jit` equal to `core.nop.interp` means the vendored core's compiler did not engage on that loop (it decides
 per block); that is noted in the file and tracked in ROADMAP section 5.
+
+**Why the warm-up (workload 2).** A firmware's first emulated seconds are cheap (boot, idle) and it gets heavier after that. Workload 1 timed 1 s windows from a cold start, so on the R36S it measured the cheap part (UNTRUE STEP, JIT, pace 3: 1.37x in the benchmark, 0.64x in the Device report, which runs 3 s). Version 1 files are refused by `bench-compare.py` against version 2 ones.
 
 ## Rules for changing it
 
