@@ -1,16 +1,17 @@
-//! `fwx FILE.fwsc [--min-run N] [--dump DIR]`: list what a firmware package holds (docs/EXTRACTOR.md).
+//! `fwx FILE.fwsc [--min-run N] [--stride N] [--dump DIR]`: list what a firmware package holds (docs/EXTRACTOR.md).
 //! Reads the file, prints a report; `--dump` writes the unscrambled app image under DIR (temp name, then rename).
 use fm1ntt::extract;
 use std::{fs, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (mut file, mut min_run, mut dump) = (None, 8usize, None);
+    let (mut file, mut min_run, mut dump, mut stride) = (None, 8usize, None, 0usize);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--min-run" => { i += 1; min_run = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(8); }
             "--dump" => { i += 1; dump = args.get(i).cloned(); }
+            "--stride" => { i += 1; stride = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0); }
             f => file = Some(f.to_string()),
         }
         i += 1;
@@ -26,6 +27,11 @@ fn main() -> ExitCode {
     println!("{} DX7-style voice run(s) of at least {min_run}:", r.banks.len());
     for b in &r.banks {
         println!("  {} @ {:#x}: {} voices, first {:?}", b.image, b.offset, b.names.len(), &b.names[..b.names.len().min(4)]);
+    }
+    if let Ok(app) = extract::app_image(&bytes) {
+        for (off, stride, names) in extract::find_unpacked(&app, min_run, stride) {
+            println!("  unpacked DX7 voices (155 bytes, stride {stride}) @ app+{off:#x}: {} voices, first {:?}", names.len(), &names[..names.len().min(6)]);
+        }
     }
     println!("{} strings of {}+ characters (first 30):", r.strings.len(), extract::MIN_STRING);
     for (o, s) in r.strings.iter().take(30) { println!("  {o:#09x} {s}"); }

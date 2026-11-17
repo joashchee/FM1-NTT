@@ -51,6 +51,7 @@ pub struct Tables {
     freq: [i32; 1025],
     lfo_unit: u32,
     pitch_unit: i32,
+    sample_rate: f64,
 }
 
 impl Tables {
@@ -58,7 +59,7 @@ impl Tables {
         if !(8000.0..=192_000.0).contains(&sample_rate) {
             return Err("sample rate outside 8000 to 192000");
         }
-        let mut t = Tables { sin: [0; 2048], exp2: [0; 2048], freq: [0; 1025], lfo_unit: 0, pitch_unit: 0 };
+        let mut t = Tables { sin: [0; 2048], exp2: [0; 2048], freq: [0; 1025], lfo_unit: 0, pitch_unit: 0, sample_rate };
         // sine: a rotation recurrence in Q30, as msfa does
         let dphase = 2.0 * PI / 1024.0;
         let c = (dphase.cos() * (1u64 << 30) as f64 + 0.5).floor() as i32;
@@ -566,6 +567,28 @@ pub fn unpack_patch(bulk: &[u8; 128]) -> [u8; 156] {
     p
 }
 
+/// The inverse of `unpack_patch`: a 156-byte unpacked patch (a 155-byte sysex single voice and a byte of 0x3f, as msfa has it) back to the 128-byte packed voice.
+/// Fields are taken as they are (masked to their bits), so `pack_patch(&unpack_patch(v))` is `v` for any packed voice whose fields are in range.
+pub fn pack_patch(p: &[u8; 156]) -> [u8; 128] {
+    let mut b = [0u8; 128];
+    for op in 0..6 {
+        let (o, k) = (op * 21, op * 17);
+        b[k..k + 11].copy_from_slice(&p[o..o + 11]);
+        b[k + 11] = (p[o + 11] & 3) | ((p[o + 12] & 3) << 2);
+        b[k + 12] = (p[o + 13] & 7) | ((p[o + 20] & 15) << 3);
+        b[k + 13] = (p[o + 14] & 3) | ((p[o + 15] & 7) << 2);
+        b[k + 14] = p[o + 16];
+        b[k + 15] = (p[o + 17] & 1) | ((p[o + 18] & 31) << 1);
+        b[k + 16] = p[o + 19];
+    }
+    b[102..111].copy_from_slice(&p[126..135]);
+    b[111] = (p[135] & 7) | ((p[136] & 1) << 3);
+    b[112..116].copy_from_slice(&p[137..141]);
+    b[116] = (p[141] & 1) | ((p[142] & 7) << 1) | ((p[143] & 7) << 4);
+    b[117..128].copy_from_slice(&p[144..155]);
+    b
+}
+
 /// The LFO's six bytes in an unpacked patch.
 pub fn lfo_params(patch: &[u8; 156]) -> [u8; 6] {
     [patch[137], patch[138], patch[139], patch[140], patch[141], patch[142]]
@@ -583,7 +606,7 @@ const COARSEMUL: [i32; 32] = [
     75892776, 76922906, 77910978, 78860292, 79773775, 80654032, 81503396, 82323963, 83117622,
 ];
 
-/// How an operator's frequency is tuned. `Msfa` is msfa's: a ratio from the coarse and fine values, and detune a fixed 0.9 cent a step. `Felucca` is what the
+/// How the voice is tuned and scaled. `Msfa` is msfa's: a ratio from the coarse and fine values, and detune a fixed 0.9 cent a step. `Felucca` is what the
 /// FM6 engine of Felucca 1.8.2 was measured to do in the emulator (docs/FM6.md): a model fitted to those measurements and not read from its source, in ratio
 /// mode only. Two things: (1) **the detune step depends on the note** (always), and (2) **the DTUN macro** (`dtun`, 0 to 127, the PATCH page's DTUN; 0 is none) spreads
 /// the carriers: each carrier is tuned off by `0.0945 * min(dtun, 64)` cents times 0, +1, -1, +2, -2, +3 by its place among the carriers.
@@ -592,6 +615,10 @@ pub enum Tuning {
     #[default]
     Msfa,
     Felucca { dtun: u8 },
+    /// The stock FM-1 engine as DX747 runs it (M-VAVE's own, in its binary SDK; measured in the emulator, docs/FM6.md): Felucca's detune law (the note-dependent step,
+    /// which is therefore the stock engine's, not Felucca's), no DTUN spread, and the velocity scaled from 255 where msfa uses 239 (the level at every velocity is lower by
+    /// 0.75 dB for each step of velocity sensitivity), and the level scaling to the left of the break point counted in groups of three semitones rounded up.
+    Stock,
 }
 
 /// The pattern the DTUN spread gives the carriers, by the carrier's place among the algorithm's carriers taken in operator order (measured to within 0.012 cent;
@@ -623,7 +650,8 @@ fn osc_freq(midinote: i32, mode: i32, coarse: i32, fine: i32, detune: i32, carri
         match tuning {
             // measured at 7.213 Hz per count at 9600 Hz (msfa's note)
             Tuning::Msfa => logfreq + 12606 * (detune - 7),
-            Tuning::Felucca { dtun } => {
+            Tuning::Felucca { .. } | Tuning::Stock => {
+                let dtun = if let Tuning::Felucca { dtun } = tuning { dtun } else { 0 };
                 let steps = (detune.clamp(0, 14) - 7) as f64;
                 let unit = FELUCCA_DTUN_CENTS * dtun.min(FELUCCA_DTUN_MAX) as f64;
                 logfreq + cents_to_logfreq(steps * felucca_detune_step_cents(midinote) + carrier.map_or(0, |c| FELUCCA_CARRIER_UNITS[c.min(5)]) as f64 * unit)
@@ -646,9 +674,9 @@ const VELOCITY_DATA: [u8; 64] = [
 ];
 
 /// The velocity's change of an operator's level, in microsteps.
-fn scale_velocity(velocity: i32, sensitivity: i32) -> i32 {
+fn scale_velocity(velocity: i32, sensitivity: i32, reference: i32) -> i32 {
     let vel = velocity.clamp(0, 127);
-    let vel_value = VELOCITY_DATA[(vel >> 1) as usize] as i32 - 239;
+    let vel_value = VELOCITY_DATA[(vel >> 1) as usize] as i32 - reference;
     ((sensitivity * vel_value + 7) >> 3) << 4
 }
 
@@ -676,12 +704,13 @@ fn scale_curve(group: i32, depth: i32, curve: i32) -> i32 {
     }
 }
 
-fn scale_level(midinote: i32, break_pt: i32, left_depth: i32, right_depth: i32, left_curve: i32, right_curve: i32) -> i32 {
+fn scale_level(midinote: i32, break_pt: i32, left_depth: i32, right_depth: i32, left_curve: i32, right_curve: i32, ceil_left: bool) -> i32 {
     let offset = midinote - break_pt - 17;
     if offset >= 0 {
         scale_curve(offset / 3, right_depth, right_curve)
     } else {
-        scale_curve((-offset) / 3, left_depth, left_curve)
+        // the stock engine counts the groups of three semitones left of the break point rounded up (msfa rounds down)
+        scale_curve(((-offset) + if ceil_left { 2 } else { 0 }) / 3, left_depth, left_curve)
     }
 }
 
@@ -740,9 +769,9 @@ impl Voice {
             let rates = [g(off), g(off + 1), g(off + 2), g(off + 3)];
             let levels = [g(off + 4), g(off + 5), g(off + 6), g(off + 7)];
             let mut outlevel = scale_out_level(g(off + 16));
-            outlevel += scale_level(midinote, g(off + 8), g(off + 9), g(off + 10), g(off + 11), g(off + 12));
+            outlevel += scale_level(midinote, g(off + 8), g(off + 9), g(off + 10), g(off + 11), g(off + 12), tuning == Tuning::Stock);
             outlevel = outlevel.min(127) << 5;
-            outlevel += scale_velocity(velocity, g(off + 15));
+            outlevel += scale_velocity(velocity, g(off + 15), if tuning == Tuning::Stock { 255 } else { 239 });
             outlevel = outlevel.max(0);
             let rate_scaling = scale_rate(midinote, g(off + 13));
             v.env[op].init(rates, levels, outlevel, rate_scaling);
@@ -813,7 +842,29 @@ pub enum Output {
     #[default]
     Msfa,
     Felucca { pot: u16 },
+    /// The stock FM-1 firmware's output stage as DX747 runs it (measured in the emulator, docs/FM6.md): the master volume **linear** in the pot (`stock_master_gain`),
+    /// the total power held constant beyond **four** voices (`stock_voice_gain`), and a one-pole low-cut at about 20 Hz (`STOCK_LOWCUT_HZ`).
+    Stock { pot: u16 },
 }
+
+/// The stock firmware's master volume as measured: amplitude 0.000764 * pot relative to msfa's own output scale, so 0.78 (-2.14 dB) at full volume and 0.69 (-3.2 dB) at the
+/// emulator's 900. Within 0.1 dB from pot 150 to 1023; quieter than this below (3 dB at pot 20).
+pub fn stock_master_gain(pot: u16) -> f64 {
+    0.000764 * pot.min(1023) as f64
+}
+
+/// The stock mixer keeps the total power constant beyond four sounding voices: amplitude the square root of 4 / n for n > 4 (measured to 16 voices: -0.97 dB at 5, -1.76 at 6,
+/// -3.01 at 8, -6.02 at 16).
+pub fn stock_voice_gain(sounding: usize) -> f64 {
+    if sounding > 4 {
+        (4.0 / sounding as f64).sqrt()
+    } else {
+        1.0
+    }
+}
+
+/// The stock output's low-cut corner (a one-pole high-pass: 3 dB down at 20 Hz would be 1.4 dB at 32.7 Hz, measured 1.4 dB; 0.75 dB at 46 Hz, 0.39 dB at 65 Hz).
+pub const STOCK_LOWCUT_HZ: f64 = 20.0;
 
 /// A block's sample (msfa's mix scale) as 16 bits.
 pub fn to_i16(x: i32) -> i16 {
@@ -849,6 +900,7 @@ pub struct Synth {
     pitch_bend: i32,
     tuning: Tuning,
     output: Output,
+    lowcut: (f64, f64),
     spare: Vec<i16>,
 }
 
@@ -860,7 +912,7 @@ impl Synth {
         lfo.reset(&t, lfo_params(&patch));
         let blank = Voice::new(&t, &patch, 60, 100);
         let slots = (0..VOICES).map(|_| Slot { voice: blank.clone(), midi_note: 0, keydown: false, live: false, quiet: 0 }).collect();
-        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, output: Output::Msfa, spare: Vec::new() })
+        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, output: Output::Msfa, lowcut: (0.0, 0.0), spare: Vec::new() })
     }
 
     pub fn set_voice(&mut self, voice: &[u8; 128]) {
@@ -940,16 +992,27 @@ impl Synth {
                 }
             }
         }
-        let gain = match self.output {
-            Output::Msfa => None,
-            Output::Felucca { pot } => Some(felucca_master_gain(pot) * felucca_voice_gain(self.slots.iter().filter(|s| s.live).count())),
+        let live = self.slots.iter().filter(|s| s.live).count();
+        let (gain, lowcut) = match self.output {
+            Output::Msfa => (None, false),
+            Output::Felucca { pot } => (Some(felucca_master_gain(pot) * felucca_voice_gain(live)), false),
+            Output::Stock { pot } => (Some(stock_master_gain(pot) * stock_voice_gain(live)), true),
         };
+        let a = (-2.0 * PI * STOCK_LOWCUT_HZ / self.t.sample_rate).exp();
         let mut out = [0i16; N];
         for (o, m) in out.iter_mut().zip(mix) {
-            *o = to_i16(match gain {
-                Some(g) => (m as f64 * g) as i32,
-                None => m,
-            });
+            let mut x = match gain {
+                Some(g) => m as f64 * g,
+                None => m as f64,
+            };
+            if lowcut {
+                // y[n] = x[n] - x[n-1] + a * y[n-1]
+                let (px, py) = self.lowcut;
+                let y = x - px + a * py;
+                self.lowcut = (x, y);
+                x = y;
+            }
+            *o = to_i16(x as i32);
         }
         out
     }
@@ -1158,6 +1221,70 @@ mod tests {
         let (sum, mixed) = (render(Output::Msfa, &twelve), render(Output::Felucca { pot: 1023 }, &twelve));
         let rms = |v: &[i16]| (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
         assert!((db(rms(&mixed) / rms(&sum)) - db(felucca_master_gain(1023)) - db(felucca_voice_gain(12))).abs() < 0.2);
+    }
+
+    #[test]
+    fn packing_is_the_inverse_of_unpacking() {
+        let mut x = 0x1357_9bdf_2468_ace0u64;
+        for _ in 0..200 {
+            // a random voice with every field in its range
+            let mut v = [0u8; 128];
+            for op in 0..6 {
+                for i in 0..11 {
+                    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                    v[op * 17 + i] = (x % 100) as u8;
+                }
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                v[op * 17 + 11] = (x % 16) as u8;
+                v[op * 17 + 12] = ((x >> 8) % 8) as u8 | ((((x >> 16) % 15) as u8) << 3);
+                v[op * 17 + 13] = ((x >> 24) % 4) as u8 | ((((x >> 32) % 8) as u8) << 2);
+                v[op * 17 + 14] = ((x >> 40) % 100) as u8;
+                v[op * 17 + 15] = ((x >> 48) % 2) as u8 | ((((x >> 50) % 32) as u8) << 1);
+                v[op * 17 + 16] = ((x >> 4) % 100) as u8;
+            }
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            for i in 102..110 { v[i] = ((x >> (i % 7)) % 100) as u8; }
+            v[110] = (x % 32) as u8;
+            v[111] = ((x >> 5) % 8) as u8 | ((((x >> 9) % 2) as u8) << 3);
+            for i in 112..116 { v[i] = ((x >> (i % 9)) % 100) as u8; }
+            v[116] = ((x >> 3) % 2) as u8 | ((((x >> 7) % 6) as u8) << 1) | ((((x >> 11) % 8) as u8) << 4);
+            v[117] = 24;
+            for i in 118..128 { v[i] = b'A' + (i as u8 % 26); }
+            assert_eq!(pack_patch(&unpack_patch(&v)), v);
+        }
+    }
+
+    #[test]
+    fn the_stock_output_stage_is_the_measured_law() {
+        let db = |g: f64| 20.0 * g.log10();
+        assert!((db(stock_master_gain(1023)) - -2.14).abs() < 0.01);
+        assert!((db(stock_master_gain(900)) - -3.25).abs() < 0.02);
+        assert!((db(stock_master_gain(500)) - -8.36).abs() < 0.02);
+        assert_eq!(stock_master_gain(9999), stock_master_gain(1023));
+        for n in 0..=4 {
+            assert_eq!(stock_voice_gain(n), 1.0);
+        }
+        for (n, want) in [(5, -0.969), (6, -1.761), (8, -3.010), (16, -6.021)] {
+            assert!((db(stock_voice_gain(n)) - want).abs() < 0.005, "{n} voices");
+        }
+        // the low-cut: a high note is untouched, a 33 Hz one is 1.4 dB down, DC dies away
+        let mut quiet_voice = voice(31);
+        for op in 0..6 {
+            quiet_voice[op * 17 + 14] = 45;
+        }
+        let level = |output: Output, note: u8| {
+            let mut s = Synth::new(44100.0, &quiet_voice).unwrap();
+            s.set_output(output);
+            s.note_on(note, 100);
+            let mut out = vec![0i16; 44100];
+            s.render(&mut out);
+            let tail = &out[22050..];
+            (tail.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / tail.len() as f64).sqrt()
+        };
+        let flat = |note| level(Output::Msfa, note);
+        let ratio_db = |note| db(level(Output::Stock { pot: 1023 }, note) / flat(note)) - db(stock_master_gain(1023));
+        assert!(ratio_db(96).abs() < 0.05, "{}", ratio_db(96));
+        assert!((ratio_db(24) - -1.4).abs() < 0.5, "{}", ratio_db(24));
     }
 
     #[test]

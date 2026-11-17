@@ -76,6 +76,48 @@ pub fn valid_voice(v: &[u8]) -> bool {
     v[102..110].iter().all(|&b| b <= 99) && v[110] <= 31
 }
 
+/// One unpacked DX7 voice is 155 bytes (the sysex single-voice layout, msfa's `UnpackPatch` output): six operators of 21 bytes (operator 6 first), the pitch
+/// envelope, algorithm, feedback, oscillator sync, the LFO, transpose and a 10-character name.
+pub const UNPACKED_LEN: usize = 155;
+
+/// An unpacked voice's fields in range (rates, levels, depths, output level, fine 0 to 99; curves 0 to 3; rate scale 0 to 7; amp mod 0 to 3; key velocity 0 to 7;
+/// mode 0 to 1; coarse 0 to 31; detune 0 to 14; algorithm 0 to 31; feedback 0 to 7; LFO wave 0 to 5, pitch sensitivity 0 to 7, transpose 0 to 48) and a printable name.
+pub fn valid_unpacked(v: &[u8]) -> bool {
+    if v.len() < UNPACKED_LEN || !v[145..155].iter().all(|&c| (0x20..0x7f).contains(&c)) {
+        return false;
+    }
+    for op in 0..6 {
+        let o = &v[op * 21..op * 21 + 21];
+        let r = |i: usize, max: u8| o[i] <= max;
+        if !(o[..11].iter().all(|&b| b <= 99) && r(11, 3) && r(12, 3) && r(13, 7) && r(14, 3) && r(15, 7) && r(16, 99) && r(17, 1) && r(18, 31) && r(19, 99) && r(20, 14)) {
+            return false;
+        }
+    }
+    v[126..134].iter().all(|&b| b <= 99) && v[134] <= 31 && v[135] <= 7 && v[136] <= 1 && v[137..141].iter().all(|&b| b <= 99) && v[141] <= 1 && v[142] <= 5 && v[143] <= 7 && v[144] <= 48
+}
+
+/// Every run of at least `min_run` consecutive unpacked voices in `image` (any offset, each record `UNPACKED_LEN` bytes, or `stride` if the records are padded): the
+/// offset, the stride and the names.
+pub fn find_unpacked(image: &[u8], min_run: usize, stride: usize) -> Vec<(usize, usize, Vec<String>)> {
+    let stride = stride.max(UNPACKED_LEN);
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + UNPACKED_LEN <= image.len() && out.len() < MAX_BANKS {
+        let mut n = 0;
+        while at + n * stride + UNPACKED_LEN <= image.len() && valid_unpacked(&image[at + n * stride..]) {
+            n += 1;
+        }
+        if n >= min_run.max(1) {
+            let names = (0..n).map(|i| String::from_utf8_lossy(&image[at + i * stride + 145..at + i * stride + 155]).trim_end().to_string()).collect();
+            out.push((at, stride, names));
+            at += n * stride;
+        } else {
+            at += 1;
+        }
+    }
+    out
+}
+
 /// Every run of at least `min_run` consecutive valid voices in `image`, at any byte offset.
 /// A bank is 32 voices in a sysex, but a firmware may keep fewer: `min_run` says how many are
 /// believed. At most [`MAX_BANKS`] runs are returned.
@@ -195,6 +237,33 @@ mod tests {
         v[118] = 0x07; // unprintable name
         assert!(!valid_voice(&v));
         assert!(!valid_voice(&[0; 10]));
+    }
+
+    #[test]
+    fn finds_unpacked_voices() {
+        let mut v = vec![0u8; UNPACKED_LEN];
+        for op in 0..6 {
+            v[op * 21 + 16] = 90;
+            v[op * 21 + 18] = 1;
+            v[op * 21 + 20] = 7;
+        }
+        v[144] = 24;
+        v[145..155].copy_from_slice(b"TEST VOICE");
+        assert!(valid_unpacked(&v));
+        let mut img = vec![0xffu8; 100];
+        for i in 0..4 {
+            let mut w = v.clone();
+            w[154] = b'0' + i;
+            img.extend(w);
+        }
+        img.extend(vec![0xff; 40]);
+        let found = find_unpacked(&img, 3, 0);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].0, found[0].2.len()), (100, 4));
+        assert_eq!(found[0].2[3], "TEST VOIC3");
+        v[134] = 32;
+        assert!(!valid_unpacked(&v), "an algorithm of 33");
+        assert!(find_unpacked(&[0xab; 4096], 1, 0).is_empty());
     }
 
     #[test]

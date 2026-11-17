@@ -140,11 +140,27 @@ difference to 0.001 dB):
 the emulator to 0.07 dB from one to thirteen notes at a low level, and to 0.08 dB from pot 100 to 1023** (`fm6cmp --master POT`, `--chord`), and on the five Felucca presets at the default pot to -0.1 to +0.2 dB. A chip's
 volume knob and mixer are the hardware's and the firmware's, not the voice engine's, which is why this is a separate, optional stage.
 
+## The stock FM-1 engine (DX747), SLOOP, sloopDX, Melodee
+
+DX747 runs M-VAVE's stock DX7 engine and accepts a standard DX7 single-voice dump (`F0 43 0n 00 01 1B`, 155 bytes) over USB or UART, so any voice can be played on it (`fm6cmp --vced usb`). Compared with msfa on test voices
+(`fm6cmp --make KIND`, `--track` for pitch and level over time), the stock engine **equals msfa except for**:
+
+1. **Detune and pitch**: Felucca's note-dependent detune step law is the stock engine's, so it was never Felucca's own (`Tuning::Stock`; only the DTUN carrier spread is Felucca's).
+2. **Velocity**: the reference is 255 rather than 239 (`scale_velocity`). Most velocities match to one microstep; a few table entries differ (13, 16, 19, 31, 76, 79, 88, 94, 97: up to 3 dB at 13) and velocities under 10 diverge; not refined.
+3. **Keyboard level scaling left of the break point** counts groups of three semitones rounded up (msfa rounds down); right of it is msfa's. Verified on -LIN, -EXP, +LIN and +EXP: 0.0 dB across notes 30 to 78.
+4. **Output stage** (`Output::Stock { pot }`): the master volume is **linear in the pot** (amplitude 0.000764 * pot of msfa's scale, -2.14 dB at 1023, -3.25 dB at the default 900, within 0.1 dB from pot 150 up), total power constant beyond **four** voices (sqrt(4/n)), and a one-pole low-cut near 20 Hz (1.4 dB down at 33 Hz). With all three fm6 is within 0.03 dB of the emulator for notes 24 to 96, 1 to 16 notes, and pots 200 to 1023 (0.3 dB at 100).
+
+Measured equal to msfa (no change needed): fixed-frequency mode, rate scaling (decay within 0.7 dB/s), pitch modulation depth and waves 0 to 4 (peak-to-peak within 1%), the pitch envelope (shape correlation 0.9; the 1.5 to 11 cent differences at slow rates are not understood).
+Pitch-modulation wave 5 (sample and hold) differs, as it is random.
+
+**Not in fm6: amplitude modulation (AMS).** msfa leaves the LFO's amp depth and each operator's AMS unused; the stock engine implements it (a 20.7 dB swing at depth 80, AMS 3; 4.3 dB at depth 99, AMS 2; 1.2 dB at depth 80, AMS 1), with a small pitch side effect (12 cents at depth 80, AMS 3). Next to model.
+SLOOP, sloopDX and Melodee were compared through their own presets (the scripts in `scripts/fm6-compare.sh`, `FM6_FIRMWARE=sloop`); their per-preset gain trims and FX state explain the level differences. sloopDX stores factory voices as 156-byte unpacked records (`extract::find_unpacked`, `fwx --stride`). Nothing here ran on a real FM-1.
+
 ## The API
 
 `Tables::new(sample_rate)` (8000 to 192000 Hz, else an error), `unpack_patch(&[u8;128]) -> [u8;156]` (every field that indexes a table is clamped, so a bad voice plays
 wrongly and never crashes: rule 5, with a 300-voice garbage test), `Voice::new` / `compute` / `key_up` (one note, one 64-sample block at a time, the original's shape),
-`Lfo`, `Tuning` (msfa's, or Felucca's measured: above), `Output` (msfa's level, or Felucca's measured: above), `felucca_master_gain`, `felucca_voice_gain`, and `Synth`: 12 voices of one patch, `set_tuning`, `set_output`, `note_on`, `note_off`, `set_pitch_bend`, `render(&mut [i16])` mono (msfa's `SynthUnit` without its filter, sustain pedal and
+`Lfo`, `Tuning` (msfa's, or Felucca's measured: above), `Output` (msfa's level, Felucca's or the stock engine's measured: above), `felucca_master_gain`, `felucca_voice_gain`, and `Synth`: 12 voices of one patch, `set_tuning`, `set_output`, `note_on`, `note_off`, `set_pitch_bend`, `render(&mut [i16])` mono (msfa's `SynthUnit` without its filter, sustain pedal and
 MIDI parser). Output is 16-bit by msfa's mix scale (`to_i16`).
 
 ## Not done

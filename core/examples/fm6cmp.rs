@@ -86,6 +86,22 @@ fn two_peaks(x: &[f64], at: usize, f0: f64) -> Option<(f64, f64, f64)> {
     Some((a.min(b), a.max(b), 20.0 * (mag[pk[1].0] / mag[pk[0].0]).log10()))
 }
 
+/// The strongest partial between `lo` and `hi` Hz in a 4096-point Hann window at `at`: its frequency (parabolic interpolation) and level in dB.
+fn peak_in(x: &[f64], at: usize, lo: f64, hi: f64) -> Option<(f64, f64)> {
+    const N: usize = 4096;
+    let mut re = vec![0.0; N];
+    let mut im = vec![0.0; N];
+    for (i, r) in re.iter_mut().enumerate() { *r = x.get(at + i).copied().unwrap_or(0.0) * (0.5 - 0.5 * (2.0 * PI * i as f64 / N as f64).cos()); }
+    fft(&mut re, &mut im);
+    let mag: Vec<f64> = (0..N / 2).map(|k| re[k].hypot(im[k])).collect();
+    let bin = SR as f64 / N as f64;
+    let (a, b) = (((lo / bin) as usize).max(2), ((hi / bin) as usize).min(N / 2 - 2));
+    let k = (a..b).max_by(|&p, &q| mag[p].partial_cmp(&mag[q]).unwrap())?;
+    if mag[k] < 1e-5 { return None }
+    let (l, c, r) = (mag[k - 1].ln(), mag[k].ln(), mag[k + 1].ln());
+    Some(((k as f64 + 0.5 * (l - r) / (l - 2.0 * c + r)) * bin, 20.0 * (mag[k] / (N as f64 / 4.0)).log10()))
+}
+
 fn rms_db(x: &[f64]) -> f64 {
     let m = x.iter().map(|v| v * v).sum::<f64>() / x.len().max(1) as f64;
     10.0 * m.max(1e-18).log10()
@@ -116,10 +132,12 @@ fn write_wav(path: &Path, x: &[f64]) -> std::io::Result<()> {
 /// Written into the firmware with Felucca's FM6_PUT over USB-MIDI (docs/FM6.md) and played on fm6 from the same bytes.
 fn make_voice(kind: &str) -> Option<[u8; 128]> {
     #[derive(Clone, Copy)]
-    struct Op { ol: u8, coarse: u8, fine: u8, det: u8, kvs: u8, bp: u8, ld: u8, rd: u8, lc: u8, rc: u8 }
+    struct Op { ol: u8, coarse: u8, fine: u8, det: u8, kvs: u8, bp: u8, ld: u8, rd: u8, lc: u8, rc: u8, rs: u8, ams: u8, mode: u8 }
     let (mut rates, mut levels) = ([99u8; 4], [99u8, 99, 99, 0]);
     let (mut alg, mut fb) = (31u8, 0u8);
-    let mut ops = [Op { ol: 0, coarse: 1, fine: 0, det: 7, kvs: 0, bp: 39, ld: 0, rd: 0, lc: 0, rc: 0 }; 6];   // ops[k] is operator k + 1
+    let mut ops = [Op { ol: 0, coarse: 1, fine: 0, det: 7, kvs: 0, bp: 39, ld: 0, rd: 0, lc: 0, rc: 0, rs: 0, ams: 0, mode: 0 }; 6];
+    // the header: the LFO (speed, delay, pitch depth, amp depth, sync, wave, pitch sensitivity) and the pitch envelope (rates, levels)
+    let (mut lfo, mut peg) = ([35u8, 0, 0, 0, 1, 0, 0], ([99u8; 4], [50u8; 4]));   // ops[k] is operator k + 1
     ops[0].ol = 99;
     if let Some(rest) = kind.strip_prefix("solo") {
         // "solo32:K" or "solo5:K": operator K alone, as a carrier, on algorithm 32 or algorithm 5 (coarse 1, detune 7)
@@ -169,7 +187,29 @@ fn make_voice(kind: &str) -> Option<[u8; 128]> {
         "mod80r3" => { alg = 4; ops[1].ol = 80; ops[1].coarse = 3; }
         "fb3" => { alg = 4; ops[0].ol = 0; ops[4].ol = 99; ops[5].ol = 80; fb = 3; }    // operator 6 (feedback) modulates operator 5
         "fb6" => { alg = 4; ops[0].ol = 0; ops[4].ol = 99; ops[5].ol = 80; fb = 6; }
+        "rs7" => { ops[0].rs = 7; rates = [99, 40, 99, 99]; levels = [99, 40, 40, 0]; }
+        "rs0" => { rates = [99, 40, 99, 99]; levels = [99, 40, 40, 0]; }
+        k if k.starts_with("am:") => { let mut it = k[3..].split(':'); let a: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(50); let m: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(3); ops[0].ams = m.min(3); lfo = [30, 0, 0, a.min(99), 1, 0, 0]; }   // amplitude modulation: depth A, sensitivity M, triangle
+        "ams3" => { ops[0].ams = 3; lfo = [30, 0, 0, 80, 1, 0, 0]; }                    // amplitude modulation: triangle, depth 80, sensitivity 3
+        "ams1" => { ops[0].ams = 1; lfo = [30, 0, 0, 80, 1, 0, 0]; }
+        "pm0" | "pm1" | "pm2" | "pm3" | "pm4" | "pm5" => { lfo = [30, 0, 40, 0, 1, kind[2..].parse().unwrap_or(0), 3]; }   // pitch modulation, wave 0 to 5
+        "pmd" => { lfo = [30, 50, 40, 0, 1, 0, 3]; }                                       // with a delay
+        k if k.starts_with("pegA:") => { let r: u8 = k[5..].parse().unwrap_or(50); peg = ([r, 99, 99, 99], [54, 54, 54, 50]); }   // one ramp from level 50 to 54 at rate R, then held
+        k if k.starts_with("pegB:") => { let r: u8 = k[5..].parse().unwrap_or(50); peg = ([99, 99, 99, 99], [54, 54, 54, 50]); lfo[0] = r; }
+        "peg" => { peg = ([70, 70, 70, 70], [56, 44, 50, 50]); }                          // a pitch envelope sweep
+        "peg2" => { peg = ([60, 60, 60, 60], [44, 56, 50, 50]); }
+        "fixed" => { ops[0].mode = 1; ops[0].coarse = 2; ops[0].fine = 50; }              // fixed frequency: coarse 2 (100 Hz), fine 50
+        "fixed3" => { ops[0].mode = 1; ops[0].coarse = 3; ops[0].fine = 0; }
+        "ls1" => { ops[0].ld = 60; ops[0].rd = 60; ops[0].lc = 0; ops[0].rc = 3; }        // -LIN left, +LIN right of the break point
+        "ls2" => { ops[0].ld = 80; ops[0].rd = 80; ops[0].lc = 1; ops[0].rc = 2; }        // -EXP left, +EXP right
+        "ls4" => { ops[0].ld = 30; ops[0].lc = 0; ops[0].bp = 60; }                       // -LIN, depth 30 left of break point 60
+        "ls5" => { ops[0].ld = 30; ops[0].lc = 1; ops[0].bp = 60; }                       // -EXP
+        "ls6" => { ops[0].rd = 30; ops[0].rc = 0; ops[0].bp = 30; }                       // -LIN right of break point 30
+        "ls7" => { ops[0].rd = 30; ops[0].rc = 3; ops[0].bp = 30; }                       // +LIN right
+        "ls3" => { ops[0].ld = 99; ops[0].rd = 0; ops[0].lc = 0; ops[0].bp = 60; }
         "vel7" => ops[0].kvs = 7,
+        "vel3" => ops[0].kvs = 3,
+        "vel1" => ops[0].kvs = 1,
         "keysc" => { ops[0].rd = 99; ops[0].rc = 0; ops[0].ld = 99; ops[0].lc = 3; }     // level falls to the right of the break point (-LIN) and to the left (+LIN)
         _ => return None,
     }
@@ -182,17 +222,18 @@ fn make_voice(kind: &str) -> Option<[u8; 128]> {
         o[4..8].copy_from_slice(&l);
         o[8] = op.bp; o[9] = op.ld; o[10] = op.rd;
         o[11] = op.lc | (op.rc << 2);
-        o[12] = op.det << 3;                                         // detune, rate scale 0
-        o[13] = op.kvs << 2;                                         // velocity sensitivity, amp mod sensitivity 0
+        o[12] = op.rs | (op.det << 3);                               // rate scale, detune
+        o[13] = op.ams | (op.kvs << 2);                              // amp mod sensitivity, velocity sensitivity
         o[14] = op.ol;
-        o[15] = op.coarse << 1;                                      // ratio mode
+        o[15] = op.mode | (op.coarse << 1);                          // mode (0 ratio, 1 fixed), coarse
         o[16] = op.fine;
     }
-    v[102..106].copy_from_slice(&[99; 4]);
-    v[106..110].copy_from_slice(&[50; 4]);
+    v[102..106].copy_from_slice(&peg.0);
+    v[106..110].copy_from_slice(&peg.1);
     v[110] = alg;
     v[111] = fb | 8;                                                 // feedback, oscillator key sync
-    v[112] = 35;                                                     // LFO speed; delay, depths, sync and wave stay 0 (no vibrato, no tremolo)
+    v[112..116].copy_from_slice(&lfo[..4]);                          // LFO speed, delay, pitch depth, amp depth (0 by default: no vibrato, no tremolo)
+    v[116] = lfo[4] | (lfo[5] << 1) | (lfo[6] << 4);                 // sync, wave, pitch sensitivity
     v[117] = 24;                                                     // no transpose
     let name = format!("T {kind}");
     for (i, b) in name.bytes().take(10).enumerate() { v[118 + i] = b; }
@@ -230,7 +271,14 @@ fn main() -> ExitCode {
     let (mut file, mut note, mut vel, mut voice, mut program, mut hold, mut out) = (None, 60u8, 100u8, 0usize, None::<u8>, 1.5f64, None);
     let (mut brief, mut no_lfo, mut no_peg, mut make) = (false, false, false, None::<String>);
     let (mut gain, mut chord) = (false, Vec::<u8>::new());
+    let mut unpacked = Vec::<usize>::new();
+    let mut vced = None::<String>;
+    let mut vput = None::<u8>;
+    let mut bank_from = None::<String>;
+    let mut track = false;
+    let mut dump_track = false;
     let (mut shot, mut dtun, mut pot, mut master) = (None::<String>, 0u8, None::<u16>, None::<u16>);
+    let mut stock_master = None::<u16>;
     let (mut put, mut strip, mut beat, mut partials, mut peaks, mut tuning) = (false, String::new(), false, false, false, fm6::Tuning::Msfa);
     let (mut steps, mut channel, mut by_key, mut fm6_note) = (Vec::<(bool, usize, i32)>::new(), 0u8, false, None::<u8>);
     let mut i = 0;
@@ -262,13 +310,20 @@ fn main() -> ExitCode {
             "--brief" => brief = true,
             "--beat" => beat = true,
             "--partials" => partials = true,
+            "--track" => track = true,
+            "--dump-track" => dump_track = true,
+            "--bank-from" => bank_from = Some(next(&mut i)),
+            "--vced" => vced = Some(next(&mut i)),
+            "--vput" => vput = next(&mut i).parse().ok(),
+            "--unpacked" => unpacked = next(&mut i).split(':').filter_map(|v| usize::from_str_radix(v.trim_start_matches("0x"), if v.starts_with("0x") { 16 } else { 10 }).ok()).collect(),
             "--gain" => gain = true,
             "--chord" => chord = next(&mut i).split(',').filter_map(|n| n.parse().ok()).collect(),
             "--pot" => pot = next(&mut i).parse().ok(),
             "--master" => master = next(&mut i).parse().ok(),
+            "--stock-master" => stock_master = next(&mut i).parse().ok(),
             "--shot" => shot = Some(next(&mut i)),
             "--peaks" => peaks = true,
-            "--tuning" => tuning = match next(&mut i).as_str() { "felucca" => fm6::Tuning::Felucca { dtun: 0 }, "msfa" => fm6::Tuning::Msfa, x => { eprintln!("--tuning msfa or felucca, not {x}"); return ExitCode::from(2) } },
+            "--tuning" => tuning = match next(&mut i).as_str() { "felucca" => fm6::Tuning::Felucca { dtun: 0 }, "stock" => fm6::Tuning::Stock, "msfa" => fm6::Tuning::Msfa, x => { eprintln!("--tuning msfa, felucca or stock, not {x}"); return ExitCode::from(2) } },
             "--dtun" => dtun = next(&mut i).parse().unwrap_or(0),
             "--make" => make = Some(next(&mut i)),
             "--put" => put = true,
@@ -290,10 +345,25 @@ fn main() -> ExitCode {
         vbytes = v;
         vname = String::from_utf8_lossy(&v[118..128]).trim().to_string();
         println!("test voice {vname:?}, one carrier on algorithm 32, written into the firmware with FM6_PUT");
+    } else if let Some(&off) = unpacked.first() {
+            // --unpacked OFFSET[:STRIDE]: the voices are 155-byte unpacked records in the app image from OFFSET, STRIDE apart (156 by default)
+            let stride = unpacked.get(1).copied().unwrap_or(156);
+            let app = extract::app_image(&bytes).unwrap();
+            let at = off + voice * stride;
+            let Some(rec) = app.get(at..at + 155) else { eprintln!("voice {voice} is past the image"); return ExitCode::from(1) };
+            if !extract::valid_unpacked(rec) { eprintln!("voice {voice} at app+{at:#x} is not a valid unpacked DX7 voice"); return ExitCode::from(1) }
+            let mut p = [0u8; 156];
+            p[..155].copy_from_slice(rec);
+            p[155] = 0x3f;
+            vbytes = fm6::pack_patch(&p);
+            vname = String::from_utf8_lossy(&vbytes[118..128]).trim().to_string();
+            println!("voice {voice} of the unpacked bank at app+{off:#x}: {vname:?}, algorithm {}", vbytes[110] + 1);
     } else {
-        let rep = match extract::report(&bytes, 4) { Ok(r) => r, Err(e) => { eprintln!("{e}"); return ExitCode::from(1) } };
+        // --bank-from FILE: the voices come from that firmware's bank (for firmwares that take FM6_PUT, to play Felucca's own voices on them)
+        let bank_bytes = match &bank_from { Some(f) => match fs::read(f) { Ok(b) => b, Err(e) => { eprintln!("{f}: {e}"); return ExitCode::from(1) } }, None => bytes.clone() };
+        let rep = match extract::report(&bank_bytes, 4) { Ok(r) => r, Err(e) => { eprintln!("{e}"); return ExitCode::from(1) } };
         let Some(bank) = rep.banks.iter().find(|b| b.image == "app") else { eprintln!("no DX7 voice bank in this firmware's app image"); return ExitCode::from(1) };
-        let app = extract::app_image(&bytes).unwrap();
+        let app = extract::app_image(&bank_bytes).unwrap();
         let vo = bank.offset + voice * extract::VOICE_LEN;
         let Some(vb) = app.get(vo..vo + 128) else { eprintln!("voice {voice} is past the bank"); return ExitCode::from(1) };
         vbytes = vb.try_into().unwrap();
@@ -326,7 +396,7 @@ fn main() -> ExitCode {
     // the emulator: boot, play the note, release it
     let mut m = match Machine::from_package(&bytes) { Ok(m) => m, Err(e) => { eprintln!("{e}"); return ExitCode::from(1) } };
     m.set_jit(true);
-    let put_voice = make.is_some() || put;
+    let put_voice = make.is_some() || put || vput.is_some();
     if put_voice { m.usb_plug(); }     // before the first render: a firmware that starts USB with no cable gives up on it
     let mut buf = vec![0i16; 2 * 4096];
     let mut run = |m: &mut Machine, secs: f64, keep: &mut Vec<f64>, stereo_diff: &mut f64| {
@@ -347,6 +417,21 @@ fn main() -> ExitCode {
     let (mut boot, mut emu, mut sd) = (Vec::new(), Vec::new(), 0.0f64);
     run(&mut m, 3.0, &mut boot, &mut sd);
     if let Some(p) = program { m.midi_in(0xC0 | channel); m.midi_in(p); run(&mut m, 0.2, &mut boot, &mut sd); }
+    if let Some(slot) = vput {
+        // sloopDX's VOICE_PUT (command 43) first: the user slots are in the preset list only once a bank exists, and this makes one
+        run(&mut m, 1.5, &mut boot, &mut sd);
+        let mut frame = vec![0xF0, 0x7D, 0x46, 0x4C, 43, slot];
+        frame.extend_from_slice(&vbytes);
+        frame.push(0xF7);
+        println!("USB product string: {:?}", m.usb_product());
+        if !m.usb_midi_send(&frame) { eprintln!("the SysEx was not queued"); return ExitCode::from(1) }
+        run(&mut m, 0.8, &mut boot, &mut sd);
+        let replies = m.usb_midi_take();
+        let ok = replies.iter().any(|r| r.len() >= 8 && r[..5] == [0xF0, 0x7D, 0x46, 0x4C, 43] && r[r.len() - 2] == 0);
+        println!("VOICE_PUT reply: {}", if ok { "rc 0".to_string() } else { format!("none or refused: {replies:02x?}") });
+        if !ok { return ExitCode::from(1) }
+        run(&mut m, 0.5, &mut boot, &mut sd);
+    }
     if let Some(v) = pot { m.pot(v); run(&mut m, 0.6, &mut boot, &mut sd); }
     for &(is_enc, n, c) in &steps {
         if is_enc && c.abs() >= 1_000_000 - 4096 {
@@ -355,19 +440,43 @@ fn main() -> ExitCode {
         } else if is_enc { m.encoder(n as u8, c); } else { m.key(n as u8, true); run(&mut m, 0.15, &mut boot, &mut sd); m.key(n as u8, false); }
         run(&mut m, 1.2, &mut boot, &mut sd);
     }
-    if put_voice {
+    if put_voice && vput.is_none() {
         run(&mut m, 1.5, &mut boot, &mut sd);                                    // the host reads the descriptors first (about a second)
         let mut frame = vec![0xF0, 0x7D, 0x46, 0x4C, 69, 0, channel];            // FM6_PUT, target 0 (a track's own patch), the track
         frame.extend_from_slice(&vbytes);
         frame.push(0xF7);
+        let mut cmd = 69u8;
+        if let Some(slot) = vput {
+            // sloopDX's VOICE_PUT (command 43): a user slot 0..31 and the 128 packed bytes, in place of FM6_PUT
+            cmd = 43;
+            frame = vec![0xF0, 0x7D, 0x46, 0x4C, 43, slot];
+            frame.extend_from_slice(&vbytes);
+            frame.push(0xF7);
+        }
+        if let Some(how) = &vced {
+            // a standard DX7 single-voice dump: F0 43 0n 00 01 1B, the 155 data bytes, their checksum (two's complement, 7 bits), F7
+            let p = fm6::unpack_patch(&vbytes);
+            let sum: u32 = p[..155].iter().map(|&b| b as u32).sum();
+            let mut d = vec![0xF0, 0x43, channel & 15, 0x00, 0x01, 0x1B];
+            d.extend_from_slice(&p[..155]);
+            d.push(((128 - (sum & 127)) & 127) as u8);
+            d.push(0xF7);
+            if how == "uart" { for b in d { m.midi_in(b); } run(&mut m, 1.0, &mut boot, &mut sd); println!("DX7 voice dump sent to the MIDI IN jack ({} bytes)", 163); }
+            else { println!("DX7 voice dump sent over USB-MIDI: {}", if m.usb_midi_send(&d) { "queued" } else { "not queued" }); run(&mut m, 0.8, &mut boot, &mut sd); }
+            println!("replies: {:02x?}", m.usb_midi_take());
+            run(&mut m, 0.5, &mut boot, &mut sd);
+            frame.clear();
+        }
+        if !frame.is_empty() {
         println!("USB product string: {:?}", m.usb_product());
         if !m.usb_midi_send(&frame) { eprintln!("the SysEx was not queued"); return ExitCode::from(1) }
         run(&mut m, 0.6, &mut boot, &mut sd);
         let replies = m.usb_midi_take();
-        let ok = replies.iter().any(|r| r.len() >= 9 && r[..5] == [0xF0, 0x7D, 0x46, 0x4C, 69] && r[7] == 0);
-        println!("FM6_PUT reply: {}", if ok { "rc 0".to_string() } else { format!("none or refused: {replies:02x?}") });
+        let ok = replies.iter().any(|r| r.len() >= 8 && r[..4] == [0xF0, 0x7D, 0x46, 0x4C] && r[4] == cmd && r[r.len() - 2] == 0);
+        println!("{} reply: {}", if cmd == 43 { "VOICE_PUT" } else { "FM6_PUT" }, if ok { "rc 0".to_string() } else { format!("none or refused: {replies:02x?}") });
         if !ok { return ExitCode::from(1) }
         run(&mut m, 0.5, &mut boot, &mut sd);
+        }
     }
     if let Some(path) = &shot {
         let mut px = vec![0u32; 240 * 240];
@@ -388,6 +497,7 @@ fn main() -> ExitCode {
     let mut syn = fm6::Synth::new(SR as f64, &vbytes).unwrap();
     if let fm6::Tuning::Felucca { .. } = tuning { tuning = fm6::Tuning::Felucca { dtun }; }
     syn.set_tuning(tuning);
+    if let Some(pot) = stock_master { syn.set_output(fm6::Output::Stock { pot }); }
     if let Some(pot) = master { syn.set_output(fm6::Output::Felucca { pot }); }   // --master POT: fm6 with Felucca's output stage at that pot (the emulator's is --pot, default 900)
     let note = fm6_note.unwrap_or(note);
     syn.note_on(note, vel);
@@ -427,6 +537,26 @@ fn main() -> ExitCode {
             }
         }
         println!("worst frequency difference of the matched peaks above -50 dBFS: {worst:.2} cents");
+        return ExitCode::SUCCESS;
+    }
+    if track {
+        // the strongest partial's frequency (cents) and level (dB) over the held note, in windows of 93 ms every 23 ms from 0.1 s: emulator against fm6
+        let f_exp = 440.0 * 2f64.powf((fm6_note.unwrap_or(note) as f64 - 69.0) / 12.0);
+        let first = peak_in(&emu, (0.1 * SR as f64) as usize, 40.0, 8000.0).map(|p| p.0).unwrap_or(f_exp);
+        let (lo, hi) = (first * 0.9, first * 1.1);
+        let n = ((hold - 0.3) * SR as f64 / 1024.0) as usize;
+        let series = |x: &[f64]| -> Vec<(f64, f64)> { (0..n).filter_map(|i| peak_in(x, (0.1 * SR as f64) as usize + i * 1024, lo, hi)).collect() };
+        let (se, sf) = (series(&emu), series(&f6));
+        let len = se.len().min(sf.len());
+        if len < 8 { println!("TRACK too short"); return ExitCode::SUCCESS }
+        let cents = |s: &[(f64, f64)]| -> Vec<f64> { let m = s.iter().map(|p| p.0).sum::<f64>() / s.len() as f64; s.iter().map(|p| 1200.0 * (p.0 / m).log2()).collect() };
+        let (ce, cf) = (cents(&se[..len]), cents(&sf[..len]));
+        let p2p = |v: &[f64]| v.iter().cloned().fold(-1e9, f64::max) - v.iter().cloned().fold(1e9, f64::min);
+        if dump_track { for i in 0..len.min(40) { println!("  t={:.3}s  emulator {:+7.1} cents  fm6 {:+7.1} cents", 0.1 + 0.0232 * i as f64 + 0.0464, ce[i], cf[i]); } }
+        let (de, df): (Vec<f64>, Vec<f64>) = (se[..len].iter().map(|p| p.1).collect(), sf[..len].iter().map(|p| p.1).collect());
+        let corr = |a: &[f64], b: &[f64]| { let (ma, mb) = (a.iter().sum::<f64>() / a.len() as f64, b.iter().sum::<f64>() / b.len() as f64); let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0); for (x, y) in a.iter().zip(b) { sxy += (x - ma) * (y - mb); sxx += (x - ma).powi(2); syy += (y - mb).powi(2); } sxy / (sxx * syy).sqrt().max(1e-12) };
+        let maxdiff = ce.iter().zip(&cf).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        println!("TRACK partial {:.1} Hz: pitch peak-to-peak emulator {:.1} cents, fm6 {:.1}; correlation {:.3}, largest difference {:.1} cents | level peak-to-peak emulator {:.2} dB, fm6 {:.2}; correlation {:.3}", first, p2p(&ce), p2p(&cf), corr(&ce, &cf), maxdiff, p2p(&de), p2p(&df), corr(&de, &df));
         return ExitCode::SUCCESS;
     }
     if gain {
