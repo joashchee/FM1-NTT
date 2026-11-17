@@ -589,6 +589,61 @@ pub fn pack_patch(p: &[u8; 156]) -> [u8; 128] {
     b
 }
 
+/// The name of byte `i` (0 to 154) of an unpacked voice, as the DX7's own panel and manuals name it: an operator's (`OP6 EG R1` ... `OP1 DETUNE`), then the pitch EG, algorithm,
+/// feedback, oscillator sync, the LFO, transpose and the ten characters of the name (`NAME 1`...).
+pub fn param_name(i: usize) -> String {
+    const OP: [&str; 21] = [
+        "EG R1", "EG R2", "EG R3", "EG R4", "EG L1", "EG L2", "EG L3", "EG L4", "BREAK POINT", "LEFT DEPTH", "RIGHT DEPTH", "LEFT CURVE", "RIGHT CURVE", "RATE SCALE",
+        "AMP MOD SENS", "KEY VEL SENS", "OUTPUT LEVEL", "OSC MODE", "FREQ COARSE", "FREQ FINE", "DETUNE",
+    ];
+    const GLOBAL: [&str; 19] = [
+        "PITCH EG R1", "PITCH EG R2", "PITCH EG R3", "PITCH EG R4", "PITCH EG L1", "PITCH EG L2", "PITCH EG L3", "PITCH EG L4", "ALGORITHM", "FEEDBACK", "OSC KEY SYNC",
+        "LFO SPEED", "LFO DELAY", "LFO PM DEPTH", "LFO AM DEPTH", "LFO KEY SYNC", "LFO WAVE", "LFO PM SENS", "TRANSPOSE",
+    ];
+    match i {
+        0..=125 => format!("OP{} {}", 6 - i / 21, OP[i % 21]),
+        126..=144 => GLOBAL[i - 126].to_string(),
+        145..=154 => format!("NAME {}", i - 144),
+        _ => String::new(),
+    }
+}
+
+/// The voice's name: its ten characters, with anything outside printable ASCII shown as a space, and the trailing spaces cut.
+pub fn voice_name(patch: &[u8; 156]) -> String {
+    let s: String = patch[145..155].iter().map(|&c| if (32..127).contains(&c) { c as char } else { ' ' }).collect();
+    s.trim_end().to_string()
+}
+
+/// A DX7 single-voice sysex dump (`F0 43 0n 00 01 1B`, the 155 bytes, the checksum, `F7`: 163 bytes) of an unpacked voice, on MIDI channel `channel` (0 to 15). The data bytes
+/// are masked to 7 bits as the format requires. DX747 and the DX7 take it (`fm6cmp --vced`).
+pub fn vced_sysex(patch: &[u8; 156], channel: u8) -> Vec<u8> {
+    let mut v = vec![0xF0, 0x43, channel & 15, 0x00, 0x01, 0x1B];
+    v.extend(patch[..155].iter().map(|b| b & 0x7F));
+    let sum: u32 = v[6..].iter().map(|&b| b as u32).sum();
+    v.push((0u32.wrapping_sub(sum) & 0x7F) as u8);
+    v.push(0xF7);
+    v
+}
+
+/// The inverse of `vced_sysex`: the unpacked voice in a 163-byte single-voice dump, or `None` when the framing or the checksum is wrong. The same clamping as `unpack_patch`
+/// is applied (every field that indexes a table to its range) by passing the voice through packing.
+pub fn parse_vced_sysex(bytes: &[u8]) -> Option<[u8; 156]> {
+    if bytes.len() != 163 || bytes[0] != 0xF0 || bytes[1] != 0x43 || bytes[2] & 0xF0 != 0 || bytes[3] != 0 || bytes[4] != 1 || bytes[5] != 0x1B || bytes[162] != 0xF7 {
+        return None;
+    }
+    if bytes[6..161].iter().any(|&b| b > 0x7F) {
+        return None;
+    }
+    let sum: u32 = bytes[6..162].iter().map(|&b| b as u32).sum();
+    if sum & 0x7F != 0 {
+        return None;
+    }
+    let mut p = [0u8; 156];
+    p[..155].copy_from_slice(&bytes[6..161]);
+    p[155] = 0x3f;
+    Some(unpack_patch(&pack_patch(&p)))
+}
+
 /// The LFO's six bytes in an unpacked patch.
 pub fn lfo_params(patch: &[u8; 156]) -> [u8; 6] {
     [patch[137], patch[138], patch[139], patch[140], patch[141], patch[142]]
@@ -1360,6 +1415,37 @@ mod tests {
         assert!(Tables::new(f64::NAN).is_err());
         assert!(Tables::new(1e9).is_err());
         assert!(Tables::new(44100.0).is_ok());
+    }
+
+    #[test]
+    fn a_voice_survives_the_sysex_round_trip_and_its_parameters_are_named() {
+        let mut v = [0u8; 128];
+        for (i, b) in v.iter_mut().enumerate() {
+            *b = (i * 7 % 90) as u8;
+        }
+        v[111] = 0x0d; // oks 5, fb... in range
+        v[110] = 31;
+        for (i, c) in b"INIT VOICE".iter().enumerate() {
+            v[118 + i] = *c;
+        }
+        // the random bytes put some fields out of range; one pass through packing leaves a voice a DX7 could hold
+        let p = unpack_patch(&pack_patch(&unpack_patch(&v)));
+        let syx = vced_sysex(&p, 3);
+        assert_eq!(syx.len(), 163);
+        assert_eq!(&syx[..6], &[0xF0, 0x43, 3, 0, 1, 0x1B]);
+        assert_eq!(syx[162], 0xF7);
+        assert_eq!(parse_vced_sysex(&syx), Some(p));
+        assert_eq!(voice_name(&p), "INIT VOICE");
+        let mut bad = syx.clone();
+        bad[20] ^= 1;
+        assert_eq!(parse_vced_sysex(&bad), None, "the checksum catches a changed byte");
+        assert_eq!(parse_vced_sysex(&syx[..100]), None);
+        assert_eq!(param_name(0), "OP6 EG R1");
+        assert_eq!(param_name(125), "OP1 DETUNE");
+        assert_eq!(param_name(134), "ALGORITHM");
+        assert_eq!(param_name(144), "TRANSPOSE");
+        assert_eq!(param_name(145), "NAME 1");
+        assert_eq!(param_name(155), "");
     }
 
     #[test]

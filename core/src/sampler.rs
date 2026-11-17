@@ -391,6 +391,13 @@ impl Sampler {
         self.voices = [IDLE; MAX_VOICES];
     }
 
+    /// Fades every sounding voice out (a choke: the release fade, not an abrupt cut).
+    pub fn release_all(&mut self) {
+        for v in self.voices.iter_mut().filter(|v| v.live) {
+            v.releasing = true;
+        }
+    }
+
     fn read(&self, pos: f64) -> f64 {
         let d = &self.sample.data;
         let i = pos.floor() as isize;
@@ -436,6 +443,115 @@ impl Sampler {
                 }
             }
             let mut y = acc * poly * self.master;
+            if let Some(c) = self.ceiling {
+                let c = c * 32768.0;
+                let need = if y.abs() > c { c / y.abs() } else { 1.0 };
+                self.limit_gain = if need < self.limit_gain { need } else { self.limit_gain + (1.0 - self.limit_gain) * self.limit_release };
+                y *= self.limit_gain;
+            }
+            *o = y.round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
+/// A drum map: each key its own un-pitched sample with one voice (a strike again restarts it, a key-up does nothing), a key that **chokes** others (a closed hat cuts
+/// an open one), and one peak limiter over the mix. This is how X0X's channel 10 behaves (`docs/SAMPLER.md`: only 11 notes sound, each its own recording, a retrigger restarts,
+/// note-off is ignored, closed hat cuts open hat, the mix under a 0.4 limiter); a firmware's own choke map is its own.
+pub struct Kit {
+    out_rate: f64,
+    drums: Vec<Drum>,
+    velocity: [f64; 128],
+    ceiling: Option<f64>,
+    limit_gain: f64,
+    limit_release: f64,
+}
+
+struct Drum {
+    note: u8,
+    chokes: Vec<u8>,
+    sampler: Sampler,
+}
+
+impl Kit {
+    pub fn new(out_rate: f64) -> Result<Kit> {
+        if !(8000.0..=192_000.0).contains(&out_rate) {
+            return Err(Error::BadImage("kit: output rate out of range".into()));
+        }
+        Ok(Kit { out_rate, drums: Vec::new(), velocity: std::array::from_fn(|v| velocity_gain(v as u8)), ceiling: None, limit_gain: 1.0, limit_release: 1.0 - (-1.0 / (0.05 * out_rate)).exp() })
+    }
+
+    /// Puts `sample` on `note` (replacing what was there); striking it cuts every note in `chokes`. At most 128 drums.
+    pub fn add(&mut self, note: u8, sample: Sample, chokes: &[u8]) -> Result<()> {
+        let note = note.min(127);
+        let mut sampler = Sampler::new(sample, self.out_rate, note)?;
+        sampler.set_voices(1);
+        sampler.set_retrigger_restarts(true);
+        sampler.set_poly_limit(usize::MAX);
+        sampler.set_velocity(self.velocity);
+        let drum = Drum { note, chokes: chokes.iter().map(|&c| c.min(127)).collect(), sampler };
+        match self.drums.iter_mut().find(|d| d.note == note) {
+            Some(d) => *d = drum,
+            None => self.drums.push(drum),
+        }
+        Ok(())
+    }
+
+    /// The velocity law of every drum (see `velocity_from_knots`), those added already included.
+    pub fn set_velocity(&mut self, law: [f64; 128]) {
+        self.velocity = law;
+        for d in &mut self.drums {
+            d.sampler.set_velocity(law);
+        }
+    }
+
+    /// The limiter over the mix (see `Sampler::set_ceiling`).
+    pub fn set_ceiling(&mut self, ceiling: Option<f64>, release_seconds: f64) {
+        self.ceiling = ceiling.map(|c| c.clamp(0.01, 1.0));
+        self.limit_release = 1.0 - (-1.0 / (release_seconds.clamp(0.001, 5.0) * self.out_rate)).exp();
+        self.limit_gain = 1.0;
+    }
+
+    pub fn sounding(&self) -> usize {
+        self.drums.iter().map(|d| d.sampler.sounding()).sum()
+    }
+
+    pub fn note_on(&mut self, note: u8, velocity: u8) {
+        if velocity == 0 {
+            return;
+        }
+        let note = note.min(127);
+        let Some(chokes) = self.drums.iter().find(|d| d.note == note).map(|d| d.chokes.clone()) else { return };
+        for d in self.drums.iter_mut().filter(|d| chokes.contains(&d.note)) {
+            d.sampler.release_all();
+        }
+        if let Some(d) = self.drums.iter_mut().find(|d| d.note == note) {
+            d.sampler.note_on(note, velocity);
+        }
+    }
+
+    /// A key-up changes nothing: a drum plays to its end.
+    pub fn note_off(&mut self, _note: u8) {}
+
+    pub fn all_off(&mut self) {
+        for d in &mut self.drums {
+            d.sampler.all_off();
+        }
+    }
+
+    /// Replaces `out` with the mix of every drum.
+    pub fn render(&mut self, out: &mut [i16]) {
+        let mut mix = vec![0.0f64; out.len()];
+        let mut tmp = vec![0i16; out.len()];
+        for d in &mut self.drums {
+            if d.sampler.sounding() == 0 {
+                continue;
+            }
+            d.sampler.render(&mut tmp);
+            for (m, &t) in mix.iter_mut().zip(&tmp) {
+                *m += t as f64;
+            }
+        }
+        for (o, mut y) in out.iter_mut().zip(mix) {
             if let Some(c) = self.ceiling {
                 let c = c * 32768.0;
                 let need = if y.abs() > c { c / y.abs() } else { 1.0 };
@@ -701,6 +817,50 @@ mod tests {
         // the limited mix is quieter than the unlimited sum
         let r = |x: &[i16]| rms(x);
         assert!(r(&run(Some(0.4), 4)) < r(&run(None, 4)) * 0.6);
+    }
+
+    #[test]
+    fn a_kit_plays_each_drum_once_chokes_and_ignores_key_up() {
+        let tone = |hz: f64| Sample::new(44100, sine(44100, hz, 22050, 8000.0));
+        let mut k = Kit::new(44100.0).unwrap();
+        k.add(36, tone(100.0), &[]).unwrap();
+        k.add(46, tone(3000.0), &[]).unwrap();
+        k.add(42, tone(6000.0), &[46]).unwrap();
+        // an unmapped key is silent
+        let mut out = vec![0i16; 4410];
+        k.note_on(60, 127);
+        k.render(&mut out);
+        assert!(out.iter().all(|&x| x == 0));
+        // a retrigger restarts: struck three times it is no louder than once
+        k.note_on(36, 100);
+        k.render(&mut out);
+        let once = rms(&out);
+        for _ in 0..3 {
+            k.note_on(36, 100);
+        }
+        k.render(&mut out);
+        assert!(rms(&out) < once * 1.1 && k.sounding() == 1);
+        // key-up does nothing
+        k.note_off(36);
+        k.render(&mut out);
+        assert!(k.sounding() == 1 && rms(&out) > once * 0.5);
+        // the closed hat cuts the open one (after the 5 ms fade) and plays itself
+        k.all_off();
+        k.note_on(46, 100);
+        k.render(&mut out);
+        assert_eq!(k.sounding(), 1);
+        k.note_on(42, 100);
+        k.render(&mut out);
+        assert_eq!(k.sounding(), 1, "only the closed hat remains");
+        // the open hat does not cut the closed one
+        k.note_on(46, 100);
+        assert_eq!(k.sounding(), 2);
+        // the limiter holds the mix
+        k.set_ceiling(Some(0.1), 0.05);
+        for _ in 0..4 {
+            k.render(&mut out);
+        }
+        assert!(out.iter().all(|&x| (x as f64).abs() <= 0.1 * 32768.0 + 2.0));
     }
 
     #[test]

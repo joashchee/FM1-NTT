@@ -14,6 +14,13 @@ crate-type = ["rlib", "staticlib"]
 fm1-core = { path = "vendor/fm1-emu/crates/fm1-core" }
 fm1-soc = { path = "vendor/fm1-emu/crates/fm1-soc" }
 
+# A debug build checks integer overflow in the vendored emulator, which a release build does not (it wraps, as the hardware does): a garbage firmware jumping to the top of the address
+# space panicked in `cargo test` (raw_garbage_and_wrong_sized_saves_are_refused_or_run_safely) and not in the shipped build. The tests now run the emulator as it ships.
+[profile.dev.package.fm1-core]
+overflow-checks = false
+[profile.dev.package.fm1-soc]
+overflow-checks = false
+
 [profile.release]
 opt-level = 3
 panic = "abort"   # across the C API a panic must never unwind into C
