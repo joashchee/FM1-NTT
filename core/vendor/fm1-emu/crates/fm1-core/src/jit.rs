@@ -839,6 +839,74 @@ impl Gen<'_> {
         self.a.mov(POOL[i], w);
         self.rc.dirty[i] = true;
     }
+    /// The host register holding guest register r, loaded first if it is not held: the operand itself, no copy (a pool register, so a
+    /// caller must not let a later `src`/`dst`/`rw` of the same op give it up: the least recently used goes, and an op names three at most).
+    fn src(&mut self, r: u8) -> Reg {
+        let r = r & 15;
+        let i = match self.slot(r) {
+            Some(i) => i,
+            None => {
+                let i = self.take_slot(r);
+                self.a.ldr(POOL[i], CPU, off_reg(r));
+                i
+            }
+        };
+        POOL[i]
+    }
+    /// The host register to write guest register r into (no load: the old value is not wanted); it is marked changed.
+    fn dst(&mut self, r: u8) -> Reg {
+        let r = r & 15;
+        let i = match self.slot(r) {
+            Some(i) => i,
+            None => self.take_slot(r),
+        };
+        self.rc.dirty[i] = true;
+        POOL[i]
+    }
+    /// The host register of guest register r to read and write (loaded if not held), marked changed.
+    fn rw(&mut self, r: u8) -> Reg {
+        let h = self.src(r);
+        let i = POOL.iter().position(|&p| p == h).unwrap();
+        self.rc.dirty[i] = true;
+        h
+    }
+    /// rd = op(rn, rm), as `alu` but between any registers.
+    fn alu3(&mut self, op: Op, rd: Reg, rn: Reg, rm: Reg) {
+        let a = &mut self.a;
+        match op {
+            Op::Add => a.add(rd, rn, rm),
+            Op::Sub => a.sub(rd, rn, rm),
+            Op::RSub => a.sub(rd, rm, rn),
+            Op::And => a.and(rd, rn, rm),
+            Op::AndNot => a.bic(rd, rn, rm),
+            Op::Or => a.orr(rd, rn, rm),
+            Op::Xor => a.eor(rd, rn, rm),
+            Op::Mul => a.mul(rd, rn, rm),
+            Op::Shl => a.lslv(rd, rn, rm),
+            Op::Shr => a.lsrv(rd, rn, rm),
+            Op::Sar => a.asrv(rd, rn, rm),
+        }
+    }
+    /// The right-hand side of an A4 / BitBr / IfBlk as a host register: the guest register itself (rk 0), else w1 as `rhs` makes it.
+    fn rhs_reg(&mut self, rk: u8, rv: u32) -> Reg {
+        if rk == 0 {
+            self.src(rv as u8)
+        } else {
+            self.rhs(rk, rv);
+            1
+        }
+    }
+    /// Flags for w(rn) - v: an immediate when v fits one (plain or shifted 12 bits), else v through w1.
+    fn cmp_v(&mut self, rn: Reg, v: u32) {
+        if v < 4096 {
+            self.a.cmp_imm12(rn, v, false);
+        } else if v % 4096 == 0 && v >> 12 < 4096 {
+            self.a.cmp_imm12(rn, v >> 12, true);
+        } else {
+            self.a.mov32(1, v);
+            self.a.cmp(rn, 1);
+        }
+    }
     /// The pool register holding r, if one does (counted as a use).
     fn slot(&mut self, r: u8) -> Option<usize> {
         let i = self.rc.guest.iter().position(|&g| g == Some(r))?;
@@ -994,6 +1062,45 @@ impl Gen<'_> {
         self.a.add_imm(2, DONE, i);
     }
 
+    /// w3 = guest address w0 - `base`, and a branch to `miss` unless the `w` bytes at it lie inside [base, base + len) (a halfword is the one at
+    /// addr & !1 when `align`, as the Soc reads it). Where `base` is a run of ones that no offset below `len` reaches, an eor stands in for the
+    /// subtraction (an address outside has a bit set at or above the offset's width, so the compare misses it), and the length is an immediate:
+    /// 3-4 instructions, where the general form builds both constants (6).
+    fn in_range(&mut self, base: u32, len: u32, w: u8, align: bool, miss: Label) {
+        let p = u64::from(len.max(1)).next_power_of_two();
+        let (ones, shift) = (base.count_ones(), base.trailing_zeros());
+        let run = base != 0 && shift + ones <= 32 && (base >> shift) == (((1u64 << ones) - 1) as u32);
+        let imm = |x: u32| -> Option<(u32, bool)> { if x < 4096 { Some((x, false)) } else if x % 4096 == 0 && x >> 12 < 4096 { Some((x >> 12, true)) } else { None } };
+        if let (true, true, Some((i, sh))) = (run && ones < 32 && u64::from(base) % p == 0, w != 2 || len % 2 == 0, imm(len)) {
+            self.a.eor_mask(3, 0, ones, shift);
+            match w {
+                4 => {
+                    // (in 64 bits: a far address must not wrap round into range)
+                    self.a.add_imm_x(2, 3, 3);
+                    self.a.cmp_imm12_x(2, i, sh);
+                }
+                2 => {
+                    if align {
+                        self.a.and_mask(3, 3, 31, 1);
+                    }
+                    self.a.cmp_imm12(3, i, sh);
+                }
+                _ => self.a.cmp_imm12(3, i, sh),
+            }
+            self.a.b_cond(AC::Hs, miss);
+            return;
+        }
+        self.a.mov32(2, base);
+        self.a.sub(3, 0, 2);
+        if w == 2 && align {
+            self.a.mov32(2, !1u32);
+            self.a.and(3, 3, 2); // a halfword is the one at addr & !1 (Soc read16)
+        }
+        self.a.mov32(2, len.saturating_sub(w as u32));
+        self.a.cmp(3, 2);
+        self.a.b_cond(AC::Hi, miss);
+    }
+
     /// w0 = load(width, signed) at guest address w0. Inline RAM / XIP, else the bus.
     fn load(&mut self, w: u8, signed: bool, idx: u32) {
         let (xip, slow, done) = (self.a.label(), self.a.label(), self.a.label());
@@ -1003,15 +1110,7 @@ impl Gen<'_> {
                 self.a.bind(xip);
             }
             // off = addr - base; the word holding it must lie inside (as the Soc's fast paths)
-            self.a.mov32(2, gbase);
-            self.a.sub(3, 0, 2);
-            if w == 2 {
-                self.a.mov32(2, !1u32);
-                self.a.and(3, 3, 2); // a halfword is the one at addr & !1 (Soc read16)
-            }
-            self.a.mov32(2, len.saturating_sub(w as u32));
-            self.a.cmp(3, 2);
-            self.a.b_cond(AC::Hi, miss);
+            self.in_range(gbase, len, w, true, miss);
             match (w, signed) {
                 (4, _) => self.a.ldr_u(0, base_reg, 3),
                 (2, false) => self.a.ldrh_u(0, base_reg, 3),
@@ -1042,11 +1141,7 @@ impl Gen<'_> {
         if w == 2 {
             self.a.tbnz(0, 0, slow); // an odd halfword goes the Soc's merging way
         }
-        self.a.mov32(2, mem.ram_base);
-        self.a.sub(3, 0, 2);
-        self.a.mov32(2, mem.ram_len.saturating_sub(w as u32));
-        self.a.cmp(3, 2);
-        self.a.b_cond(AC::Hi, slow);
+        self.in_range(mem.ram_base, mem.ram_len, w, false, slow);
         if !mem.ram_code.is_null() {
             self.a.lsr_imm(2, 3, 2);
             self.a.ldrb_u(2, FLAGS, 2);
@@ -1163,13 +1258,19 @@ impl Gen<'_> {
     }
     /// Jump to `taken` when a predicated block's condition holds (`exec_fast`'s IfBlk).
     fn if_jump(&mut self, a: u8, rk: u8, fam: u8, alt: bool, rv: u32, taken: Label) {
-        self.rhs(rk, rv);
-        self.ld_reg(0, a);
         let c = if fam == 2 {
-            self.a.tst(0, 1);
+            let rb = self.rhs_reg(rk, rv);
+            let ra = self.src(a);
+            self.a.tst(ra, rb);
             if alt { AC::Ne } else { AC::Eq }
+        } else if rk == 1 && fam < 8 {
+            let ra = self.src(a);
+            self.cmp_v(ra, rv);
+            acond(crate::cond_of_fam(fam as u64, alt))
         } else {
-            self.cmp(fam >= 8, 0, 1);
+            let rb = self.rhs_reg(rk, rv);
+            let ra = self.src(a);
+            self.cmp(fam >= 8, ra, rb);
             acond(crate::cond_of_fam(fam as u64, alt))
         };
         self.a.b_cond(c, taken);
@@ -1200,85 +1301,86 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
     let mut bus_used = false;
     match fast {
         Fast::Nop => {}
+        // (the register ops work on the host registers that hold the guest ones: no copy through w0 / w1)
         Fast::MovI { d, v } => {
-            g.a.mov32(0, v);
-            g.st_reg(0, d);
+            let rd = g.dst(d);
+            g.a.mov32(rd, v);
         }
         Fast::Mov { d, s } => {
-            g.ld_reg(0, s);
-            g.st_reg(0, d);
+            let rs = g.src(s);
+            let rd = g.dst(d);
+            if rd != rs {
+                g.a.mov(rd, rs);
+            }
         }
         Fast::AddRI { d, s, v } => {
-            g.ld_reg(0, s);
-            g.add_imm(0, 0, v);
-            g.st_reg(0, d);
+            let rs = g.src(s);
+            let rd = g.dst(d);
+            g.add_imm(rd, rs, v);
         }
         Fast::ShlI { d, s, n } => {
-            g.ld_reg(0, s);
-            g.a.lsl_imm(0, 0, n as u32 & 31);
-            g.st_reg(0, d);
+            let rs = g.src(s);
+            let rd = g.dst(d);
+            g.a.lsl_imm(rd, rs, n as u32 & 31);
         }
         Fast::SarI { d, s, n } => {
-            g.ld_reg(0, s);
-            g.a.asr_imm(0, 0, n as u32 & 31);
-            g.st_reg(0, d);
+            let rs = g.src(s);
+            let rd = g.dst(d);
+            g.a.asr_imm(rd, rs, n as u32 & 31);
         }
         Fast::Alu3 { d, a, b, op } => {
-            g.ld_reg(0, a);
-            g.ld_reg(1, b);
-            g.alu(op);
-            g.st_reg(0, d);
+            let ra = g.src(a);
+            let rb = g.src(b);
+            let rd = g.dst(d);
+            g.alu3(op, rd, ra, rb);
         }
         Fast::Alu3I { d, a, v, op } => {
-            g.ld_reg(0, a);
             g.a.mov32(1, v);
-            g.alu(op);
-            g.st_reg(0, d);
+            let ra = g.src(a);
+            let rd = g.dst(d);
+            g.alu3(op, rd, ra, 1);
         }
         Fast::Alu2 { d, b, op } => {
-            g.ld_reg(0, d);
-            g.ld_reg(1, b);
-            g.alu(op);
-            g.st_reg(0, d);
+            let rb = g.src(b);
+            let rd = g.rw(d);
+            g.alu3(op, rd, rd, rb);
         }
         Fast::Alu2I { d, v, op } => {
-            g.ld_reg(0, d);
             g.a.mov32(1, v);
-            g.alu(op);
-            g.st_reg(0, d);
+            let rd = g.rw(d);
+            g.alu3(op, rd, rd, 1);
         }
         Fast::A4 { d, s, op, rk, rv } => {
-            g.rhs(rk, rv);
-            g.ld_reg(0, s);
-            g.alu(op);
-            g.st_reg(0, d);
+            let rb = g.rhs_reg(rk, rv);
+            let ra = g.src(s);
+            let rd = g.dst(d);
+            g.alu3(op, rd, ra, rb);
         }
         Fast::Ext { d, s, part, signed } => {
-            g.ld_reg(0, s);
+            let rs = g.src(s);
+            let rd = g.dst(d);
             match (part, signed) {
-                (0, false) => g.a.ubfx(0, 0, 0, 8),
-                (0, true) => g.a.sbfx(0, 0, 0, 8),
-                (1, false) => g.a.ubfx(0, 0, 0, 16),
-                (1, true) => g.a.sbfx(0, 0, 0, 16),
-                (_, false) => g.a.ubfx(0, 0, 16, 16),
-                (_, true) => g.a.sbfx(0, 0, 16, 16),
+                (0, false) => g.a.ubfx(rd, rs, 0, 8),
+                (0, true) => g.a.sbfx(rd, rs, 0, 8),
+                (1, false) => g.a.ubfx(rd, rs, 0, 16),
+                (1, true) => g.a.sbfx(rd, rs, 0, 16),
+                (_, false) => g.a.ubfx(rd, rs, 16, 16),
+                (_, true) => g.a.sbfx(rd, rs, 16, 16),
             }
-            g.st_reg(0, d);
         }
         Fast::MinMax { d, a, b, kind } => {
-            g.ld_reg(0, a);
-            g.ld_reg(1, b);
-            g.a.cmp(0, 1);
+            let ra = g.src(a);
+            let rb = g.src(b);
+            let rd = g.dst(d);
+            g.a.cmp(ra, rb);
             let c = match kind { 0 => AC::Lt, 1 => AC::Gt, 2 => AC::Lo, _ => AC::Hi };
-            g.a.csel(0, 0, 1, c);
-            g.st_reg(0, d);
+            g.a.csel(rd, ra, rb, c);
         }
         // ---- branches (always a block's last op)
         Fast::BrI { a, v, cond, target } => {
             let t = g.a.label();
-            g.ld_reg(0, a);
-            g.a.mov32(1, v);
-            g.a.cmp(0, 1);
+            let ra = g.src(a);
+            g.cmp_v(ra, v);
             g.a.b_cond(acond(cond), t);
             g.chain(next_pc, count);
             g.a.bind(t);
@@ -1286,9 +1388,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         Fast::BrIEq { a, v, target } | Fast::BrINe { a, v, target } => {
             let t = g.a.label();
-            g.ld_reg(0, a);
-            g.a.mov32(1, v);
-            g.a.cmp(0, 1);
+            let ra = g.src(a);
+            g.cmp_v(ra, v);
             g.a.b_cond(if matches!(fast, Fast::BrIEq { .. }) { AC::Eq } else { AC::Ne }, t);
             g.chain(next_pc, count);
             g.a.bind(t);
@@ -1296,9 +1397,9 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         Fast::BrR { a, b, cond, target } => {
             let t = g.a.label();
-            g.ld_reg(0, a);
-            g.ld_reg(1, b);
-            g.cmp(cond.is_float(), 0, 1);
+            let ra = g.src(a);
+            let rb = g.src(b);
+            g.cmp(cond.is_float(), ra, rb);
             g.a.b_cond(acond(cond), t);
             g.chain(next_pc, count);
             g.a.bind(t);
@@ -1306,9 +1407,9 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         Fast::BitBr { r, mk, ne, mv, target } => {
             let t = g.a.label();
-            g.rhs(mk, mv);
-            g.ld_reg(0, r);
-            g.a.tst(0, 1);
+            let rb = g.rhs_reg(mk, mv);
+            let ra = g.src(r);
+            g.a.tst(ra, rb);
             g.a.b_cond(if ne { AC::Ne } else { AC::Eq }, t);
             g.chain(next_pc, count);
             g.a.bind(t);
@@ -1381,17 +1482,22 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         // ---- memory
         Fast::Ld { d, b, off, w, signed } => {
             match b {
-                Base::Reg(r) => g.ld_reg(0, r),
-                Base::Sp => g.a.ldr(0, CPU, off_sp()),
+                Base::Reg(r) => {
+                    let rb = g.src(r);
+                    g.add_imm(0, rb, off);
+                }
+                Base::Sp => {
+                    g.a.ldr(0, CPU, off_sp());
+                    g.add_imm(0, 0, off);
+                }
             }
-            g.add_imm(0, 0, off);
             g.load(w, signed, idx);
             g.st_reg(0, d);
             bus_used = true;
         }
         Fast::LdW { d, b, off } => {
-            g.ld_reg(0, b);
-            g.add_imm(0, 0, off);
+            let rb = g.src(b);
+            g.add_imm(0, rb, off);
             g.load(4, false, idx);
             g.st_reg(0, d);
             bus_used = true;
@@ -1404,25 +1510,30 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             bus_used = true;
         }
         Fast::LdBu { d, b, off } => {
-            g.ld_reg(0, b);
-            g.add_imm(0, 0, off);
+            let rb = g.src(b);
+            g.add_imm(0, rb, off);
             g.load(1, false, idx);
             g.st_reg(0, d);
             bus_used = true;
         }
         Fast::St { s, b, off, w } => {
             match b {
-                Base::Reg(r) => g.ld_reg(0, r),
-                Base::Sp => g.a.ldr(0, CPU, off_sp()),
+                Base::Reg(r) => {
+                    let rb = g.src(r);
+                    g.add_imm(0, rb, off);
+                }
+                Base::Sp => {
+                    g.a.ldr(0, CPU, off_sp());
+                    g.add_imm(0, 0, off);
+                }
             }
-            g.add_imm(0, 0, off);
             g.ld_reg(1, s);
             g.store(w, idx);
             bus_used = true;
         }
         Fast::StW { s, b, off } => {
-            g.ld_reg(0, b);
-            g.add_imm(0, 0, off);
+            let rb = g.src(b);
+            g.add_imm(0, rb, off);
             g.ld_reg(1, s);
             g.store(4, idx);
             bus_used = true;
@@ -1435,9 +1546,9 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             bus_used = true;
         }
         Fast::LdIdx { d, b, i, sh, w, signed } => {
-            g.ld_reg(0, b);
-            g.ld_reg(1, i);
-            g.a.add_lsl(0, 0, 1, sh as u32 & 31);
+            let rb = g.src(b);
+            let ri = g.src(i);
+            g.a.add_lsl(0, rb, ri, sh as u32 & 31);
             g.load(w, signed, idx);
             g.st_reg(0, d);
             bus_used = true;
@@ -2445,6 +2556,118 @@ mod tests {
             assert_eq!(bus.data, reference.data, "case {case}: {block:?}");
         }
     }
+    /// A bus laid out as the Soc is (RAM and XIP at bases that are runs of ones, neither at 0): the range checks the eor form takes, at their edges.
+    /// Anything outside both is "a peripheral": a read gives a value of the address, a write is logged.
+    struct Edge { ram: Vec<u8>, xip: Vec<u8>, flags: Vec<u8>, log: Vec<(u32, u32, u8)>, version: u64 }
+    const RAM_B: u32 = 0x01c0_0000;
+    const XIP_B: u32 = 0x0200_0000;
+    impl Edge {
+        fn new() -> Self {
+            let mut e = Self { ram: vec![0; 4096], xip: vec![0; 0x2000], flags: vec![0; 1025], log: vec![], version: 0 };
+            for (i, b) in e.ram.iter_mut().enumerate() { *b = (i as u32).wrapping_mul(2654435761) as u8; }
+            for (i, b) in e.xip.iter_mut().enumerate() { *b = (i as u32).wrapping_mul(40503) as u8 ^ 0x5a; }
+            e
+        }
+        fn at(&self, a: u32, i: u32) -> Option<u8> {
+            let a = a.wrapping_add(i);
+            if a.wrapping_sub(RAM_B) < 4096 { Some(self.ram[(a - RAM_B) as usize]) } else if a.wrapping_sub(XIP_B) < 0x2000 { Some(self.xip[(a - XIP_B) as usize]) } else { None }
+        }
+        fn rd(&self, a: u32, n: u32) -> u32 {
+            (0..n).fold(0, |v, i| v | u32::from(self.at(a, i).unwrap_or((a.wrapping_add(i) >> 3) as u8 ^ 0xa5)) << (8 * i))
+        }
+    }
+    impl Bus for Edge {
+        fn read8(&mut self, a: u32) -> u8 { self.rd(a, 1) as u8 }
+        fn read16(&mut self, a: u32) -> u16 { self.rd(a & !1, 2) as u16 }
+        fn read32(&mut self, a: u32) -> u32 { self.rd(a, 4) }
+        fn write8(&mut self, a: u32, v: u8) { self.wr(a, u32::from(v), 1) }
+        fn write16(&mut self, a: u32, v: u16) { self.wr(a, u32::from(v), 2) }
+        fn write32(&mut self, a: u32, v: u32) { self.wr(a, v, 4) }
+        fn tick_room(&self) -> u64 { 1000 }
+        fn next_tick_due(&self) -> bool { false }
+        fn irq_pending(&self) -> bool { false }
+        fn add_ticks(&mut self, _: u64) {}
+        fn code_writes(&self) -> Option<u64> { Some(self.version) }
+        fn jit_mem(&mut self) -> Option<JitMem> {
+            Some(JitMem { ram: self.ram.as_mut_ptr(), ram_base: RAM_B, ram_len: 4096, ram_code: self.flags.as_ptr(), xip: self.xip.as_ptr(), xip_base: XIP_B, xip_len: 0x2000 })
+        }
+    }
+    impl Edge {
+        /// A store: into RAM where it lies wholly inside, else logged (the Soc's way for what is not plain memory).
+        fn wr(&mut self, a: u32, v: u32, n: u8) {
+            if a.wrapping_sub(RAM_B) <= 4096 - u32::from(n) {
+                for i in 0..u32::from(n) { self.ram[(a - RAM_B + i) as usize] = (v >> (8 * i)) as u8; }
+            } else {
+                self.log.push((a, v & (u32::MAX >> (32 - 8 * u32::from(n))), n));
+            }
+        }
+    }
+
+    fn hot_edge(j: &mut Jit, id: usize, pc: u32, ops: &[BOp], mem: &JitMem) -> *const u8 {
+        for _ in 0..HOT { j.entry::<Edge>(id, ops, &[], None, pc, mem, true, false); }
+        j.entry::<Edge>(id, ops, &[], None, pc, mem, true, false).unwrap().code
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn loads_stores_and_compares_match_the_interpreter_at_the_edges_of_ram_and_xip() {
+        use crate::Cond;
+        const PC: u32 = XIP_B + 0x100;
+        let mut addrs = vec![0u32, 1, 3, 0x7fff_ffff, 0x8000_0000, 0xffff_fff0, 0xffff_fffc, 0xffff_ffff, 0x0100_0000, 0x0300_0000, 0x41c0_0000, 0x81c0_0000, 0x4200_0000];
+        for (b, len) in [(RAM_B, 4096u32), (XIP_B, 0x2000)] {
+            for d in 0..8u32 { addrs.push(b.wrapping_sub(d)); addrs.push(b + d); addrs.push(b + len - 8 + d); addrs.push(b + len + d - 1); }
+            addrs.push(b + len / 2 + 1);
+        }
+        let mut jit = Jit::new(false).unwrap();
+        let mut id = 0;
+        for &addr in &addrs {
+            let mut cases = vec![];
+            for w in [1u8, 2, 4] {
+                for signed in [false, true] { cases.push(Fast::Ld { d: 3, b: Base::Reg(1), off: 0, w, signed }); }
+                cases.push(Fast::St { s: 2, b: Base::Reg(1), off: 0, w });
+            }
+            cases.push(Fast::LdW { d: 3, b: 1, off: 4 });
+            cases.push(Fast::LdBu { d: 3, b: 1, off: 1 });
+            cases.push(Fast::StW { s: 2, b: 1, off: 4 });
+            for f in cases {
+                let (mut bus, mut reference) = (Edge::new(), Edge::new());
+                let mem = bus.jit_mem().unwrap();
+                let mut cpu = Cpu::new(PC);
+                cpu.regs[1] = addr; cpu.regs[2] = 0x1234_5678 ^ addr; cpu.regs[3] = 0xdead_beef;
+                let mut expected = Cpu::new(PC);
+                expected.regs = cpu.regs;
+                let pc = expected.exec_fast(&mut reference, f, PC + 2).unwrap_or(PC + 2);
+                expected.pc = pc;
+                id += 1;
+                let code = hot_edge(&mut jit, id, PC, &[op(f)], &mem);
+                assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 1, false) }.0, 1, "{f:?} at {addr:#x}");
+                assert_eq!((cpu.regs, cpu.pc), (expected.regs, expected.pc), "{f:?} at {addr:#x}");
+                assert!(bus.ram == reference.ram && bus.log == reference.log, "{f:?} at {addr:#x}: memory or the writes that left it");
+            }
+        }
+        // compares with an immediate: below, at and above it, for immediates that are small, a shifted 12 bits, and neither
+        let conds = [Cond::Eq, Cond::Ne, Cond::LtU, Cond::GtU, Cond::LeU, Cond::GeU, Cond::LtS, Cond::GtS, Cond::LeS, Cond::GeS];
+        for v in [0u32, 1, 255, 4095, 4096, 4097, 0x8000, 0x0ff_f000, 0x1000_0000, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0xffff_f000] {
+            for x in [v.wrapping_sub(1), v, v.wrapping_add(1), 0, 0x8000_0000, u32::MAX] {
+                for &cond in &conds {
+                    for f in [Fast::BrI { a: 1, v, cond, target: PC + 0x40 }, Fast::BrIEq { a: 1, v, target: PC + 0x40 }, Fast::BrINe { a: 1, v, target: PC + 0x40 }] {
+                        let (mut bus, mut reference) = (Edge::new(), Edge::new());
+                        let mem = bus.jit_mem().unwrap();
+                        let mut cpu = Cpu::new(PC);
+                        cpu.regs[1] = x;
+                        let mut expected = Cpu::new(PC);
+                        expected.regs = cpu.regs;
+                        expected.pc = expected.exec_fast(&mut reference, f, PC + 2).unwrap_or(PC + 2);
+                        id += 1;
+                        let code = hot_edge(&mut jit, id, PC, &[op(f)], &mem);
+                        assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 1, false) }.0, 1);
+                        assert_eq!(cpu.pc, expected.pc, "{f:?} with {x:#x}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_runners_stretch_leaves_where_a_call_would_end() {
         let mut bus = Memory::new(); let mem = bus.jit_mem().unwrap();

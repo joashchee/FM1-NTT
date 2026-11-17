@@ -95,13 +95,44 @@ routine big enough to matter: replacing it would remove perhaps a quarter of wha
 gain would be a few percent per routine. **Not built.** This also means Neumetik's chip and FM code has nothing here to stand in for: the FM-1's FM is firmware code
 on the emulated CPU, not a chip. The faster JIT remains the only general lever.
 
+## The JIT (2026-11-17): 14-18% fewer instructions, built and checked
+
+The M1 hides the JIT's overhead (a wide core runs 5 instructions a cycle, and the real-time ratio hardly moves), the unit's in-order A35 does not,
+so the measure here is **host instructions per guest instruction** (macOS reports instructions retired for the process: `proc_pid_rusage`), with the real-time ratio
+beside it. Before the change it was 12.5-17.7 on six firmwares, and 0.7-3.8 of that was Rust around the JIT call (sampled with the counter's own cost taken out), so the JIT's own
+code is the cost. Where it went, from the compiled blocks: operands copied through scratch registers (a three-instruction add was six), the RAM and XIP range checks
+rebuilding the same constants (6 instructions, twice for a read of XIP), a compare through a built immediate, and the block-boundary bookkeeping.
+
+Changed (`core/vendor/fm1-emu`, `VENDORED.md` has the record): the register ops and the compares work on the host registers that hold the guest ones;
+a load or store takes its address from the operand; the range check is an `eor` and an immediate length. Not changed: the structure (a limit check and a flush at
+every block, guest registers not kept across blocks).
+
+| firmware | host insns per guest insn before / after | real time on the M1 before / after |
+|---|---|---|
+| UNTRUE STEP | 14.73 / 12.64 (-14%) | 4.69x / 5.03x |
+| Midnight | 14.17 / 11.64 (-18%) | 4.63x / 4.88x |
+| Halflight | 12.48 / 10.39 (-17%) | 5.50x / 6.02x |
+| Omni | 17.68 / 15.25 (-14%) | 4.42x / 4.61x |
+| Felucca | 13.60 / 11.37 (-16%) | 4.74x / 5.11x |
+| Skiff | 14.95 / 12.60 (-16%) | 3.14x / 3.68x |
+
+Checked: the vendored tests (72 with a new one) on the Mac and in a Debian 12 arm64 container; the new test (every width and a ring of addresses at both regions' edges and far outside, compares at
+their immediates' limits) fails when the range check is made wrong three ways; and the JIT and the interpreter give **the same audio, screen, pc and instruction count after 6 s** on all six.
+
+Tried and dropped: compiling a plain `if { }` with its then-part in line, as the if-else block already is. It works (identical output) and did nothing: the then-parts of the hot `if`s hold
+jumps and other `if`s, which the compiler leaves out, and the 800-odd sites it did take were not the hot ones (14.80 against 14.67 instructions).
+
+**What it is worth on the unit (a projection, not a measurement):** if the A35 follows the instruction count, UNTRUE STEP's 0.29x becomes about 0.34x, and about 0.47x with pace 3 (x1.4). Still short of 1x.
+The rest of the JIT's cost is structural: the block's limit check and flush at each boundary (about a quarter of the guest ops are branches, 0.27 blocks entered per guest instruction) and
+guest registers kept in memory between blocks. Keeping them in host registers across chained blocks, or compiling longer blocks, would take the sound of a rewrite of the compiler, for perhaps another 15%.
+
 ## What would
 
 In order of what is known:
 
 1. **Run it and read the new report:** the benchmark now measures the interpreter, the JIT and the JIT at pace 1, 2 and 3 on the same firmware,
    the Device report adds the CPU governor and clock (before and just after the runs) and a "firmware, best setting" line, PASS at 1x.
-2. **A faster JIT** (the biggest unknown: each of these is worth maybe 1.2-1.5x on top of the one before, measured on the Mac first, and
+2. **A faster JIT** (a first 14-18% is done, above; each of the rest is worth maybe 1.1-1.3x on top of the one before, measured on the Mac first, and
    checked against the interpreter, which the vendored tests already do op by op): keep the guest registers in host registers across chained
    blocks instead of flushing and reloading at every block exit; cut the block entry check; compile longer blocks through `if { }` and short jumps.
    This is upstream's code (`fm1-emu`, `crates/fm1-core/src/jit.rs`): a local change is recorded in `core/vendor/fm1-emu/VENDORED.md` first, and

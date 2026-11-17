@@ -153,6 +153,15 @@ impl Asm {
         debug_assert!((1..=31).contains(&ones) && ones + shift <= 32);
         self.e(0x1200_0000 | ((32 - shift) & 31) << 16 | (ones - 1) << 10 | rn << 5 | rd);
     }
+    /// `eor` with a contiguous mask `((1 << ones) - 1) << shift` (32-bit).
+    pub fn eor_mask(&mut self, rd: Reg, rn: Reg, ones: u32, shift: u32) {
+        debug_assert!((1..=31).contains(&ones) && ones + shift <= 32);
+        self.e(0x5200_0000 | ((32 - shift) & 31) << 16 | (ones - 1) << 10 | rn << 5 | rd);
+    }
+    /// Flags for w(rn) - imm12 << (12 if `lsl12`).
+    pub fn cmp_imm12(&mut self, rn: Reg, imm: u32, lsl12: bool) { debug_assert!(imm < 4096); self.e(0x7100_0000 | (lsl12 as u32) << 22 | imm << 10 | rn << 5 | ZR); }
+    /// Flags for x(rn) - imm12 << (12 if `lsl12`).
+    pub fn cmp_imm12_x(&mut self, rn: Reg, imm: u32, lsl12: bool) { debug_assert!(imm < 4096); self.e(0xf100_0000 | (lsl12 as u32) << 22 | imm << 10 | rn << 5 | ZR); }
     pub fn tst_mask(&mut self, rn: Reg, ones: u32, shift: u32) {
         debug_assert!((1..=31).contains(&ones) && ones + shift <= 32);
         self.e(0x7200_0000 | ((32 - shift) & 31) << 16 | (ones - 1) << 10 | rn << 5 | ZR);
