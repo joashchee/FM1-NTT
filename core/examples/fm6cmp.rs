@@ -189,7 +189,8 @@ fn make_voice(kind: &str) -> Option<[u8; 128]> {
         "fb6" => { alg = 4; ops[0].ol = 0; ops[4].ol = 99; ops[5].ol = 80; fb = 6; }
         "rs7" => { ops[0].rs = 7; rates = [99, 40, 99, 99]; levels = [99, 40, 40, 0]; }
         "rs0" => { rates = [99, 40, 99, 99]; levels = [99, 40, 40, 0]; }
-        k if k.starts_with("am:") => { let mut it = k[3..].split(':'); let a: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(50); let m: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(3); ops[0].ams = m.min(3); lfo = [30, 0, 0, a.min(99), 1, 0, 0]; }   // amplitude modulation: depth A, sensitivity M, triangle
+        k if k.starts_with("am:") => { let mut it = k[3..].split(':'); let a: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(50); let m: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(3); ops[0].ams = m.min(3); let w: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0); lfo = [if w == 3 { 20 } else { 30 }, 0, 0, a.min(99), 1, w, 0]; }   // amplitude modulation: depth A, sensitivity M, wave W (0 triangle, 3 square)
+        "amd" => { ops[0].ams = 2; lfo = [30, 60, 0, 99, 1, 0, 0]; }                    // amplitude modulation with an LFO delay
         "ams3" => { ops[0].ams = 3; lfo = [30, 0, 0, 80, 1, 0, 0]; }                    // amplitude modulation: triangle, depth 80, sensitivity 3
         "ams1" => { ops[0].ams = 1; lfo = [30, 0, 0, 80, 1, 0, 0]; }
         "pm0" | "pm1" | "pm2" | "pm3" | "pm4" | "pm5" => { lfo = [30, 0, 40, 0, 1, kind[2..].parse().unwrap_or(0), 3]; }   // pitch modulation, wave 0 to 5

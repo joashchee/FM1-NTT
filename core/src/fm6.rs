@@ -714,6 +714,21 @@ fn scale_level(midinote: i32, break_pt: i32, left_depth: i32, right_depth: i32, 
     }
 }
 
+/// The stock engine's amplitude modulation (docs/FM6.md): the attenuation in dB of an operator at the LFO's top, as measured on DX747 with a square LFO, against
+/// `depth * sensitivity`, where the sensitivity (AMS 0 to 3) is 0, 0.2588, 0.4275, 1 and the depth is the LFO's amp mod depth 0 to 99: the entry at d = 0, 1, 2 ... 88
+/// (past it the tone is under the measurement's noise floor: about 60 dB and falling to silence, taken as the last entry growing 6 dB a step).
+const AM_DB: [f32; 89] = [0.00, 0.04, 0.10, 0.14, 0.21, 0.25, 0.32, 0.40, 0.45, 0.54, 0.59, 0.68, 0.74, 0.84, 0.94, 1.01, 1.12, 1.21, 1.33, 1.41, 1.55, 1.69, 1.78, 1.94, 2.05, 2.21, 2.39, 2.51, 2.70, 2.84, 3.05, 3.20, 3.43, 3.67, 3.84, 4.10, 4.29, 4.57, 4.77, 5.09, 5.42, 5.66, 6.01, 6.27, 6.66, 7.08, 7.37, 7.83, 8.14, 8.64, 8.98, 9.52, 10.10, 10.50, 11.12, 11.55, 12.23, 12.71, 13.45, 14.23, 14.77, 15.63, 16.22, 17.16, 18.14, 18.82, 19.90, 20.64, 21.81, 22.63, 23.91, 25.26, 26.19, 27.66, 28.68, 30.29, 31.40, 33.15, 34.99, 36.28, 38.30, 39.70, 41.89, 43.47, 45.86, 48.36, 50.20, 52.91, 54.85];
+const AM_SENS: [f64; 4] = [0.0, 0.2588, 0.4275, 1.0];
+
+/// The attenuation of one operator in dB for the LFO at `lfo` (0 to 1) given its depth and AMS.
+fn am_attenuation_db(depth: i32, ams: usize, lfo: f64) -> f64 {
+    let d = (depth as f64 * AM_SENS[ams & 3] * lfo).clamp(0.0, 1e3);
+    let i = d.floor() as usize;
+    let f = d - i as f64;
+    let at = |k: usize| if k < AM_DB.len() { AM_DB[k] as f64 } else { AM_DB[AM_DB.len() - 1] as f64 + 6.0 * (k + 1 - AM_DB.len()) as f64 };
+    at(i) * (1.0 - f) + at(i + 1) * f
+}
+
 const PITCHMODSENS: [u8; 8] = [0, 10, 20, 33, 55, 92, 153, 255];
 
 /// One sounding note: six envelopes, the pitch envelope and the operator state.
@@ -728,6 +743,9 @@ pub struct Voice {
     algorithm: usize,
     pitchmoddepth: i32,
     pitchmodsens: i32,
+    /// amp mod depth and each operator's AMS: all 0 unless the tuning is `Stock` (msfa has none)
+    ampmoddepth: i32,
+    ams: [usize; 6],
 }
 
 /// The MIDI pitch wheel's centre.
@@ -753,6 +771,8 @@ impl Voice {
             algorithm: 0,
             pitchmoddepth: 0,
             pitchmodsens: 0,
+            ampmoddepth: 0,
+            ams: [0; 6],
         };
         // each carrier's place among the carriers, taken in operator order (the record holds operator 6 first): Felucca's tuning uses it
         let alg = (g(134) & 31) as usize;
@@ -775,6 +795,9 @@ impl Voice {
             outlevel = outlevel.max(0);
             let rate_scaling = scale_rate(midinote, g(off + 13));
             v.env[op].init(rates, levels, outlevel, rate_scaling);
+            if tuning == Tuning::Stock {
+                v.ams[op] = (g(off + 14) & 3) as usize;
+            }
             v.basepitch[op] = osc_freq(midinote, g(off + 17), g(off + 18), g(off + 19), g(off + 20), *place, tuning);
         }
         let rates = [g(126), g(127), g(128), g(129)];
@@ -785,6 +808,9 @@ impl Voice {
         v.fb_shift = if feedback != 0 { 8 - feedback } else { 16 };
         v.pitchmoddepth = (g(139) * 165) >> 6;
         v.pitchmodsens = PITCHMODSENS[(g(143) & 7) as usize] as i32;
+        if tuning == Tuning::Stock {
+            v.ampmoddepth = g(140).min(99);
+        }
         v
     }
 
@@ -798,7 +824,12 @@ impl Voice {
         pitchmod = pitchmod.wrapping_add((pitch_bend - PITCH_CENTRE) << 9);
         for op in 0..6 {
             self.params[op].gain[0] = self.params[op].gain[1];
-            let level = self.env[op].getsample();
+            let mut level = self.env[op].getsample();
+            if self.ams[op] != 0 && self.ampmoddepth != 0 {
+                // the stock engine attenuates at the LFO's low end: amplitude modulation is the inverted wave, scaled by the delay ramp
+                let lfo = (1.0 - lfo_val as f64 / (1 << 24) as f64) * (lfo_delay as f64 / (1 << 24) as f64);
+                level -= (am_attenuation_db(self.ampmoddepth, self.ams[op], lfo) / 6.0206 * (1 << 24) as f64) as i32;
+            }
             self.params[op].gain[1] = t.exp2(level.wrapping_sub(14 * (1 << 24)));
             self.params[op].freq = t.freq(self.basepitch[op].wrapping_add(pitchmod));
         }
@@ -1285,6 +1316,41 @@ mod tests {
         let ratio_db = |note| db(level(Output::Stock { pot: 1023 }, note) / flat(note)) - db(stock_master_gain(1023));
         assert!(ratio_db(96).abs() < 0.05, "{}", ratio_db(96));
         assert!((ratio_db(24) - -1.4).abs() < 0.5, "{}", ratio_db(24));
+    }
+
+    #[test]
+    fn amplitude_modulation_is_the_stock_engines_only() {
+        // a patch with LFO amp depth 80, a square wave, and operator 1 at AMS 3
+        let mut p = unpack_patch(&voice(31));
+        p[137] = 20;
+        p[139] = 0;
+        p[140] = 80;
+        p[141] = 1;
+        p[142] = 3;
+        let mut with_ams = p;
+        for op in 0..6 {
+            with_ams[op * 21 + 14] = 3;
+        }
+        let run = |patch: &[u8; 156], tuning: Tuning| {
+            let mut s = Synth::new(44100.0, &pack_patch(patch)).unwrap();
+            s.set_tuning(tuning);
+            s.note_on(60, 100);
+            let mut out = vec![0i16; 44100 * 2];
+            s.render(&mut out);
+            out
+        };
+        // msfa has none: AMS changes nothing, bit for bit
+        assert_eq!(run(&p, Tuning::Msfa), run(&with_ams, Tuning::Msfa));
+        // the stock engine swings the level between the two halves of the square wave by about 38 dB (depth 80, AMS 3)
+        let a = run(&with_ams, Tuning::Stock);
+        let rms = |x: &[i16]| (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt().max(1e-9);
+        let windows: Vec<f64> = a.chunks(4410).map(|w| 20.0 * rms(w).log10()).collect();
+        let (hi, lo) = (windows.iter().cloned().fold(-1e9, f64::max), windows.iter().cloned().fold(1e9, f64::min));
+        assert!(hi - lo > 10.0, "swing {}", hi - lo);
+        // the table: nothing at 0, monotone, and AMS scales the depth
+        assert_eq!(am_attenuation_db(80, 0, 1.0), 0.0);
+        assert!((am_attenuation_db(50, 3, 1.0) - 8.98).abs() < 0.01);
+        assert!((am_attenuation_db(80, 2, 1.0) - am_attenuation_db(34, 3, 1.0)).abs() < 0.3);
     }
 
     #[test]
