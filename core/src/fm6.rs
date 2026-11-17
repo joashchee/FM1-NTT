@@ -784,6 +784,13 @@ impl Voice {
     }
 }
 
+/// Felucca's master volume as measured in the emulator (docs/FM6.md): the FM-1's pot, 0 to 1023 (the emulator's default is 900), sets an amplitude gain of about
+/// (pot / 1070)^2 relative to msfa's own output scale, so 0.912 at full volume (-0.8 dB) and 0.708 at the emulator's 900 (-3.0 dB). Within 0.1 dB from 100 up (below
+/// 60 the firmware is quieter than this by up to 3 dB: not modelled). A fit to measurements of three firmwares, not read from any of them.
+pub fn felucca_master_gain(pot: u16) -> f64 {
+    (pot.min(1023) as f64 / 1070.0).powi(2)
+}
+
 /// A block's sample (msfa's mix scale) as 16 bits.
 pub fn to_i16(x: i32) -> i16 {
     let val = x >> 4;
@@ -817,6 +824,7 @@ pub struct Synth {
     current: usize,
     pitch_bend: i32,
     tuning: Tuning,
+    master: Option<f64>,
     spare: Vec<i16>,
 }
 
@@ -828,7 +836,7 @@ impl Synth {
         lfo.reset(&t, lfo_params(&patch));
         let blank = Voice::new(&t, &patch, 60, 100);
         let slots = (0..VOICES).map(|_| Slot { voice: blank.clone(), midi_note: 0, keydown: false, live: false, quiet: 0 }).collect();
-        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, spare: Vec::new() })
+        Ok(Synth { t, lfo, patch, slots, current: 0, pitch_bend: PITCH_CENTRE, tuning: Tuning::Msfa, master: None, spare: Vec::new() })
     }
 
     pub fn set_voice(&mut self, voice: &[u8; 128]) {
@@ -839,6 +847,11 @@ impl Synth {
     /// How the notes played from now on are tuned (`Tuning`).
     pub fn set_tuning(&mut self, tuning: Tuning) {
         self.tuning = tuning;
+    }
+
+    /// Scales the output by Felucca's master volume at this pot position (`felucca_master_gain`), or by nothing with `None`, the default: msfa's own level.
+    pub fn set_master_pot(&mut self, pot: Option<u16>) {
+        self.master = pot.map(felucca_master_gain);
     }
 
     pub fn set_pitch_bend(&mut self, bend: i32) {
@@ -905,7 +918,10 @@ impl Synth {
         }
         let mut out = [0i16; N];
         for (o, m) in out.iter_mut().zip(mix) {
-            *o = to_i16(m);
+            *o = to_i16(match self.master {
+                Some(g) => (m as f64 * g) as i32,
+                None => m,
+            });
         }
         out
     }
@@ -1068,6 +1084,29 @@ mod tests {
         let mut out = [0i16; 300];
         s.render(&mut out);
         assert!(out.iter().any(|&x| x != 0));
+    }
+
+    #[test]
+    fn the_master_volume_is_the_measured_law_and_off_by_default() {
+        assert!((20.0 * felucca_master_gain(1023).log10() - -0.78).abs() < 0.01);
+        assert!((20.0 * felucca_master_gain(900).log10() - -3.01).abs() < 0.01);
+        assert!((20.0 * felucca_master_gain(500).log10() - -13.22).abs() < 0.01);
+        assert_eq!(felucca_master_gain(5000), felucca_master_gain(1023), "the pot stops at 1023");
+        let render = |pot: Option<u16>| {
+            let mut s = Synth::new(44100.0, &voice(31)).unwrap();
+            s.set_master_pot(pot);
+            s.note_on(60, 100);
+            let mut out = vec![0i16; 4000];
+            s.render(&mut out);
+            out
+        };
+        assert_eq!(render(None), render(None));
+        let (plain, loud) = (render(None), render(Some(1023)));
+        assert_ne!(plain, loud);
+        let peak = |v: &[i16]| v.iter().map(|x| (*x as i32).abs()).max().unwrap() as f64;
+        assert!((peak(&loud) / peak(&plain) - 0.9126).abs() < 0.003, "{} {}", peak(&loud), peak(&plain));
+        let quiet = render(Some(0));
+        assert!(quiet.iter().all(|&x| x == 0), "a pot at 0 is silent");
     }
 
     #[test]

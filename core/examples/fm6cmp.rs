@@ -1,4 +1,4 @@
-//! `fm6cmp FIRMWARE.fwsc [--note N] [--vel V] [--voice I] [--enc NAME:CLICKS]... [--encn NAME:CLICKS] [--channel C] [--key] [--fm6-note N] [--hold S] [--out DIR]`: plays one note on a firmware in the emulator
+//! `fm6cmp FIRMWARE.fwsc [--note N] [--vel V] [--voice I] [--enc NAME:CLICKS]... [--encn NAME:CLICKS] [--pot 0-1023] [--master 0-1023] [--channel C] [--key] [--fm6-note N] [--hold S] [--out DIR]`: plays one note on a firmware in the emulator
 //! and the same voice (the firmware's own bank, found by the extractor) on the fm6 engine, and compares the two (docs/FM6.md).
 //! The emulator only reads the firmware as data. Prints levels, pitch, spectrum and decay; `--out` writes both as WAV for listening.
 use fm1ntt::{devices, extract, fm6, machine::Machine};
@@ -229,7 +229,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut file, mut note, mut vel, mut voice, mut program, mut hold, mut out) = (None, 60u8, 100u8, 0usize, None::<u8>, 1.5f64, None);
     let (mut brief, mut no_lfo, mut no_peg, mut make) = (false, false, false, None::<String>);
-    let (mut shot, mut dtun) = (None::<String>, 0u8);
+    let (mut shot, mut dtun, mut pot, mut master) = (None::<String>, 0u8, None::<u16>, None::<u16>);
     let (mut put, mut strip, mut beat, mut partials, mut peaks, mut tuning) = (false, String::new(), false, false, false, fm6::Tuning::Msfa);
     let (mut steps, mut channel, mut by_key, mut fm6_note) = (Vec::<(bool, usize, i32)>::new(), 0u8, false, None::<u8>);
     let mut i = 0;
@@ -261,6 +261,8 @@ fn main() -> ExitCode {
             "--brief" => brief = true,
             "--beat" => beat = true,
             "--partials" => partials = true,
+            "--pot" => pot = next(&mut i).parse().ok(),
+            "--master" => master = next(&mut i).parse().ok(),
             "--shot" => shot = Some(next(&mut i)),
             "--peaks" => peaks = true,
             "--tuning" => tuning = match next(&mut i).as_str() { "felucca" => fm6::Tuning::Felucca { dtun: 0 }, "msfa" => fm6::Tuning::Msfa, x => { eprintln!("--tuning msfa or felucca, not {x}"); return ExitCode::from(2) } },
@@ -342,6 +344,7 @@ fn main() -> ExitCode {
     let (mut boot, mut emu, mut sd) = (Vec::new(), Vec::new(), 0.0f64);
     run(&mut m, 3.0, &mut boot, &mut sd);
     if let Some(p) = program { m.midi_in(0xC0 | channel); m.midi_in(p); run(&mut m, 0.2, &mut boot, &mut sd); }
+    if let Some(v) = pot { m.pot(v); run(&mut m, 0.6, &mut boot, &mut sd); }
     for &(is_enc, n, c) in &steps {
         if is_enc && c.abs() >= 1_000_000 - 4096 {
             let clicks = if c > 0 { c - 1_000_000 } else { c + 1_000_000 };   // --encn: one click at a time
@@ -382,6 +385,7 @@ fn main() -> ExitCode {
     let mut syn = fm6::Synth::new(SR as f64, &vbytes).unwrap();
     if let fm6::Tuning::Felucca { .. } = tuning { tuning = fm6::Tuning::Felucca { dtun }; }
     syn.set_tuning(tuning);
+    syn.set_master_pot(master);                       // --master POT: fm6 at Felucca's master volume for that pot (the emulator's is --pot, default 900)
     let note = fm6_note.unwrap_or(note);
     syn.note_on(note, vel);
     let mut f6 = vec![0i16; (hold * SR as f64) as usize];

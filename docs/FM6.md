@@ -45,7 +45,7 @@ or more above fm6's release, and none of that is the engine.
 | velocity 40 against 100 | the same level difference | the same level difference |
 
 So the pitch, the operator frequencies and algorithms, the envelopes (the amp envelope, its release slope to the 16-bit floor) and the velocity scaling are the same engine; **the one systematic difference is the
-level: Felucca's output is about 3 dB (2.8 to 3.6) below fm6's** (a gain stage; not looked for). The emulator's note starts 7 to 9 ms after the MIDI byte (the firmware's own latency), and its noise floor is higher
+level: Felucca's output is about 3 dB (2.8 to 3.6) below fm6's** (the master volume at the emulator's default pot, below). The emulator's note starts 7 to 9 ms after the MIDI byte (the firmware's own latency), and its noise floor is higher
 (harmonics under about -90 dBFS differ by tens of dB and mean nothing).
 
 **What did not match at first, and why** (first grid, msfa's tuning: TINE EP at note 84, BRASS SECT and SOFT PAD): **tuning**, and only tuning. Found by writing test voices into the firmware (below), modelled
@@ -79,11 +79,11 @@ preset's result exactly, so the path is sound); `--strip lfo,peg,fb,det,kvs,rs,l
 `fm6::Tuning::Felucca { dtun }` is this model (default `Tuning::Msfa`, bit for bit the original: the golden test still passes). **Held out** (detune values and notes not in the fit: 45, 55, 63, 69, 75, 87, 100 at
 detune 0 to 14): 84 partials within 0.15 cent of the emulator, most within 0.05. **On the real presets** (`FM6_TUNING=felucca scripts/fm6-compare.sh`, DTUN 30 for PAD, 0 for the others), 30 runs (five presets, notes
 36, 60, 84, velocity 40 and 100): the mean level spread goes **from 7.6 dB with msfa's tuning to 0.8 dB** (worst 3.3 dB), the strongest partial agrees within 0.1 cent everywhere (it was 1200 cents out, an octave,
-for PAD and BRASS), and the level difference is a constant 2.8 to 3.2 dB, the output gain. The model is **fitted to measurements, not read from the firmware**, for ratio mode only (fixed-frequency mode is
+for PAD and BRASS), and the level difference is a constant 2.8 to 3.2 dB, the master volume (below). The model is **fitted to measurements, not read from the firmware**, for ratio mode only (fixed-frequency mode is
 unmeasured), at 44.1 kHz, on one firmware; whether the FM-1's stock firmware has the same law is not known.
 
 **Not covered**: other firmwares than Felucca, Jangada and Skiff (SLOOP, Melodee and the rest of the Felucca family are not in the pack or not run), mono single notes (no chords, so no voice stealing), the pitch wheel, the modulation wheel, the LFO's effect, the 12 voice limit,
-the unit itself (nothing ran on an FM-1). The output gain (a constant 2.8 to 3.2 dB below fm6's: not looked for) and the firmware's 7 to 9 ms latency are the other differences.
+the unit itself (nothing ran on an FM-1). The firmware's 7 to 9 ms latency is the other difference (the level is the master volume, below).
 
 ## Jangada and Skiff (2026-11-17)
 
@@ -97,7 +97,7 @@ GRAIN; its FM6 presets are TINE EP, BELL, FM BASS, BRASS, PAD, MARIMBA, ORGAN, P
 key goes up is under -90 dB), and MIDI channel 2 plays part 2.
 
 **The engine is the same engine, and so is the tuning.** At DTUN 0 the detune step measured 1.978, 1.550, 1.197, 0.905, 0.677, 0.5005 and 0.367 cents at notes 36, 48, 60, 72, 84, 96 and 108 in **all three** firmwares, equal to
-four decimals; the DTUN spread is the same (only the F5 PAD preset has it, 30, unit 2.83 cents, the pattern 0, +1, -1, +2, -2, +3 on the carriers); the output is the same 3.0 dB below fm6; and `Tuning::Felucca` needed
+four decimals; the DTUN spread is the same (only the F5 PAD preset has it, 30, unit 2.83 cents, the pattern 0, +1, -1, +2, -2, +3 on the carriers); the output is the same 3.0 dB below fm6 (the master volume, below); and `Tuning::Felucca` needed
 no change. Over the five presets all three have (TINE EP, BELL, FM BASS, BRASS, PAD; notes 36, 60, 84; velocity 40 and 100: 30 runs each):
 
 | | mean level spread, msfa tuning | with `Tuning::Felucca` | worst | level fm6 minus emulator | strongest partial |
@@ -117,11 +117,24 @@ now matches at the same 3.0 dB. (The earlier six-carrier and single-operator tes
 **Differences between the three, none in the engine:** the note-on latency (first sample over 0.002: Felucca 7 to 9 ms, Skiff 7 ms, **Jangada 16 ms**), and what the panel offers. Nothing else was found. Still the emulator, one note at a time,
 and not the stock firmware or a unit.
 
+## The 3 dB is the master volume (2026-11-17)
+
+**The constant 3.0 dB between the emulator and fm6 is the FM-1's volume pot at the emulator's default position**, plus 0.8 dB that is there at full volume. The pot (ADC channel 4, `Machine::pot`, 0 to 1023; the
+emulator starts it at 900, "MASTER pot") sets the firmware's MASTER volume, and the level follows it smoothly: with fm6 left alone, the level difference fm6 minus emulator was +0.8 dB at pot 1023, +1.2 at 1000,
++3.0 at 900, +5.5 at 780, +10.0 at 600, +13.2 at 500, +22.0 at 300, +29.1 at 200, +38.1 at 120 and +50.4 at 60 (`fm6cmp --pot`). That is an amplitude law of **about (pot / 1070)^2**, 40 log10(pot / 1070) in dB,
+within 0.1 dB from pot 100 to 1023 (below 60 the firmware is quieter than the law by 0.3 to 3 dB: not modelled). It is the same in Felucca, Jangada and Skiff (0.8, 3.0, 13.2 and 29.1 dB at pots 1023, 900, 500
+and 200 in all three), the same for every voice, note, velocity and output level, and linear (lowering the operators' output levels does not change it). What the 0.8 dB at full volume is (a fixed output scale
+against msfa's `to_i16`, probably) was not looked into.
+
+`fm6::felucca_master_gain(pot)` is the law, and `Synth::set_master_pot(Some(pot))` applies it (default `None`: msfa's own level, bit for bit). **With fm6's master set to the emulator's pot the level difference is within
+0.2 dB at pots 1023, 900, 700, 500, 300 and 150**, and on the five Felucca presets at the default pot it is -0.1 to +0.2 dB (`fm6cmp --master POT`). A chip's volume knob is the hardware's, not the voice engine's, which
+is why this is a separate, optional stage.
+
 ## The API
 
 `Tables::new(sample_rate)` (8000 to 192000 Hz, else an error), `unpack_patch(&[u8;128]) -> [u8;156]` (every field that indexes a table is clamped, so a bad voice plays
 wrongly and never crashes: rule 5, with a 300-voice garbage test), `Voice::new` / `compute` / `key_up` (one note, one 64-sample block at a time, the original's shape),
-`Lfo`, `Tuning` (msfa's, or Felucca's measured: above), and `Synth`: 12 voices of one patch, `set_tuning`, `note_on`, `note_off`, `set_pitch_bend`, `render(&mut [i16])` mono (msfa's `SynthUnit` without its filter, sustain pedal and
+`Lfo`, `Tuning` (msfa's, or Felucca's measured: above), `felucca_master_gain`, and `Synth`: 12 voices of one patch, `set_tuning`, `set_master_pot`, `note_on`, `note_off`, `set_pitch_bend`, `render(&mut [i16])` mono (msfa's `SynthUnit` without its filter, sustain pedal and
 MIDI parser). Output is 16-bit by msfa's mix scale (`to_i16`).
 
 ## Not done
