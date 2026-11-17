@@ -34,7 +34,7 @@ The advice every guide repeats: back up first, keep stock V15 (or V16) as the wa
 ## What is bundled, and what is not
 
 Two tiers (`docs/FIRMWARE.md`, "Two tiers"). **Permissive tier, inside the MIT app: Haunted FM-1 v0.1** (five firmwares; MIT on MPL-2.0 platform layers).
-**Copyleft pack, its own repository (https://github.com/joashchee/FM1-NTT-Firmware-Pack) and package, with source: Felucca 1.8.2, FoMni-1 0.4.1 and Jangada 1.0.1** (GPL-3.0-only for the whole, with the MIT, MPL-2.0, Apache-2.0, CC0-1.0 and OFL-1.1 parts
+**Copyleft pack, its own repository (https://github.com/joashchee/FM1-NTT-Firmware-Pack) and package, with source: Felucca 1.8.2, FoMni-1 0.4.1, Jangada 1.0.1 and Skiff 2.6** (GPL-3.0-only for the whole, with the MIT, MPL-2.0, Apache-2.0, CC0-1.0 and OFL-1.1 parts
 each one's `SOURCES.md` lists). Each was chosen **after reading its own licence files at the release tag**, and each was booted in the emulator.
 
 Left out, each for a specific reason found in its own files:
@@ -74,3 +74,16 @@ identifiers, download the release into an empty folder, boot it, then write the 
 - **Lunar Modulator** and **Album**, if someone builds a release from source with JieLi's toolchain (the build is reproducible only with their SDK) and publishes it; or if FM1-NTT builds them (a toolchain in the Docker image).
 - New releases of Haunted FM-1 (this survey took v0.1).
 - A hand-written original firmware for FM1-NTT itself (the ISA tables are in the vendored crates): MIT, no third parties; a project of its own.
+
+## Licence reads, 2026-11-16 (continued)
+
+Each read from the firmware's own licence files at its release tag (not the repository badge), its `.fwsc` hashed against the author's `SHA256SUMS`. **Nothing here is bundled yet**: this is what the next pack entries need.
+
+| Firmware | Result | Open points |
+|---|---|---|
+| **FIZZ 0.13.0** (Quixotic7) | **MPL-2.0** firmware (was GPL-3.0-only until 2026-10-23; the Felucca-derived code was rewritten clean-room, `research/PROVENANCE.md`). Both `.fwsc` match the author's sums (`fizz-0.13.0` `f695bf22...`, `fizz-usb-0.13.0` `11148699...`). Its GPL parts are the web `site/` and test oracles, not the firmware | Third parties in the firmware: plutovg (MIT), **FreeType's rasterizer under the FreeType License (FTL)** (not on either allowlist: a decision), stb (MIT OR Unlicense: the checker is AND-only), Inter Tight (OFL-1.1). **Decided 2026-11-16 (maintainer: "leave freetype out of allowlist"): the FreeType License stays off both allowlists, so FIZZ is not bundled** in either tier (its firmware carries FTL-licensed FreeType code inside plutovg); it stays link-only, and the checker still refuses an FTL entry |
+| **Tessera 3.5.3** (Rastapopolix, a Melodee derivative) | **GPL-3.0-only** as a whole; both `.fwsc` match the author's sums. **It does not carry what excluded Melodee**: its ORACLE sounds are "Tessera's own (no Sequential factory programs)" (`oracle_sounds.h`) and the CZ-1 and Prophet stores are "retired with their engines" (`native_presets.c`) | MIT, Apache-2.0, GPL-3.0-or-later (Grids map, Dexed tables), MPL-2.0 (`announce.c`), OFL; Scala tunings from the Huygens-Fokker archive (data, no licence statement found: ask); the 3 JieLi SDK files in each package (Apache-2.0, as in the pack's others). A source scan of SPDX identifiers is still to do |
+| **Skiff 2.6** (illuminus5, a Felucca 1.1.5 fork) | **GPL-3.0-only** as a whole, no `THIRD_PARTY_NOTICES.md` (the earlier retry failure was a network drop on a file that does not exist) | **Two drum loops (`assets/breaks/`) generated with the YuE2 music model**, whose weights are CC BY-NC 4.0 with an extra permission for individual creators: a rights question, not a licence the pack can state. CC0 samples (VSCO-2 CE, VCSL) are fine. **Decided 2026-11-16 (maintainer: "skiff to the pack"): in the pack** (FM-1 package only), with the loops recorded as a caveat in `skiff/SOURCES.md`: the pack relies on the author's stated permission and GPL grant, unconfirmed with the model's authors; it comes out if either is withdrawn |
+
+The three `.fwsc` hash reads that first looked like MISMATCHes were **truncated downloads**, not re-uploads: the same file hashed differently on each read. `fm1tastik/scripts/research.py` now reads to the end and refuses a body shorter than its `Content-Length` (retrying), with tests.
+

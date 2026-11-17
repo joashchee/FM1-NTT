@@ -44,9 +44,11 @@ pub struct CpuView {
     pub insns: u64,
 }
 
-/// Whether this build's CPU can compile hot code to native code (the vendored `fm1-core`'s own list of hosts).
+/// Whether this build can compile hot code (the vendored `fm1-core`'s own list of hosts). On wasm32 it compiles to WebAssembly through a hook
+/// the host supplies (`env.fm1_jit_compile`, `web/public/fm1ntt.js`): a module that is running at all has that import, so it is available.
 pub fn native_jit_available() -> bool {
     cfg!(any(
+        target_arch = "wasm32",
         all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "android")),
         all(target_arch = "x86_64", any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))
     ))

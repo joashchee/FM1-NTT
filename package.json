@@ -6,6 +6,7 @@
   "description": "FM1-NTT web shell (PWA). No dependencies: Node's standard library only.",
   "scripts": {
     "icons": "node scripts/build-icons.ts",
+    "build:wasm": "web/build.sh",
     "serve": "node web/server.ts",
     "test": "node --test web/"
   }

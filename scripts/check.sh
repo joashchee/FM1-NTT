@@ -1,6 +1,6 @@
 #!/bin/bash
 # Everything that can be checked without an R36S or an FM-1: the core's tests, a build of the host and its headless
-# self-test, the web shell's PWA test, and the scripts' syntax and shellcheck. Same as CI.
+# self-test, the web shell's PWA test and the wasm build's tests, and the scripts' syntax and shellcheck. Same as CI.
 #   scripts/check.sh
 # The arm64 package is r36s/build-deb.sh (needs Docker).
 set -eu
@@ -19,6 +19,11 @@ mkdir -p "$REPO/build"
 out="$(SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$REPO/build/fm1ntt" --selftest 2>&1)" || { echo "$out"; echo "self-test FAILED"; exit 1; }
 echo "$out" | tail -1
 echo "== web"
+# the wasm build (web/build.sh): needs the wasm32 target; without it the wasm tests are SKIPPED and this says so
+if rustc --print target-libdir --target wasm32-unknown-unknown >/dev/null 2>&1 && [ -d "$(rustc --print target-libdir --target wasm32-unknown-unknown)" ]; then
+    "$REPO/web/build.sh" >"$REPO/build/web-build.log" 2>&1 || { cat "$REPO/build/web-build.log"; echo "web build FAILED"; exit 1; }
+    tail -1 "$REPO/build/web-build.log"
+else echo "wasm32 target NOT INSTALLED: web/build.sh not run, the wasm tests will be skipped (rustup target add wasm32-unknown-unknown)"; fi
 if command -v node >/dev/null; then node --test "$REPO/web/" 2>&1 | grep -E "^ℹ (pass|fail)" ; node --test "$REPO/web/" >/dev/null 2>&1 || { echo "web test FAILED"; exit 1; }
 else echo "node NOT INSTALLED: web test not run"; fi
 echo "== bundled-firmware checker"
@@ -28,9 +33,9 @@ if python3 "$REPO/scripts/test_check_firmware_updates.py" >"$REPO/build/check-up
 echo "== bench-compare"
 if python3 "$REPO/scripts/test_bench_compare.py" >"$REPO/build/bench-compare.log" 2>&1; then tail -1 "$REPO/build/bench-compare.log"; else cat "$REPO/build/bench-compare.log"; echo "bench-compare tests FAILED"; exit 1; fi
 echo "== scripts"
-for f in "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh; do bash -n "$f"; done
+for f in "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/web/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh; do bash -n "$f"; done
 if command -v shellcheck >/dev/null; then
-    shellcheck "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh || { echo "shellcheck FAILED"; exit 1; }
+    shellcheck "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/web/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh || { echo "shellcheck FAILED"; exit 1; }
     echo "shellcheck ok"
 else echo "shellcheck NOT INSTALLED: not run"; fi
 echo "== bundled firmware"

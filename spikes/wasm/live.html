@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FM1-NTT live sound spike</title>
+<style>:root{color-scheme:light dark}body{font:15px/1.45 system-ui;margin:16px;max-width:46rem}pre{background:#8882;padding:8px;white-space:pre-wrap}button{font:inherit;padding:6px 12px}canvas{width:480px;max-width:100%;image-rendering:pixelated;background:#000}</style>
+<h1>FM1-NTT: live sound</h1>
+<p>Phase 0 of fm1tastik. Choose a firmware you own (it stays in this tab), press Start (a click is needed before a browser lets a page make sound), then play with the keys below. Leave it running for a minute and send back the report.</p>
+<input type="file" id="fw"> <label><input type="checkbox" id="jit" checked> wasm JIT</label> <button id="go">Start</button> <button id="stop">Stop</button>
+<p>Keys (27): <code>z s x d c v g b h n j m , l . ; / q 2 w 3 e r 5 t 6 y</code> in that order, low to high.</p>
+<canvas id="c" width="240" height="240"></canvas>
+<pre id="rep">not started</pre>
+<script>
+const $ = (i) => document.getElementById(i), KEYS = 'zsxdcvgbhnjm,l.;/q2w3er5t6y';
+let w, ctx, last = {};
+$('go').onclick = async () => {
+  const f = $('fw').files[0]; if (!f) return ($('rep').textContent = 'choose a firmware file first');
+  $('rep').textContent = 'starting…';
+  try {
+    ctx = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' }); await ctx.resume();
+    await ctx.audioWorklet.addModule('live-worklet.js');
+    const node = new AudioWorkletNode(ctx, 'fm1', { outputChannelCount: [2] }); node.connect(ctx.destination);
+    const ch = new MessageChannel(); node.port.postMessage({ port: ch.port2 }, [ch.port2]);
+    const wasm = await (await fetch('fm1ntt_wasm_spike.wasm')).arrayBuffer(), fw = await f.arrayBuffer();
+    w = new Worker('live-worker.js');
+    w.onmessage = ({ data: d }) => {
+      if (d.error) $('rep').textContent = 'error: ' + d.error;
+      if (d.screen) { const g = $('c').getContext('2d'), im = g.createImageData(240, 240); for (let i = 0; i < 57600; i++) { const v = d.screen[i]; im.data[i * 4] = (v >> 16) & 255; im.data[i * 4 + 1] = (v >> 8) & 255; im.data[i * 4 + 2] = v & 255; /* & 255: a Uint8ClampedArray clamps, it does not wrap */ im.data[i * 4 + 3] = 255; } g.putImageData(im, 0, 0);
+        last = d.stats; $('rep').textContent = navigator.userAgent + '\naudio ' + ctx.sampleRate + ' Hz, base latency ' + (ctx.baseLatency * 1000).toFixed(1) + ' ms, output latency ' + ((ctx.outputLatency || 0) * 1000).toFixed(1) + ' ms\n' + JSON.stringify(last) + '\n(live = emulated time / real time, needs about 1.0 or more; short = buffers the emulation could not finish; under = silent samples the speaker got after the start; both should stay 0)'; }
+    };
+    w.postMessage({ init: true, wasm, fw, jit: $('jit').checked, port: ch.port1 }, [wasm, fw, ch.port1]);
+  } catch (e) { $('rep').textContent = 'error: ' + e.message; }
+};
+$('stop').onclick = () => { if (w) w.terminate(); if (ctx) ctx.close(); $('rep').textContent += '\nstopped'; };
+const send = (e, down) => { const i = KEYS.indexOf(e.key.toLowerCase()); if (i >= 0 && w && !e.repeat) { w.postMessage({ key: 14 + i, down }); e.preventDefault(); } };
+addEventListener('keydown', (e) => send(e, true)); addEventListener('keyup', (e) => send(e, false));
+</script>

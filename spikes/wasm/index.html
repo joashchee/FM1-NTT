@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FM1-NTT wasm spike</title>
+<style>:root{color-scheme:light dark}body{font:15px/1.45 system-ui;margin:16px;max-width:46rem}pre{background:#8882;padding:8px;overflow:auto;white-space:pre-wrap}button{font:inherit;padding:6px 12px}textarea{width:100%;height:7em;font:12px monospace}</style>
+<h1>FM1-NTT in a browser: spike</h1>
+<p>Phase 0 of fm1tastik. <b>1. Speed.</b> Pick a firmware file you own (it stays in this tab) and run. The result is the figure to send back, with this device's name.</p>
+<input type="file" id="fw"> seconds <input id="secs" value="6" size="3"> <button id="go">Run speed test</button>
+<pre id="speed">not run</pre>
+<p><b>2. Can a browser fetch these links?</b> One URL a line (put real firmware download links here). Each is fetched with CORS from this page; a blocked one is what a user's browser would also see.</p>
+<textarea id="urls">https://raw.githubusercontent.com/joakimeriksson/fm1-emu/main/README.md
+https://api.github.com/repos/joakimeriksson/fm1-emu/releases/latest
+https://github.com/cli/cli/releases/download/v2.40.0/gh_2.40.0_checksums.txt</textarea>
+<button id="cors">Probe</button><pre id="corsout">not run</pre>
+<script>
+const $ = (i) => document.getElementById(i);
+const q = new URLSearchParams(location.search); // ?fw=<same-origin path>&secs=N runs at once (for the headless check)
+$('go').onclick = async () => {
+  const f = $('fw').files[0]; if (!f && !q.get('fw')) return ($('speed').textContent = 'choose a firmware file first');
+  $('speed').textContent = 'loading…';
+  const wasm = await (await fetch('fm1ntt_wasm_spike.wasm')).arrayBuffer(), fw = f ? await f.arrayBuffer() : await (await fetch(q.get('fw'))).arrayBuffer();
+  const w = new Worker('worker.js');
+  w.onmessage = ({ data: d }) => {
+    if (d.progress !== undefined) $('speed').textContent = (d.jit ? 'JIT' : 'interpreter') + ' ' + Math.round(d.progress * 100) + '%';
+    if (d.error) $('speed').textContent = 'error: ' + d.error;
+    if (d.done) $('speed').textContent = navigator.userAgent + '\ncores ' + navigator.hardwareConcurrency + ', memory ' + (navigator.deviceMemory || '?') + ' GB\n' + d.done.map((r) => JSON.stringify(r)).join('\n') + '\n(xRealtime 1.0 = real time; above 1 is fast enough for live play)';
+  };
+  w.postMessage({ wasm, fw, seconds: +$('secs').value || 6 }, [wasm]);
+};
+$('cors').onclick = async () => {
+  const out = []; for (const u of $('urls').value.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    try { const r = await fetch(u, { mode: 'cors' }); const n = (await r.arrayBuffer()).byteLength; out.push('OK   ' + r.status + ' ' + n + ' bytes  ' + u); }
+    catch (e) { out.push('FAIL ' + e.message + '  ' + u); } $('corsout').textContent = out.join('\n'); }
+};
+if (q.get('fw')) { $('secs').value = q.get('secs') || 4; $('go').click(); }
+</script>

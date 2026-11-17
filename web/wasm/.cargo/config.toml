@@ -1,0 +1,3 @@
+# The core's wasm JIT puts compiled regions into the emulator's own function table, so the table must be exported.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-args=--export-table --growable-table"]

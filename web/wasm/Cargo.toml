@@ -1,0 +1,24 @@
+[package]
+name = "fm1ntt-web"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The core as a WebAssembly module for the web app (web/build.sh). No logic of its own: it re-exports the core's C API and adds a bounded allocator pair."
+
+[lib]
+crate-type = ["cdylib"]
+
+# The only dependency is the core (and through it the three vendored crates): no new dependency (CLAUDE.md rule 4).
+[dependencies]
+fm1ntt-core = { path = "../../core" }
+
+# Its own workspace, so building the core natively never builds this and this never changes the core's lock file.
+[workspace]
+
+[profile.release]
+opt-level = 3
+panic = "abort"      # a panic must never unwind across the module boundary
+lto = true
+codegen-units = 1
+strip = "symbols"    # no names section: smaller, and nothing from a build machine's paths
