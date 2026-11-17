@@ -387,6 +387,19 @@ impl Jit {
         }
     }
 
+    /// (blocks still cold, blocks compiled, blocks given up on, code cache bytes used): read-only, for diagnostics.
+    pub fn counts(&self) -> (usize, usize, usize, usize) {
+        let mut c = (0, 0, 0, self.cache.used);
+        for e in &self.state {
+            match e {
+                Entry::Cold(_) => c.0 += 1,
+                Entry::Code(..) => c.1 += 1,
+                Entry::No => c.2 += 1,
+            }
+        }
+        c
+    }
+
     /// Forget every compiled block (the block table was rebuilt).
     pub fn reset(&mut self) {
         self.state.clear();

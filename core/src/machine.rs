@@ -286,6 +286,21 @@ impl Machine {
         self.cpu.jit_on
     }
 
+    /// Count JIT entries and the instructions run in compiled code from now on (set it before the first run: the JIT is made with it).
+    /// It slows the run a little, so a timed run never has it on.
+    pub fn set_jit_profile(&mut self, on: bool) {
+        self.cpu.profile = on;
+    }
+
+    /// One line of JSON about the JIT: blocks cold, compiled and given up on, code cache bytes, and (with the profile on) entries, instructions run compiled and in all.
+    pub fn jit_report(&self) -> String {
+        let (cold, compiled, given_up, bytes) = self.cpu.jit_counts();
+        format!(
+            "{{\"blocks_cold\":{cold},\"blocks_compiled\":{compiled},\"blocks_given_up\":{given_up},\"cache_bytes\":{bytes},\"entries\":{},\"jit_insns\":{},\"insns\":{}}}",
+            self.cpu.jit_entries, self.cpu.jit_insns, self.cpu.insn_count
+        )
+    }
+
     /// Core 0 or 1 (None for core 1 until the firmware releases it).
     pub fn cpu_view(&self, core: usize) -> Option<CpuView> {
         let c = match core {

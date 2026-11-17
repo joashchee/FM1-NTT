@@ -62,6 +62,8 @@ per block); that is noted in the file and tracked in ROADMAP section 5.
 
 **Why the warm-up (workload 2).** A firmware's first emulated seconds are cheap (boot, idle) and it gets heavier after that. Workload 1 timed 1 s windows from a cold start, so on the R36S it measured the cheap part (UNTRUE STEP, JIT, pace 3: 1.37x in the benchmark, 0.64x in the Device report, which runs 3 s). Version 1 files are refused by `bench-compare.py` against version 2 ones.
 
+**The `# jit` lines** (with `--fw`, the best setting, pace 3, JIT counters on so never one of the timed runs): the JIT's state after the warm-up and after one window, as JSON: `blocks_cold` / `blocks_compiled` / `blocks_given_up`, `cache_bytes`, `entries` (times compiled code was entered from Rust), `jit_insns` (guest instructions run compiled) and `insns` (in all). Read the second line minus the first: `jit_insns` over `insns` is the share running compiled, and `blocks_compiled` still growing says the unit is compiling in steady state. They are notes, not `BENCH` lines, and are not compared.
+
 ## Rules for changing it
 
 - **Bump `WORKLOAD_VERSION`** (core/src/bench.rs) whenever the workload's bytes or a benchmark's definition change, and add a line to the

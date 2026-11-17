@@ -23,6 +23,9 @@
   - What it does: 14-18% fewer host instructions per guest instruction on six firmwares (an Apple M1; `docs/PERFORMANCE.md`), the same state
     after every instruction (the vendored tests, 72 with the new one, and a 6 s audio, screen, pc and instruction-count comparison of the JIT
     against the interpreter on six firmwares, are identical).
+- **Changed, 2026-11-17 (by this project, a read-only addition for diagnostics):** `crates/fm1-core/src/jit.rs` gets `Jit::counts()` (blocks still cold, compiled,
+  and given up on, and the code cache's bytes used) and `crates/fm1-core/src/lib.rs` gets `Cpu::jit_counts()` over it (zeros when there is no native JIT).
+  Nothing executes differently; it is read by the benchmark (`fm1ntt_jit_report`) to say where the unit's time goes (blocks the JIT gave up on run in the interpreter).
 - **Updating:** fetch the new commit into an empty folder outside the repository, diff it against this tree, read the diff, copy, and change
   the commit above, `NOTICE`, `docs/LICENSING.md` and the changelog in the same commit. Run `scripts/check.sh`.
 - **Not ours to fix here:** a bug in these crates is reported or fixed upstream; a local fix is a recorded change above.

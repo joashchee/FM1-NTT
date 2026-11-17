@@ -447,6 +447,15 @@ impl Cpu {
         self.hold_irq = 0;
     }
 
+    /// The native JIT's (cold, compiled, given-up blocks, code cache bytes used); zeros without one. Read-only, for diagnostics.
+    pub fn jit_counts(&self) -> (usize, usize, usize, usize) {
+        #[cfg(native_jit)]
+        if let Some(j) = &self.jit {
+            return j.counts();
+        }
+        (0, 0, 0, 0)
+    }
+
     pub fn jit_profile_json(&self) -> String {
         let helpers = self.jit_helpers.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
         #[cfg(target_arch = "wasm32")]

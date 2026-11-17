@@ -134,29 +134,6 @@ static void cpufreq_text(char *out, size_t n) {
     snprintf(out, n, "governor %s, %.0f MHz now, %.0f MHz max (available: %s)", g[0] ? g : "?", atof(cur) / 1000.0, atof(mx) / 1000.0, av[0] ? av : "?");
 }
 
-/* A firmware the caller supplied, run flat out for `seconds` of real time: emulated time over real time. 0 when it halts at once. */
-static int speed_firmware(const char *path, int raw, int jit, int pace, double seconds, double *xrt, double *emu_ms, int *halted) {
-    char why[128];
-    size_t n = 0;
-    uint8_t *buf = read_file(path, &n, why, sizeof why);
-    if (!buf) return 0;
-    fm1ntt_machine *m = fm1ntt_new();
-    int rc = raw ? fm1ntt_load_raw(m, buf, n, FM1_ENTRY_FELUCCA) : fm1ntt_load_package(m, buf, n);
-    free(buf);
-    if (rc != 0) { fm1ntt_free(m); return 0; }
-    fm1ntt_jit(m, jit);
-    fm1ntt_pace(m, pace);
-    static int16_t pcm[1024 * 2];
-    double t0 = r3_report_ms(), t = t0;
-    uint64_t ms0 = fm1ntt_ms(m);
-    while (t - t0 < seconds * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
-    *emu_ms = (double)(fm1ntt_ms(m) - ms0);
-    *xrt = *emu_ms / (t - t0);
-    *halted = fm1ntt_halted(m);
-    fm1ntt_free(m);
-    return 1;
-}
-
 /* The benchmark's firmware run: the firmware is first brought past its boot with the JIT (the first emulated seconds are cheap, then it gets heavier: a
  * 1 s run from a cold start measured the cheap part, 2026-11-17), then BENCH_RUNS consecutive windows of `seconds` are timed in the setting asked for.
  * The warm-up stops at FW_WARMUP_EMU_MS of emulated time or FW_WARMUP_WALL_S of real time, whichever is first (a machine with no JIT would take minutes);
@@ -215,12 +192,43 @@ static void bench_line(Bench *b, const char *id, const double v[BENCH_RUNS], con
     b->n++;
 }
 static void bench_note(Bench *b, const char *fmt, const char *a1) {
-    char line[320];
+    char line[1200];
     snprintf(line, sizeof line, fmt, a1 ? a1 : "");
     fputs(line, b->f);
     if (!g_quiet_logs) fputs(line, stdout);
     fflush(b->f);
     fflush(stdout);
+}
+
+/* Where the JIT's time goes, for the benchmark file: the same warm-up as `speed_firmware_windows`, then one window of `seconds`, with the JIT's
+ * entry and instruction counters on (they slow the run a little, so this pass is never one of the timed ones). Writes two `# jit` lines: the
+ * JIT's state after the warm-up and after the window. In the window, `jit_insns` over `insns` is the share of guest instructions that ran
+ * compiled (the rest ran in the interpreter: blocks the JIT gave up on, or cold ones), `entries` the number of times compiled code was entered,
+ * and `blocks_compiled` growing says the unit is still compiling. */
+static void fw_jit_diag(Bench *b, const char *path, int raw, int pace, double seconds) {
+    char why[128], a[400], z[400], line[900];
+    size_t n = 0;
+    uint8_t *buf = read_file(path, &n, why, sizeof why);
+    if (!buf) return;
+    fm1ntt_machine *m = fm1ntt_new();
+    int rc = raw ? fm1ntt_load_raw(m, buf, n, FM1_ENTRY_FELUCCA) : fm1ntt_load_package(m, buf, n);
+    free(buf);
+    if (rc != 0) { fm1ntt_free(m); return; }
+    static int16_t pcm[1024 * 2];
+    fm1ntt_jit_profile(m, 1);
+    fm1ntt_jit(m, 1);
+    fm1ntt_pace(m, 0);
+    double w0 = r3_report_ms(), t = w0;
+    while (fm1ntt_ms(m) < FW_WARMUP_EMU_MS && t - w0 < FW_WARMUP_WALL_S * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
+    fm1ntt_pace(m, pace);
+    if (!fm1ntt_jit_report(m, a, sizeof a)) a[0] = 0;
+    double t0 = r3_report_ms();
+    t = t0;
+    while (t - t0 < seconds * 1000.0 && !fm1ntt_halted(m)) { fm1ntt_render(m, pcm, 1024, 4000000); t = r3_report_ms(); }
+    if (!fm1ntt_jit_report(m, z, sizeof z)) z[0] = 0;
+    snprintf(line, sizeof line, "# jit (pace %d, counters on) after the warm-up: %s\n# jit (pace %d, counters on) after one %.2f s window: %s\n", pace, a, pace, seconds, z);
+    bench_note(b, "%s", line);
+    fm1ntt_free(m);
 }
 
 static unsigned long long fnv64_file(const char *path, size_t *size) {
@@ -238,7 +246,7 @@ static unsigned long long fnv64_file(const char *path, size_t *size) {
 /* The whole benchmark. `seconds` is per workload per run (default 1.0 so the three runs of the speed tests take about 3 s each);
  * `fw` (may be NULL) is a firmware to time too. Writes $BASE/bench/bench-<platform>-<stamp>.txt (and latest.txt); returns 0 when written. */
 static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *result, size_t rn) {
-    const int steps = 12;
+    const int steps = 13;
     char dir[300], plat[64], st[32], name[160];
     sub_path(dir, sizeof dir, "bench", NULL);
     if (mkdir_p(dir) != 0) { snprintf(result, rn, "Cannot make the bench folder"); return -1; }
@@ -384,6 +392,7 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
             if (ok && !halted) bench_line(&b, key, xs, "x-real-time", 1);
             else bench_note(&b, ok ? "SKIP fw: the firmware halted before the run ended%s\n" : "SKIP fw: it did not boot (see the app's log)%s\n", "");
         }
+        if (fm1ntt_jit_available()) { report_progress("the firmware, where the JIT's time goes", 12, steps, b.path); fw_jit_diag(&b, fw, fw_raw, 3, seconds); }
     } else bench_note(&b, "SKIP fw: no firmware given (--fw FILE): only the synthetic workloads were run%s\n", "");
     report_progress("done", steps, steps, b.path);
     fputs("end\n", b.f);
@@ -500,7 +509,10 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
                 snprintf(what, sizeof what, !jit ? "firmware, interpreter" : pace ? "firmware, native jit, pace %d" : "firmware, native jit", pace);
                 if (jit && !fm1ntt_jit_available()) { r3_report_line(&r, R3_SKIP, what, "this CPU is not one the native JIT supports"); break; }
                 if (jit && !pace) { r3_report_line(&r, R3_INFO, "native jit", "trying it on %s: if the report ends here, the process crashed in the compiler", fb ? fb + 1 : fw); fflush(r.f); }
-                int got = speed_firmware(fw, fw_raw, jit, pace, secs, &xrt, &emu, &halted);
+                /* after the same warm-up as the benchmark (a cold start timed only the firmware's cheap first seconds: 0.64x said the report, 0.24x was true) */
+                double xs[BENCH_RUNS], wm = 0, ws = 0;
+                int got = speed_firmware_windows(fw, fw_raw, jit, pace, secs / BENCH_RUNS, xs, &emu, &halted, &wm, &ws);
+                if (got && !halted) xrt = median3(xs);
                 if (jit) { cpufreq_text(cf, sizeof cf); if (cf[0]) r3_report_line(&r, R3_INFO, "cpu0 clock", "just after %s: %s", what, cf); }
                 if (!got) { r3_report_line(&r, R3_FAIL, what, "%s did not boot", fb ? fb + 1 : fw); continue; }
                 if (!halted && xrt > best) { best = xrt; best_pace = pace; best_jit = jit; }
@@ -598,10 +610,10 @@ static void job_start(App *a, int kind) {
     a->job_result[0] = 0;
     SDL_AtomicSet(&a->job_done, 0);
     prog_reset();
-    report_progress("starting", 0, kind == JOB_REPORT ? 10 : 12, NULL);
+    report_progress("starting", 0, kind == JOB_REPORT ? 10 : 13, NULL);
     a->job = SDL_CreateThread(job_thread, "fm1ntt-job", a);
     if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); a->job_kind = JOB_NONE; say(a, a->job_style, "%s", a->job_result); return; }
-    say(a, 0, kind == JOB_REPORT ? "Device report running (about a minute): the emulation is paused while it measures" : "Benchmark running (about a minute and a half)", NULL);
+    say(a, 0, kind == JOB_REPORT ? "Device report running (about two minutes): the emulation is paused while it measures" : "Benchmark running (about two minutes)", NULL);
 }
 /* Called by the main loop each pass: reaps a finished job and says how it went. */
 static int job_poll(App *a) {                  /* 1 when a job just finished: the caller must redraw (the box goes away) */

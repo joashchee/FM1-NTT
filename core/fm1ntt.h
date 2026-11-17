@@ -52,6 +52,8 @@ size_t fm1ntt_flash_size(void);                                                 
 size_t fm1ntt_flash_save(fm1ntt_machine *m, uint8_t *out, size_t cap);                      /* bytes copied, 0 if cap is too small */
 int fm1ntt_flash_restore(fm1ntt_machine *m, const uint8_t *bytes, size_t len);              /* resets, then restores; 0 ok, -1 */
 int fm1ntt_jit_on(fm1ntt_machine *m);
+void fm1ntt_jit_profile(fm1ntt_machine *m, int on);                                        /* count JIT entries and compiled instructions (before the first run; slows it) */
+size_t fm1ntt_jit_report(fm1ntt_machine *m, char *out, size_t cap);                         /* one line of JSON about the JIT; its length, 0 if cap is too small */
 const char *fm1ntt_board(fm1ntt_machine *m);                                                /* "Fm1", "Smk37", "" for a raw image */
 size_t fm1ntt_bench_image(uint8_t *out, size_t cap);                                       /* the benchmark workload: load it with fm1ntt_load_raw at FM1_ENTRY_FELUCCA */
 uint32_t fm1ntt_bench_version(void);                                                        /* bump = reports are not comparable */

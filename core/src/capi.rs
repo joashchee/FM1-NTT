@@ -354,6 +354,34 @@ pub unsafe extern "C" fn fm1ntt_jit_on(h: *mut Handle) -> c_int {
     with(h, 0, |m| m.jit_on() as c_int)
 }
 
+/// Count the JIT's entries and the instructions run compiled (set before the first run; it slows the run, so never on for a timed one).
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_jit_profile(h: *mut Handle, on: c_int) {
+    with(h, (), |m| m.set_jit_profile(on != 0));
+}
+
+/// One line of JSON about the JIT (blocks cold / compiled / given up on, code cache bytes, entries, instructions run compiled and in all) into `out`
+/// as a NUL-terminated string; returns its length, 0 when `cap` is too small or the handle is null.
+///
+/// # Safety
+/// `h` is live or null; `out` has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_jit_report(h: *mut Handle, out: *mut u8, cap: usize) -> usize {
+    if out.is_null() {
+        return 0;
+    }
+    let text = with(h, String::new(), |m| m.jit_report());
+    if text.is_empty() || text.len() + 1 > cap {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(text.as_ptr(), out, text.len());
+    *out.add(text.len()) = 0;
+    text.len()
+}
+
 /// The benchmark workload (a loop of nops and a goto: `bench.rs`) into `out`; returns its size, 0 if `cap` is too small.
 ///
 /// # Safety
