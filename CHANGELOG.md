@@ -4,6 +4,8 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-18 (sampler, first measurement): **`core/examples/sampprobe.rs`** plays notes on a MIDI channel of any firmware and prints peak, level, duration and a pitch hint; it found that **X0X 1.2.2 plays sampled drums on channel 10** (notes 36, 37, 38, 39, 41, 42, 45, 46, 49, 50, 51) with no loader, and that **its velocity law is not linear** (velocity 64 is -4.7 dB, not -6; 16 is -15.6, not -18; flat from about 124; integer steps of 1/114 on the hat, 1/160 on the crash). New: `sampler::X0X_VELOCITY` (11 knots, within 0.7 dB for 4-127), `velocity_from_knots`, `Sampler::set_velocity`, a test. Nothing ran on a real FM-1.
+
 - 2026-11-18 (maintainer: "start on the sampler, relicense whatever you need as MIT"): **`core/src/sampler.rs`**, a sampler engine written fresh (MIT; none of Neumetik's code was needed): IMA ADPCM codec, a bounded WAV reader (PCM 8/16, mono IMA ADPCM, `smpl` loop), and `Sampler` (equal-temperament pitch with rate correction, nearest/linear/cubic, a forward loop, up to 32 voices with the oldest stolen, one-shot or looped, a power-constant mixer beyond a voice limit). 9 tests. **Nothing is measured against a firmware yet**; the plan and what blocks it (getting a sample into PIGEON) are in `docs/SAMPLER.md`.
 
 - 2026-11-18 (maintainer: "model AMS from the DX747 measurements"): **amplitude modulation, for `Tuning::Stock`.** DX747's attenuation is a table of `depth * sensitivity` (AMS 0-3 = 0, 0.2588, 0.4275, 1), 0.6 dB at 10 to 38 dB at 80, on the inverted LFO scaled by the delay ramp. fm6's swing is within 0.1 dB of the emulator on four waves, depths 20-80, AMS 1-3, and with a delay; msfa's tuning is unchanged (a test). `fm6cmp --make am:DEPTH:AMS:WAVE`, `amd`.

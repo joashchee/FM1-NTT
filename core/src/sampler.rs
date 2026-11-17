@@ -212,9 +212,37 @@ pub enum Interp {
     Cubic,
 }
 
-/// Velocity 1 to 127 to a gain: linear, `v / 127` (the plain default; a firmware's curve is to be measured).
+/// Velocity 1 to 127 to a gain: linear, `v / 127` (the plain default).
 pub fn velocity_gain(velocity: u8) -> f64 {
     velocity.min(127) as f64 / 127.0
+}
+
+/// X0X 1.2.2's velocity law on its sampled hats and crash (measured in the emulator, `docs/SAMPLER.md`): the level of a hit against its velocity, relative to
+/// velocity 127, as knots `(velocity, gain)` joined by straight lines. Not linear: velocity 64 gives 0.58 (-4.7 dB) where `v / 127` gives 0.50, 16 gives 0.17 (-15.6 dB)
+/// where linear gives 0.13, and the top is flat from about 124. Within 0.7 dB of the measured level for 4 to 127 on the closed hat and the crash.
+pub const X0X_VELOCITY: [(u8, f32); 11] =
+    [(0, 0.0), (1, 0.0088), (8, 0.0877), (16, 0.1667), (32, 0.307), (48, 0.4474), (64, 0.5789), (80, 0.7105), (96, 0.8333), (112, 0.9561), (127, 1.0)];
+
+/// A gain for each velocity 0 to 127 from knots `(velocity, gain)` joined by straight lines; the knots are sorted, and velocities outside them take the nearest.
+pub fn velocity_from_knots(knots: &[(u8, f32)]) -> [f64; 128] {
+    let mut k: Vec<(u8, f32)> = knots.iter().map(|&(v, g)| (v.min(127), g)).collect();
+    k.sort_by_key(|p| p.0);
+    let mut out = [0.0; 128];
+    for (v, o) in out.iter_mut().enumerate() {
+        *o = match k.as_slice() {
+            [] => velocity_gain(v as u8),
+            [only] => only.1 as f64,
+            _ => {
+                let (a, b) = match k.windows(2).find(|w| v as u8 >= w[0].0 && v as u8 <= w[1].0) {
+                    Some(w) => (w[0], w[1]),
+                    None if (v as u8) < k[0].0 => (k[0], k[0]),
+                    None => (k[k.len() - 1], k[k.len() - 1]),
+                };
+                if b.0 == a.0 { a.1 as f64 } else { a.1 as f64 + (b.1 - a.1) as f64 * (v as f64 - a.0 as f64) / (b.0 - a.0) as f64 }
+            }
+        };
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -244,6 +272,7 @@ pub struct Sampler {
     poly_limit: usize,
     release_frames: f64,
     master: f64,
+    velocity: [f64; 128],
     clock: u64,
     /// notes held as a one-shot play to the end; a looped sample plays until released
     one_shot_ignores_release: bool,
@@ -265,6 +294,7 @@ impl Sampler {
             poly_limit: 4,
             release_frames: out_rate * 0.005,
             master: 1.0,
+            velocity: std::array::from_fn(|v| velocity_gain(v as u8)),
             clock: 0,
             one_shot_ignores_release: true,
         })
@@ -280,6 +310,10 @@ impl Sampler {
     /// Beyond this many sounding voices the mixer holds the total power constant (amplitude sqrt(limit / n)); `usize::MAX` for no rule.
     pub fn set_poly_limit(&mut self, n: usize) {
         self.poly_limit = n.max(1);
+    }
+    /// The velocity law: a gain for each velocity (see `velocity_from_knots`); the default is linear.
+    pub fn set_velocity(&mut self, law: [f64; 128]) {
+        self.velocity = law;
     }
     pub fn set_master(&mut self, gain: f64) {
         self.master = gain.clamp(0.0, 16.0);
@@ -309,7 +343,7 @@ impl Sampler {
         }
         if let Some(i) = slot {
             self.clock += 1;
-            self.voices[i] = Voice { live: !self.sample.data.is_empty(), releasing: false, note, gain: velocity_gain(velocity), pos: 0.0, step: ratio, age: self.clock, fade: 1.0 };
+            self.voices[i] = Voice { live: !self.sample.data.is_empty(), releasing: false, note, gain: self.velocity[velocity.min(127) as usize], pos: 0.0, step: ratio, age: self.clock, fade: 1.0 };
         }
     }
 
@@ -558,6 +592,31 @@ mod tests {
         s.note_on(67, 100);
         assert_eq!(s.sounding(), 2);
         assert!(s.voices.iter().any(|v| v.live && v.note == 67) && !s.voices.iter().any(|v| v.live && v.note == 60));
+    }
+
+    #[test]
+    fn a_velocity_law_from_knots() {
+        let law = velocity_from_knots(&X0X_VELOCITY);
+        assert_eq!(law[0], 0.0);
+        assert!((law[127] - 1.0).abs() < 1e-9 && (law[64] - 0.5789).abs() < 1e-4);
+        assert!((law[40] - (0.307 + 0.1404 / 2.0)).abs() < 1e-3, "{}", law[40]);
+        assert!(law.windows(2).all(|w| w[1] >= w[0]), "rising");
+        assert_eq!(velocity_from_knots(&[])[100], velocity_gain(100));
+        assert_eq!(velocity_from_knots(&[(50, 0.5)])[3], 0.5);
+        // unsorted and out of range knots do no harm
+        let odd = velocity_from_knots(&[(200, 1.0), (10, 0.1), (60, 0.6)]);
+        assert!((odd[35] - 0.35).abs() < 1e-5 && (odd[127] - 1.0).abs() < 1e-5 && (odd[0] - 0.1).abs() < 1e-6);
+        let mut s = Sampler::new(Sample::new(44100, sine(44100, 441.0, 44100, 8000.0)).with_loop(0, 44100), 44100.0, 60).unwrap();
+        s.set_velocity(law);
+        let rms_at = |s: &mut Sampler, v: u8| {
+            s.all_off();
+            s.note_on(60, v);
+            let mut out = vec![0i16; 4410];
+            s.render(&mut out);
+            rms(&out)
+        };
+        let r = rms_at(&mut s, 64) / rms_at(&mut s, 127);
+        assert!((r - 0.5789).abs() < 0.005, "{r}");
     }
 
     #[test]
