@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-18 (sampler): X0X's drums measured further (`sampprobe --wav`): only the 11 mapped notes sound, each its own un-pitched recording (the toms are not one sample at three speeds); note-off is ignored; one voice per drum; bandwidth to 23 kHz, so the source rate and interpolation are not readable from the output. `docs/SAMPLER.md`.
 - 2026-11-18 (sampler): **X0X's drums sit under a peak limiter at 0.400 of full scale** (-8 dBFS; one sample at the peak, not a flat top). What looked like a mixer rule or choke between all pairs of drums (1 to 7 dB under the sum of powers) is that limiter: at velocity 10 independent drums mix to within 0.14 dB of the power sum. `Sampler::set_ceiling` (default off) and a test. **PIGEON's bank upload was not captured**: its loader is GPL source run by a Python script, which this session's permission check refused to run, and its framing is not documented (`docs/SAMPLER.md`).
 
 - 2026-11-18 (sampler): X0X's drums **choke** (a closed hat leaves digital silence where an open hat would still sound) and **restart on retrigger** (a crash struck three times is never louder than one). `sampprobe --then NOTE@SECONDS`; `Sampler::set_retrigger_restarts` (default off) and a test.

@@ -42,8 +42,11 @@ one sample (13142 of 32768 at velocity 127, 13108 at 60) rather than a flat top,
 mix of 2, 3 and 4 different drums is 0.14 dB under the square root of the sum of their powers, and at velocity 30 (peak 0.31) 0.7 dB; where the peak reaches 0.4 the mix falls
 5.6 dB (two drums), 7.9 (three) and 8.5 (four) under that sum at velocity 127, and every one of the 45 pairs of the ten drums is 1 to 7 dB under it, so what looked like a mixer rule or a choke group
 is the limiter (Felucca's FM6 output has one near 0.3: `docs/FM6.md`). `Sampler::set_ceiling(Some(0.4), release)` is the plainest limiter that holds that peak; its attack, release and knee
-are not measured. Not yet measured on X0X: a choke group in the `Sampler` (one sample per instance has no other note to cut), the voice count and mixer rule, whether notes pitch (a drum map suggests not), the
-sample rate and interpolation (a recorded hit's spectrum), and the sample data itself (recorded as untested here; it is third-party data and is not kept).
+are not measured. **Notes, voices, note-off, bandwidth** (`sampprobe` on channel 10, each drum dumped with `--wav` and its spectrum taken): **the drums do not pitch.** Only the 11 mapped notes sound (35, 40, 43, 44, 47, 48, 52, 53, 55 to 57, 60 and 72 are silent), each a separate recording: the three toms
+(41, 45, 50) peak at 76, 117 and 152 Hz, ratios that are not the semitone steps between their keys (7.5 and 4.5 semitones for 4 and 5), and their lengths (0.62, 0.47, 0.45 s) do not scale with pitch, so they are not one sample
+played at three speeds. **Note-off is ignored**: a kick and a crash held 0.01, 0.3 and 1.5 s sound for the same 0.64 and 0.77 s. With one voice per drum (a retrigger restarts it, above) the polyphony is the drum count, not a pool.
+**Bandwidth:** the hats and crash carry energy to 23 kHz and the snare falls smoothly (-44 dB at 22 to 24 kHz, no cliff), so the sources are not 32 kHz or lower; their rate, and whether the firmware interpolates, cannot be read from the output alone
+without the source sample. Not measured on X0X: a choke group in the `Sampler` (one sample per instance has no other note to cut), the limiter's attack and release, and the sample data itself (third-party; recorded as untested here and not kept).
 
 ## What is not measured
 
