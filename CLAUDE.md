@@ -64,8 +64,9 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
     built on the maintainer's Mac, never on CI (the global rules). Never change a shipped bundle id.
 11. **The app never mentions its development docs** in anything a user sees (UI text, errors, empty states): say what is needed in the UI.
 12. **CI is Linux and GCC:** run changed C and scripts in Debian 12 under Docker (`r36s/build-deb.sh`) before saying done on the R36S side.
-    **CI's shellcheck is 0.9 (Ubuntu apt), the Mac's is 0.11 and misses SC2015** (`A && B || C`; 2026-11-18, `web/build.sh`): never write it, and
-    after any shell change lint in `python:3.11-bookworm` with `apt-get install shellcheck` before saying `check.sh` is clean (a local "shellcheck ok" is not CI's).
+    **CI's shellcheck is 0.9 (Ubuntu apt), the Mac's is 0.11 and misses SC2015** (`A && B || C`; 2026-11-18, `web/build.sh`): never write it.
+    `scripts/check.sh` lints with the pinned `koalaman/shellcheck:v0.9.0` image when Docker runs (CI's version) and says in its output which shellcheck ran; a line
+    saying it used the local one is not CI's result, so say so.
 
 ## Check before committing
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Everything that can be checked without an R36S or an FM-1: the core's tests, a build of the host and its headless
-# self-test, the web shell's PWA test and the wasm build's tests, and the scripts' syntax and shellcheck. Same as CI.
+# self-test, the web shell's PWA test and the wasm build's tests, and the scripts' syntax and shellcheck (CI's 0.9.0 in Docker when Docker runs). Same as CI.
 #   scripts/check.sh
 # The arm64 package is r36s/build-deb.sh (needs Docker).
 set -eu
@@ -34,9 +34,33 @@ echo "== bench-compare"
 if python3 "$REPO/scripts/test_bench_compare.py" >"$REPO/build/bench-compare.log" 2>&1; then tail -1 "$REPO/build/bench-compare.log"; else cat "$REPO/build/bench-compare.log"; echo "bench-compare tests FAILED"; exit 1; fi
 echo "== scripts"
 for f in "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/web/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh; do bash -n "$f"; done
-if command -v shellcheck >/dev/null; then
-    shellcheck "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/web/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh || { echo "shellcheck FAILED"; exit 1; }
-    echo "shellcheck ok"
+# CI's shellcheck is 0.9 (Ubuntu apt); the Mac's Homebrew 0.11 misses what it flags (SC2015, 2026-11-18). So where Docker runs, lint with the pinned
+# 0.9.0 image, the CI's version; else the local shellcheck, with a note that it may not be CI's. On CI (Linux) the local one already is.
+SH_FILES=(scripts/check.sh host/build.sh web/build.sh r36s/build-deb.sh r36s/package/*.sh)
+SH_TOOL=""
+if [ -z "${CI:-}" ] && command -v docker >/dev/null; then
+    # Docker Desktop's leftover config names a credential helper that is not installed without it: pulls then fail. Use an empty config.
+    if [ -z "${DOCKER_CONFIG:-}" ] && grep -q '"credsStore"[[:space:]]*:[[:space:]]*"desktop"' "$HOME/.docker/config.json" 2>/dev/null \
+        && ! command -v docker-credential-desktop >/dev/null; then
+        if [ -z "${DOCKER_HOST:-}" ]; then
+            DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+            [ -z "$DOCKER_HOST" ] || export DOCKER_HOST
+        fi
+        DOCKER_CONFIG="$(mktemp -d "${TMPDIR:-/tmp}/fm1ntt-docker.XXXXXX")"
+        echo '{}' > "$DOCKER_CONFIG/config.json"
+        export DOCKER_CONFIG
+        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+    fi
+    if docker info >/dev/null 2>&1; then SH_TOOL=docker; fi
+fi
+if [ "$SH_TOOL" = docker ]; then
+    # the repository is mounted read-only at /mnt (Colima shares /Users only)
+    if docker run --rm -v "$REPO":/mnt:ro -w /mnt koalaman/shellcheck:v0.9.0 "${SH_FILES[@]}"; then echo "shellcheck ok (0.9.0 in Docker, as CI)"
+    else echo "shellcheck FAILED (0.9.0 in Docker, as CI)"; exit 1; fi
+elif command -v shellcheck >/dev/null; then
+    cd "$REPO"
+    shellcheck "${SH_FILES[@]}" || { echo "shellcheck FAILED"; exit 1; }
+    echo "shellcheck ok ($(shellcheck --version | sed -n 's/^version: //p'); CI runs 0.9: Docker was not used, so SC2015 and the like may be missed)"
 else echo "shellcheck NOT INSTALLED: not run"; fi
 echo "== bundled firmware"
 python3 "$REPO/scripts/check-bundled.py" "$REPO" || { echo "bundled firmware check FAILED"; exit 1; }
