@@ -4,6 +4,8 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-18 (sampler): **X0X's drums sit under a peak limiter at 0.400 of full scale** (-8 dBFS; one sample at the peak, not a flat top). What looked like a mixer rule or choke between all pairs of drums (1 to 7 dB under the sum of powers) is that limiter: at velocity 10 independent drums mix to within 0.14 dB of the power sum. `Sampler::set_ceiling` (default off) and a test. **PIGEON's bank upload was not captured**: its loader is GPL source run by a Python script, which this session's permission check refused to run, and its framing is not documented (`docs/SAMPLER.md`).
+
 - 2026-11-18 (sampler): X0X's drums **choke** (a closed hat leaves digital silence where an open hat would still sound) and **restart on retrigger** (a crash struck three times is never louder than one). `sampprobe --then NOTE@SECONDS`; `Sampler::set_retrigger_restarts` (default off) and a test.
 
 - 2026-11-18 (sampler, first measurement): **`core/examples/sampprobe.rs`** plays notes on a MIDI channel of any firmware and prints peak, level, duration and a pitch hint; it found that **X0X 1.2.2 plays sampled drums on channel 10** (notes 36, 37, 38, 39, 41, 42, 45, 46, 49, 50, 51) with no loader, and that **its velocity law is not linear** (velocity 64 is -4.7 dB, not -6; 16 is -15.6, not -18; flat from about 124; integer steps of 1/114 on the hat, 1/160 on the crash). New: `sampler::X0X_VELOCITY` (11 knots, within 0.7 dB for 4-127), `velocity_from_knots`, `Sampler::set_velocity`, a test. Nothing ran on a real FM-1.

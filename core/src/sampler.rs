@@ -277,6 +277,10 @@ pub struct Sampler {
     /// notes held as a one-shot play to the end; a looped sample plays until released
     one_shot_ignores_release: bool,
     retrigger_restarts: bool,
+    /// a peak limiter: the output's ceiling as a fraction of full scale, and the gain it holds now
+    ceiling: Option<f64>,
+    limit_gain: f64,
+    limit_release: f64,
 }
 
 impl Sampler {
@@ -299,6 +303,9 @@ impl Sampler {
             clock: 0,
             one_shot_ignores_release: true,
             retrigger_restarts: false,
+            ceiling: None,
+            limit_gain: 1.0,
+            limit_release: 1.0 - (-1.0 / (0.05 * out_rate)).exp(),
         })
     }
 
@@ -333,6 +340,16 @@ impl Sampler {
     /// louder than one; `docs/SAMPLER.md`); with false (the default) the two sound together.
     pub fn set_retrigger_restarts(&mut self, on: bool) {
         self.retrigger_restarts = on;
+    }
+
+    /// A peak limiter on the output: nothing leaves above `ceiling` (a fraction of full scale, 0.01 to 1), the gain dropping at once and returning over `release_seconds`.
+    /// `None` (the default) is no limiter. X0X's drums sit under one at **0.4** (-8 dBFS): a mix of loud hits keeps that peak while its level falls by 5 to 8 dB against the
+    /// sum of the hits' powers (`docs/SAMPLER.md`); Felucca's FM6 output had one near 0.3. The firmware's own shape (attack, release, knee) is not measured: this is
+    /// the plainest limiter that holds the peak, with a 50 ms release.
+    pub fn set_ceiling(&mut self, ceiling: Option<f64>, release_seconds: f64) {
+        self.ceiling = ceiling.map(|c| c.clamp(0.01, 1.0));
+        self.limit_release = 1.0 - (-1.0 / (release_seconds.clamp(0.001, 5.0) * self.out_rate)).exp();
+        self.limit_gain = 1.0;
     }
 
     pub fn sounding(&self) -> usize {
@@ -418,7 +435,14 @@ impl Sampler {
                     }
                 }
             }
-            *o = (acc * poly * self.master).round().clamp(-32768.0, 32767.0) as i16;
+            let mut y = acc * poly * self.master;
+            if let Some(c) = self.ceiling {
+                let c = c * 32768.0;
+                let need = if y.abs() > c { c / y.abs() } else { 1.0 };
+                self.limit_gain = if need < self.limit_gain { need } else { self.limit_gain + (1.0 - self.limit_gain) * self.limit_release };
+                y *= self.limit_gain;
+            }
+            *o = y.round().clamp(-32768.0, 32767.0) as i16;
         }
     }
 }
@@ -650,6 +674,33 @@ mod tests {
         let (n3, l3) = level(false);
         assert_eq!((n1, n3), (1, 3));
         assert!(l3 > l1 * 2.5, "three voices at once are louder: {l3} against {l1}");
+    }
+
+    #[test]
+    fn the_limiter_holds_the_peak_and_lets_quiet_things_alone() {
+        let smp = Sample::new(44100, sine(44100, 441.0, 44100, 20000.0)).with_loop(0, 44100);
+        let run = |ceiling: Option<f64>, notes: usize| {
+            let mut s = Sampler::new(smp.clone(), 44100.0, 60).unwrap();
+            s.set_voices(8);
+            s.set_poly_limit(usize::MAX);
+            s.set_ceiling(ceiling, 0.05);
+            for _ in 0..notes {
+                s.note_on(60, 127);
+            }
+            let mut out = vec![0i16; 8820];
+            s.render(&mut out);
+            out
+        };
+        let peak = |x: &[i16]| x.iter().map(|v| v.unsigned_abs() as f64).fold(0.0, f64::max) / 32768.0;
+        assert!((peak(&run(None, 1)) - 20000.0 / 32768.0).abs() < 0.01);
+        for n in 1..=4 {
+            assert!(peak(&run(Some(0.4), n)) <= 0.4 + 1e-3, "{n} notes: {}", peak(&run(Some(0.4), n)));
+        }
+        // a signal under the ceiling is untouched
+        assert_eq!(run(Some(0.9), 1), run(None, 1));
+        // the limited mix is quieter than the unlimited sum
+        let r = |x: &[i16]| rms(x);
+        assert!(r(&run(Some(0.4), 4)) < r(&run(None, 4)) * 0.6);
     }
 
     #[test]
