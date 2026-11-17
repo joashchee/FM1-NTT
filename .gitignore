@@ -30,5 +30,3 @@ CLAUDE.local.md
 /web/public/build-info.json
 /web/public/build-info.json.tmp
 
-# fm1tastik is its own repository (docs/FM1TASTIK.md); its folder is here, ignored, until it is moved out beside this one
-/fm1tastik/
