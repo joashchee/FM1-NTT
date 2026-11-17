@@ -191,6 +191,31 @@ pub fn app_image(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(fwsc::unpack(bytes).map_err(Error::BadImage)?.xip)
 }
 
+/// The most voices `voices` returns.
+pub const MAX_VOICES: usize = 256;
+
+/// Every packed voice in the banks of a package (the raw flash first, then the app area), in order, at most [`MAX_VOICES`]: what a preview plays. A run needs `min_run` voices
+/// in a row to count (a lone valid-looking 128 bytes is likely data); the voices are the bytes as found, 128 each.
+pub fn voices(bytes: &[u8], min_run: usize) -> Result<Vec<[u8; VOICE_LEN]>> {
+    check_size(bytes)?;
+    let u = fwsc::unpack(bytes).map_err(Error::BadImage)?;
+    let mut out = Vec::new();
+    for (image, label) in [(&u.raw, "flash"), (&u.xip, "app")] {
+        for b in find_banks(image, label, min_run) {
+            for i in 0..b.names.len() {
+                if out.len() >= MAX_VOICES {
+                    return Ok(out);
+                }
+                let at = b.offset + i * VOICE_LEN;
+                let mut v = [0u8; VOICE_LEN];
+                v.copy_from_slice(&image[at..at + VOICE_LEN]);
+                out.push(v);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

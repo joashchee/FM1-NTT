@@ -43,6 +43,10 @@ r36s/build-deb.sh             # build/pkg/FM1-NTT.deb for the R36S (Docker)
 **Fn** (Home / End on a keyboard) turns the panel carousel: MACHINE, FILES, CPU, MEMORY, CONSOLE, MIDI, SOUND, TOOLS. **L1 + R1** together open the menu
 (TOOLS) and close it again. **Tab / F1** toggles Standard and Zoomed (2x). **Start** (P) pauses on every panel but MACHINE.
 
+**The SOUND preview** (L2, or Page Up on a keyboard, on the SOUND panel): the DX7 voices found in the loaded firmware's banks (Felucca's eight, for one; DX747 keeps none in a form the extractor finds) played by the fm6
+engine, mixed into the output. Up / Down pick the voice, Left / Right the octave, the keyboard's note keys (Z S X D C...) or the pad's Y B A X (C, E, G, C) play it; the machine's own keys are not touched, and leaving the panel turns it off.
+It plays the stock engine's model of that voice (`docs/FM6.md`), not the firmware's own sound. `fm1ntt FIRMWARE --panel 6 --preview --screenshot FILE` shows it. Untested on a real R36S and by ear.
+
 **The pad on MACHINE** (the stick axes and the black-key order are untested on a unit):
 
 | | none held | **L1** held | **L2** held | **R2** held |

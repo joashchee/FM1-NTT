@@ -192,6 +192,8 @@ typedef struct {
     int level_l, level_r, peak_l, peak_r;
     int16_t scope[PX_SCOPE];
     int rec_on;
+    int pv_on, pv_n, pv_sel, pv_oct;   /* the preview: on, voices found, the chosen one, the octave */
+    char pv_name[PX_NAME];
     uint64_t rec_frames;
     char rec_file[PX_NAME];
     /* tools */
@@ -295,7 +297,7 @@ static const char *const PX_HINTS[PANEL_COUNT][9] = {
     {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
     {"SEND TO THE MIDI JACK", "A  NOTE ON, THEN OFF", "LEFT RIGHT  NOTE", "UP DOWN  OCTAVE", "X Y  VELOCITY", "L2 R2  CHANNEL", "B  ALL NOTES OFF", "", ""},
-    {"SCOPE AND RECORDER", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "", "", "", "", ""},
+    {"SCOPE, RECORDER, PREVIEW", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "L2  PREVIEW ON OR OFF", "UP DOWN  VOICE", "LEFT RIGHT  OCTAVE", "Y B A X  PLAY (PREVIEW)", ""},
     {"RESET, SLOTS, JIT, PANIC", "UP DOWN  PICK", "LEFT RIGHT  SLOT", "A  RUN", "B  NO TO A QUESTION", "", "", "", ""},
 };
 
@@ -544,6 +546,18 @@ static inline void px_panel_sound(uint32_t *c, PxRect r, const UiState *u, int n
     px_text(c, x, r.y + 216, u->rec_file[0] ? u->rec_file : "(NO FILE YET)", C_DIM, 1, w);
     px_box(c, (PxRect){r.x + 4, r.y + 250, r.w - 8, 56}, "LOG");
     px_wrap(c, x, r.y + 262, u->msg ? u->msg : "", px_style(u->msg_style), w, narrow ? 4 : 4);
+    /* the preview of the voices in the firmware's banks, played by the fm6 engine from the keys */
+    px_box(c, (PxRect){r.x + 4, r.y + 314, r.w - 8, 104}, "PREVIEW");
+    if (!u->pv_n) {
+        px_wrap(c, x, r.y + 326, "NO VOICES FOUND IN THIS FIRMWARE", C_DIM, w, 2);
+    } else {
+        px_text(c, x, r.y + 326, u->pv_on ? "ON" : "OFF  L2 TURNS IT ON", u->pv_on ? C_OK : C_DIM, 1, w);
+        snprintf(line, sizeof line, "%d/%d %s", u->pv_sel + 1, u->pv_n, u->pv_name);
+        px_text(c, x, r.y + 338, line, C_TEXT, 1, w);
+        snprintf(line, sizeof line, "OCTAVE %+d", u->pv_oct);
+        px_text(c, x, r.y + 350, line, C_TEXT, 1, w);
+        px_wrap(c, x, r.y + 364, narrow ? "UP DOWN VOICE  LEFT RIGHT OCTAVE  Y B A X PLAY" : "UP DOWN: VOICE   LEFT RIGHT: OCTAVE   Y B A X: C E G C (KEYBOARD ZSXDC...)", C_DIM, w, 3);
+    }
 }
 
 static inline void px_panel_tools(uint32_t *c, PxRect r, const UiState *u, int narrow) {

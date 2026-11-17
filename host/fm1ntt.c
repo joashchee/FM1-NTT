@@ -41,6 +41,7 @@
 #endif
 
 #define AUDIO_FRAMES 512
+#define PV_MAX 128                      /* voices the preview keeps */
 #define MAX_INSNS_PER_BUFFER 8000000u
 #define PAD_FN 16
 #define PAD_L1 4
@@ -120,6 +121,11 @@ typedef struct {
     double job_seconds;
     char job_result[200];
     int pin, pinned;                    /* --pin: the audio (emulating) thread on the last core, the main thread on the first; pinned: the audio thread has done it */
+    /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
+    fm1ntt_fm6 *pv;
+    uint8_t pv_voices[PV_MAX][128];
+    int pv_n, pv_sel, pv_on, pv_oct;    /* voices found, the chosen one, preview on, octave -2..2 */
+    int pv_key[27], pv_pad[4];          /* the MIDI note each held key or pad button started (+1; 0 none), so its release matches */
     uint32_t budget;                    /* instructions a buffer may spend (0: MAX_INSNS_PER_BUFFER); Rec demo's self-test lowers it */
 } App;
 
@@ -133,6 +139,59 @@ static void say(App *a, int style, const char *fmt, const char *arg) {
 }
 static void lock(App *a) { if (a->dev) SDL_LockAudioDevice(a->dev); }
 static void unlock(App *a) { if (a->dev) SDL_UnlockAudioDevice(a->dev); }
+
+/* ---- the SOUND preview ------------------------------------------------------------------------------------------------- */
+static void pv_notes_off(App *a) {
+    lock(a);
+    if (a->pv) fm1ntt_fm6_all_off(a->pv);
+    unlock(a);
+    memset(a->pv_key, 0, sizeof a->pv_key);
+    memset(a->pv_pad, 0, sizeof a->pv_pad);
+}
+static void pv_select(App *a, int sel) {
+    if (a->pv_n <= 0) return;
+    a->pv_sel = (sel % a->pv_n + a->pv_n) % a->pv_n;
+    lock(a);
+    if (a->pv) { fm1ntt_fm6_all_off(a->pv); fm1ntt_fm6_free(a->pv); a->pv = NULL; }
+    /* the stock engine as measured on DX747 (docs/FM6.md): its tuning and output stage at the emulator's default pot */
+    a->pv = fm1ntt_fm6_new(FM1_SAMPLE_RATE, a->pv_voices[a->pv_sel]);
+    if (a->pv) fm1ntt_fm6_set_model(a->pv, 2, 900, 2, 0);
+    unlock(a);
+}
+/* Takes the voices (n of 128 bytes) as the preview's, replacing the last firmware's. */
+static void pv_set(App *a, const uint8_t *voices, int n) {
+    pv_notes_off(a);
+    a->pv_n = n < 0 ? 0 : n > PV_MAX ? PV_MAX : n;
+    if (a->pv_n) memcpy(a->pv_voices, voices, (size_t)a->pv_n * 128);
+    a->pv_sel = 0;
+    if (a->pv_n) pv_select(a, 0);
+    else { lock(a); if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } unlock(a); a->pv_on = 0; }
+}
+static void pv_name(const App *a, char *out, size_t cap) {
+    out[0] = 0;
+    if (a->pv_sel < 0 || a->pv_sel >= a->pv_n) return;
+    size_t k = 0;
+    for (int i = 118; i < 128 && k + 1 < cap; i++) { int ch = a->pv_voices[a->pv_sel][i]; out[k++] = ch >= 32 && ch < 127 ? (char)ch : ' '; }
+    while (k && out[k - 1] == ' ') k--;
+    out[k] = 0;
+}
+static void pv_note(App *a, int *slot, int note, int down) {
+    if (!a->pv) return;
+    lock(a);
+    if (down) { if (*slot) fm1ntt_fm6_note_off(a->pv, *slot - 1); *slot = note + 1; fm1ntt_fm6_note_on(a->pv, note, 100); }
+    else if (*slot) { fm1ntt_fm6_note_off(a->pv, *slot - 1); *slot = 0; }
+    unlock(a);
+}
+static int pv_midi(const App *a, int key) { int n = 53 + key + 12 * a->pv_oct; return n < 0 ? 0 : n > 127 ? 127 : n; }
+static void pv_toggle(App *a) {
+    if (!a->pv_n) { say(a, 2, "No voices found in this firmware", NULL); return; }
+    a->pv_on = !a->pv_on;
+    pv_notes_off(a);
+    say(a, 0, a->pv_on ? "Preview on: the keys play the voice" : "Preview off", NULL);
+}
+/* Leaving SOUND turns the preview off and lets its notes go. */
+static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv)) { a->pv_on = 0; pv_notes_off(a); } }
+static void pv_free(App *a) { if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } }
 
 static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
 static int is_file(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISREG(st.st_mode); }
@@ -209,8 +268,12 @@ static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
     lock(a);
     int rc = raw ? fm1ntt_load_raw(a->m, buf, n, entry) : fm1ntt_load_package(a->m, buf, n);
     unlock(a);
+    if (rc != 0) { free(buf); say(a, 3, "%s", fm1ntt_error()); return -1; }
+    {   /* the voices in its banks, for the SOUND preview (a raw image has no package to look in) */
+        static uint8_t found[PV_MAX * 128];
+        pv_set(a, found, raw ? 0 : (int)fm1ntt_package_voices(buf, n, found, PV_MAX));
+    }
     free(buf);
-    if (rc != 0) { say(a, 3, "%s", fm1ntt_error()); return -1; }
     apply_prefs(a);
     a->fb_ok = 0;
     const char *base = strrchr(path, '/');
@@ -417,6 +480,18 @@ static void rec_stop(App *a) {
 static void audio_step(App *a, int16_t *out, size_t frames) {
     if (a->paused || !fm1ntt_loaded(a->m)) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
     fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
+    if (a->pv_on && a->pv) {   /* the preview's voice on both channels (the caller holds the audio lock, as the machine's keys do) */
+        int16_t mono[4096];
+        for (size_t at = 0; at < frames; ) {
+            size_t n = frames - at < 4096 ? frames - at : 4096;
+            fm1ntt_fm6_render(a->pv, mono, n);
+            for (size_t i = 0; i < n; i++) for (int ch = 0; ch < 2; ch++) {
+                int v = out[2 * (at + i) + ch] + mono[i];
+                out[2 * (at + i) + ch] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+            }
+            at += n;
+        }
+    }
     if (a->master_att > 0) { int g = 100 - a->master_att; for (size_t i = 0; i < frames * 2; i++) out[i] = (int16_t)(out[i] * g / 100); }
     int pl = 0, pr = 0;
     for (size_t i = 0; i < frames; i++) {
@@ -628,7 +703,12 @@ static void act(App *a, int act) {
         else if (act == A_BACK) panic_all(a);
         break;
     case PANEL_SOUND:
-        if (act == A_OK) { if (a->rec) rec_stop(a); else rec_start(a); }
+        if (act == A_L2) pv_toggle(a);
+        else if (a->pv_on && act == A_UP) pv_select(a, a->pv_sel - 1);
+        else if (a->pv_on && act == A_DOWN) pv_select(a, a->pv_sel + 1);
+        else if (a->pv_on && act == A_LEFT) { if (a->pv_oct > -2) a->pv_oct--; }
+        else if (a->pv_on && act == A_RIGHT) { if (a->pv_oct < 2) a->pv_oct++; }
+        else if (act == A_OK) { if (a->rec) rec_stop(a); else rec_start(a); }
         else if (act == A_X) screenshot(a);
         else if (act == A_Y) { a->peak_l = a->peak_r = 0; say(a, 0, "Peaks cleared", NULL); }
         break;
@@ -689,6 +769,8 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     memcpy(u->enc_turns, a->enc_turns, sizeof u->enc_turns);
     u->pot = a->pot;
     u->level_l = a->level_l; u->level_r = a->level_r; u->peak_l = a->peak_l; u->peak_r = a->peak_r;
+    u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
+    pv_name(a, u->pv_name, sizeof u->pv_name);
     u->msg = a->msg;
     u->msg_style = a->msg_style;
     /* files */
@@ -919,6 +1001,7 @@ static void handle(App *a, const SDL_Event *e) {
         if (down && (k == SDLK_p || k == SDLK_PAUSE)) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (P or Start resumes)" : "Running", NULL); return; }
         if (a->confirm) { if (down) act(a, act_of_key(k)); return; }
         int n = note_of_key(k), b = button_of_key(k);
+        if (n >= 0 && a->panel == PANEL_SOUND && a->pv_on) { pv_note(a, &a->pv_key[n], pv_midi(a, n), down); return; }   /* the preview's keys, not the machine's */
         if (n >= 0) { key_id(a, FM1_KEY_BASE + n, down); return; }
         if (b >= 0) { key_id(a, b, down); return; }
         if (!down) return;
@@ -940,6 +1023,11 @@ static void handle(App *a, const SDL_Event *e) {
         if (b < 32 && !down && a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; return; }   /* the release matches the press */
         if (b == PAD_START && !machine_panel) { if (down) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); } return; }
         if (a->panel == PANEL_MIDI && !a->confirm && b == 1) { midi_ok(a, down); return; }
+        if (a->panel == PANEL_SOUND && a->pv_on && !a->confirm && (b == 0 || b == 1 || b == 2 || b == 3)) {   /* the pad plays a chord's notes: Y the root, B the third, A the fifth, X the octave */
+            static const int semi[4] = {4, 7, 12, 0};   /* by raw button 0 B, 1 A, 2 X, 3 Y: semitones above the root */
+            pv_note(a, &a->pv_pad[b], 60 + 12 * a->pv_oct + semi[b], down);
+            return;
+        }
         if (machine_panel) { if (down) pad_machine_press(a, b); }
         else if (down) act(a, act_of_pad(b));
     }
@@ -955,6 +1043,7 @@ static void menu_toggle(App *a) {
     release_pad(a);
     if (a->panel != PANEL_TOOLS) { a->menu_back = a->panel; a->panel = PANEL_TOOLS; }
     else a->panel = a->menu_back;
+    pv_leave(a);
     if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
 }
 static void dispatch(App *a, const SDL_Event *e) {
@@ -969,7 +1058,7 @@ static void dispatch(App *a, const SDL_Event *e) {
     else if (is_toggle(e)) a->mode ^= 1;
     else if (chord) { if (!a->confirm) menu_toggle(a); }
     else if (fn_scale) { a->scale = (a->scale + 1) % NSCALES; say(a, 0, "Scale %s", SCALES[a->scale].name); }
-    else if (turn && !a->confirm) { release_pad(a); a->panel = panel_step(a->panel, turn); if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0); }
+    else if (turn && !a->confirm) { release_pad(a); a->panel = panel_step(a->panel, turn); pv_leave(a); if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0); }
     else if (turn) { /* a question is open: A or B first */ }
     else handle(a, e);
 }
@@ -1321,6 +1410,43 @@ static int selftest(void) {
     a.speed = 5.0; pace_auto(&a); pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 0 && fm1ntt_pace_level(a.m) == 0);   /* plenty to spare: back to exact */
     act(&a, A_OK); CHECK(a.pace_mode == 0 && fm1ntt_pace_level(a.m) == 0);
     a.speed = 0;
+    /* the SOUND preview: voices in, a toggle, notes from the keys and the pad reach the mix and not the machine, and leaving the panel lets them go */
+    {
+        static uint8_t two[2 * 128];
+        for (int v = 0; v < 2; v++) {
+            uint8_t *p = two + v * 128;
+            for (int op = 0; op < 6; op++) { uint8_t *o = p + op * 17; o[0] = o[1] = o[2] = o[3] = 99; o[4] = o[5] = o[6] = 99; o[14] = 99; o[15] = (uint8_t)(1 << 1); o[16] = 7; }
+            p[102] = p[103] = p[104] = p[105] = 99; p[106] = p[107] = p[108] = p[109] = 50; p[110] = 31;
+            memcpy(p + 118, v ? "SECOND    " : "FIRST     ", 10);
+        }
+        a.panel = PANEL_SOUND;
+        act(&a, A_L2); CHECK(!a.pv_on && a.msg_style == 2);                   /* no voices yet: it says so and stays off */
+        pv_set(&a, two, 2);
+        CHECK(a.pv_n == 2 && a.pv_sel == 0 && a.pv != NULL);
+        char nm[16]; pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "FIRST"));
+        int16_t quiet[2 * 2048], loud[2 * 2048];
+        audio_step(&a, quiet, 2048);
+        act(&a, A_L2); CHECK(a.pv_on == 1);
+        act(&a, A_DOWN); CHECK(a.pv_sel == 1); pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "SECOND"));
+        act(&a, A_DOWN); CHECK(a.pv_sel == 0);
+        act(&a, A_RIGHT); act(&a, A_RIGHT); act(&a, A_RIGHT); CHECK(a.pv_oct == 2);
+        act(&a, A_LEFT); act(&a, A_LEFT); act(&a, A_LEFT); act(&a, A_LEFT); act(&a, A_LEFT); CHECK(a.pv_oct == -2);
+        act(&a, A_RIGHT); act(&a, A_RIGHT); CHECK(a.pv_oct == 0);
+        SDL_Event ev; memset(&ev, 0, sizeof ev);
+        ev.type = SDL_KEYDOWN; ev.key.keysym.sym = 'q';                          /* key 12: F4 + 12 = MIDI 65 */
+        handle(&a, &ev);
+        CHECK(a.pv_key[12] == 65 + 1 && fm1ntt_keys_down(a.m) == 0);          /* the preview heard it, the machine did not */
+        audio_step(&a, loud, 2048);
+        long e0 = 0, e1 = 0;
+        for (int i = 0; i < 2 * 2048; i++) { e0 += abs(quiet[i]); e1 += abs(loud[i]); }
+        CHECK(e1 > e0 + 2048 * 20);                                              /* it sounds */
+        ev.type = SDL_KEYUP; handle(&a, &ev); CHECK(a.pv_key[12] == 0);
+        memset(&ev, 0, sizeof ev); ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = 3; handle(&a, &ev);   /* the pad's Y: the root */
+        CHECK(a.pv_pad[3] == 60 + 1);
+        a.panel = PANEL_MIDI; pv_leave(&a);                                      /* leaving SOUND: off, every note released */
+        CHECK(!a.pv_on && a.pv_pad[3] == 0);
+        pv_set(&a, two, 0); CHECK(a.pv_n == 0 && a.pv == NULL && !a.pv_on);
+    }
     /* the recorder: the ring to a real WAV, header sizes right, renamed from .part, a quit while recording asks first */
     a.panel = PANEL_SOUND;
     a.rec_ring = malloc((size_t)REC_RING_FRAMES * 2 * sizeof(int16_t));
@@ -1692,7 +1818,7 @@ static int wait_event(SDL_Event *e, int ms) {
 
 int main(int argc, char **argv) {
     const char *path = NULL, *shot = NULL, *fwopt = NULL, *features = NULL;
-    int raw = 0, zoomed = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, pace_opt = PACE_AUTO;
+    int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, pace_opt = PACE_AUTO;
     double seconds = 1.0;
     uint32_t entry = FM1_ENTRY_FELUCCA;
     for (int i = 1; i < argc; i++) {
@@ -1702,6 +1828,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!strcmp(argv[i], "--panel") && i + 1 < argc) panel = atoi(argv[++i]) % PANEL_COUNT;
         else if (!strcmp(argv[i], "--zoomed")) zoomed = 1;
+        else if (!strcmp(argv[i], "--preview")) preview_opt = 1;   /* the SOUND preview on from the start (a screenshot shows it playing) */
         else if (!strcmp(argv[i], "--report")) do_report = 1;
         else if (!strcmp(argv[i], "--bench")) do_bench = 1;
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) { seconds = atof(argv[++i]); if (seconds < 0.05) seconds = 0.05; if (seconds > 60) seconds = 60; }
@@ -1775,6 +1902,7 @@ int main(int argc, char **argv) {
             int16_t pcm[2048];
             for (int i = 0; i < 60; i++) fm1ntt_render(a.m, pcm, 1024, MAX_INSNS_PER_BUFFER);
         }
+        if (preview_opt && a.pv_n) a.pv_on = 1;
         fill_ui(&a, &u, 0);
         px_draw(canvas, a.mode, &u);
         SDL_Surface *s = SDL_CreateRGBSurfaceFrom(canvas, PX_W, PX_H, 32, PX_W * 4, 0xFF0000, 0xFF00, 0xFF, 0xFF000000);
@@ -1882,6 +2010,7 @@ int main(int argc, char **argv) {
     if (a.job) SDL_WaitThread(a.job, NULL);
     if (a.dev) SDL_CloseAudioDevice(a.dev);
     free(a.rec_ring);
+    pv_free(&a);
     fm1ntt_free(a.m);
     SDL_DestroyTexture(tex);
     SDL_Quit();

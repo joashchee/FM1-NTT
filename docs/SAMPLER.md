@@ -53,7 +53,7 @@ without the source sample. Not measured on X0X: a choke group in the `Sampler` (
 `sampler::Kit` is a drum map: each key its own un-pitched sample with one voice (a strike again restarts it, key-up does nothing), keys that **choke** others (`add(note, sample, &[chokes])`: the 5 ms release
 fade, X0X's closed hat cuts its open hat and not the other way round), the velocity law for every drum, and one peak limiter over the mix (`set_ceiling(Some(0.4), 0.05)`). A test covers silence on an unmapped key, the
 retrigger, key-up, the choke and its direction, and the limiter. `fm1ntt.h` has it with the single-sample `Sampler` and `fm6` (`fm1ntt_kit_*`, `fm1ntt_sampler_*`, `fm1ntt_fm6_*`: mono 16-bit renders, bounded, null-safe, with their tests);
-the host's SOUND panel does not use them yet.
+the host's SOUND panel uses `fm6` only (the preview, `README.md`); the sampler and kit are not on it yet.
 
 ## What is not measured
 
@@ -77,6 +77,6 @@ To go on: the maintainer runs the loader (or the browser loader) against a real 
    editor protocol); (c) the firmware's own sample slot on the screen path (USB sampling, ENV in PIGEON's guide: "record audio from USB").
 2. **Measure**: play a known sample, then fit pitch per key, velocity law, loop and release, interpolation (the sidebands of a high note show it), the
    voice count and the mixer rule, as for fm6 (`--gain`, the level difference to 0.001 dB).
-3. (Wire it: the C API is done, 2026-11-18; the SOUND-panel preview is not.) **A bank reader** for a firmware's pool (the extractor finds DX7 voice runs; the sample pools need the same: ADPCM blocks, an index, loop points).
+3. (Wire it: the C API is done, 2026-11-18; the SOUND-panel preview is done for fm6, not for samples.) **A bank reader** for a firmware's pool (the extractor finds DX7 voice runs; the sample pools need the same: ADPCM blocks, an index, loop points).
 4. **MP3** (PIGEON's songs): a decoder is new work (Neumetik has none either).
 5. **Wire it**: a C API and a SOUND-panel preview, with `fm6`.

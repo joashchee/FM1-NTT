@@ -159,6 +159,32 @@ pub unsafe extern "C" fn fm1ntt_fm6_sounding(h: *const Fm6Handle) -> usize {
     h.as_ref().map_or(0, |h| h.0.live_voices())
 }
 
+/// The packed voices (128 bytes each) in the banks of the `.fwsc` package at `pkg`, written one after another into `out`, at most `max` of them; the count (0 when it is not a package
+/// or holds no bank of 8 voices in a row: `fm1ntt_error` says which).
+///
+/// # Safety
+/// `pkg` points at `len` readable bytes and `out` has room for `128 * max`.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_package_voices(pkg: *const u8, len: usize, out: *mut u8, max: usize) -> usize {
+    if pkg.is_null() || out.is_null() || max == 0 {
+        return 0;
+    }
+    match crate::extract::voices(std::slice::from_raw_parts(pkg, len), 8) {
+        Ok(v) => {
+            set_error(None);
+            let n = v.len().min(max);
+            for (i, voice) in v.iter().take(n).enumerate() {
+                std::ptr::copy_nonoverlapping(voice.as_ptr(), out.add(i * 128), 128);
+            }
+            n
+        }
+        Err(e) => {
+            set_error(Some(e.to_string()));
+            0
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The sampler: one sample on the keys
 
@@ -345,6 +371,16 @@ mod tests {
 
     fn rms(x: &[i16]) -> f64 {
         (x.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
+    }
+
+    #[test]
+    fn a_package_without_banks_gives_no_voices() {
+        unsafe {
+            let mut out = [0u8; 256];
+            assert_eq!(fm1ntt_package_voices(std::ptr::null(), 0, out.as_mut_ptr(), 2), 0);
+            assert_eq!(fm1ntt_package_voices([1u8, 2, 3].as_ptr(), 3, out.as_mut_ptr(), 2), 0);
+            assert_eq!(fm1ntt_package_voices([1u8, 2, 3].as_ptr(), 3, out.as_mut_ptr(), 0), 0);
+        }
     }
 
     #[test]
