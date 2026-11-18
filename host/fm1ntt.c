@@ -3065,11 +3065,11 @@ static int selftest(void) {
                     act(&a, A_UP); act(&a, A_UP); act(&a, A_UP); CHECK(a.ed_sel == 10 && a.ed_sel != 2);   /* up wraps through the top */
                     act(&a, A_R2); CHECK(a.ed_group == 1 && a.ed_sel == 0);
                     fill_ui(&a, ui, 0);
-                    CHECK(ui->ed_total == 10 && !strcmp(ui->ed_title, "ARPEGGIATOR") && ui->ed_row[3].min == 30 && ui->ed_row[3].max == 300);
+                    CHECK(ui->ed_total == 11 && !strcmp(ui->ed_title, "ARPEGGIATOR") && ui->ed_row[3].min == 30 && ui->ed_row[3].max == 300);
                     act(&a, A_RIGHT); CHECK(fm1ntt_inst_arp_get(a.inst, 0) == 1);               /* ARP ON */
                     act(&a, A_R2); CHECK(a.ed_group == 2);                                       /* the sequencer's settings, then the pattern's steps */
                     fill_ui(&a, ui, 0);
-                    CHECK(ui->ed_total == 10 && !strcmp(ui->ed_title, "SEQUENCER"));
+                    CHECK(ui->ed_total == 11 && !strcmp(ui->ed_title, "SEQUENCER"));
                     act(&a, A_R2); CHECK(a.ed_group == 3);
                     fill_ui(&a, ui, 0);
                     CHECK(ui->ed_total == 33 && ui->ed_pages == 2 && !strcmp(ui->ed_title, "PATTERN 1"));

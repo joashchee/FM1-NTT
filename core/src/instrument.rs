@@ -38,6 +38,10 @@ pub struct Instrument {
     clock: crate::evq::Clock,
     arp: Arp,
     seq: Seq,
+    /// frames rendered so far, the last clock tick's frame and the smoothed spacing of the ticks (MIDI clock sync for the arpeggiator and the sequencer)
+    frames_total: u64,
+    last_tick: Option<u64>,
+    tick_frames: f64,
     arp_events: Vec<(usize, Event)>,
     // MIDI parser state
     status: u8,
@@ -102,6 +106,9 @@ impl Instrument {
             clock: crate::evq::Clock::new(),
             arp: Arp::new(rate),
             seq: Seq::new(rate),
+            frames_total: 0,
+            last_tick: None,
+            tick_frames: rate * 60.0 / 120.0 / 24.0,
             arp_events: Vec::with_capacity(64),
             status: 0,
             data: [0; 2],
@@ -339,6 +346,7 @@ impl Instrument {
     /// One MIDI byte. Running status works, real-time bytes are ignored, a system-exclusive message is skipped to its end, the channel is ignored (omni).
     pub fn midi(&mut self, b: u8) {
         if b >= 0xF8 {
+            self.realtime(b);
             return;
         }
         if self.in_sysex {
@@ -395,6 +403,43 @@ impl Instrument {
         }
     }
 
+    /// MIDI real-time bytes, which can fall anywhere in a message without disturbing it: Clock (`F8`, 24 a quarter note) steps the arpeggiator and the sequencer that have
+    /// SYNC on; Start and Continue (`FA`, `FB`, alike on the FM-1) begin them from the top (and start a synced sequencer); Stop (`FC`) ends the sound and, for a synced sequencer,
+    /// the sequence. Everything else (active sensing, reset) is ignored. The tick's spacing, which sets the gate, is smoothed over the last ticks; a gap of half a second
+    /// (a clock that stopped) starts the estimate again.
+    fn realtime(&mut self, b: u8) {
+        match b {
+            0xF8 => {
+                if let Some(last) = self.last_tick {
+                    let gap = (self.frames_total - last) as f64;
+                    if gap > self.rate * 0.5 {
+                        self.tick_frames = self.rate * 60.0 / 120.0 / 24.0;
+                    } else if gap >= 8.0 {
+                        self.tick_frames = if self.tick_frames > 0.0 { self.tick_frames * 0.8 + gap * 0.2 } else { gap };
+                    }
+                }
+                self.last_tick = Some(self.frames_total);
+                self.arp.clock_tick(self.tick_frames);
+                self.seq.clock_tick(self.tick_frames);
+            }
+            0xFA | 0xFB => {
+                self.arp.clock_start();
+                self.seq.clock_start();
+                if self.seq.get(crate::seq::P_SYNC) == Some(1) && !self.seq.on() {
+                    self.set_seq_param(crate::seq::P_ON, 1);
+                }
+            }
+            0xFC => {
+                self.arp.clock_stop();
+                if self.seq.get(crate::seq::P_SYNC) == Some(1) && self.seq.on() {
+                    self.set_seq_param(crate::seq::P_ON, 0);
+                }
+                self.flush_arp();
+            }
+            _ => {}
+        }
+    }
+
     pub fn midi_bytes(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.midi(b);
@@ -403,6 +448,7 @@ impl Instrument {
 
     /// Replaces `out` with mono samples: the engine, the effects in order, then the safety limiter (95%).
     pub fn render(&mut self, out: &mut [i16]) {
+        self.frames_total += out.len() as u64;
         for chunk in out.chunks_mut(SLICE) {
             self.arp_events.clear();
             self.arp.advance(chunk.len(), &mut self.arp_events);
@@ -818,5 +864,63 @@ mod tests {
             i.render(&mut c);
         }
         assert_eq!(i.sounding(), 0);
+    }
+
+    /// MIDI clock through the queue: ticks stamped at their own times put the arpeggiator's steps on them, whatever the buffer size; Start and Stop drive a synced sequencer.
+    #[test]
+    fn midi_clock_drives_a_synced_arpeggiator_and_sequencer_through_the_queue() {
+        use crate::evq::EventQueue;
+        let mut p = Package::new("C", "analog", "MIT");
+        p.params.push((crate::analog::P_RELEASE, 1));
+        p.arp = vec![(crate::arp::P_ON, 1), (crate::arp::P_SYNC, 1), (crate::arp::P_RATE, 2)];
+        // a note first, then ticks: the queue carries the note too, stamped before the first tick
+        let run = |buffer: usize| {
+            let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+            let q = EventQueue::new(1024);
+            let us = |frame: f64| 1_000_000 + (frame * 1e6 / 44_100.0).round() as u64;
+            q.push(us(0.0), &[0x90, 60, 100]);
+            for k in 0..30 {
+                q.push(us(k as f64 * 918.75 + 1.0), &[0xF8]);
+            }
+            let total = 30 * 919;
+            let mut out = vec![0i16; total];
+            let mut at = 0;
+            while at < total {
+                let n = buffer.min(total - at);
+                i.render_events(&q, us((at + n) as f64), &mut out[at..at + n]);
+                at += n;
+            }
+            out
+        };
+        let a = run(512);
+        let onsets = |x: &[i16]| x.windows(2).enumerate().filter(|(_, w)| w[0].abs() < 3 && w[1].abs() >= 3).map(|(k, _)| k).collect::<Vec<_>>();
+        let o = onsets(&a);
+        assert!(o.len() >= 4, "steps sounded: {o:?}");
+        let gaps: Vec<i64> = o.windows(2).map(|w| w[1] as i64 - w[0] as i64).filter(|&g| g > 3000).take(3).collect();
+        assert!(gaps.iter().all(|&g| (g - 5513).abs() < 30), "a step every 6 ticks (5512.5 frames), found {gaps:?}");
+        let b97 = onsets(&run(97));
+        assert!(b97.len() == o.len() && o.iter().zip(&b97).all(|(x, y)| (*x as i64 - *y as i64).abs() <= 2), "the buffer size does not move a step: {o:?} against {b97:?}");
+        // a synced sequencer: Start begins it on the next tick, Stop ends it
+        let mut sp = Package::new("S", "analog", "MIT");
+        sp.params.push((crate::analog::P_RELEASE, 1));
+        sp.seq = vec![(crate::seq::P_SYNC, 1), (crate::seq::P_RATE, 2), (crate::seq::P_STEPS, 4)];
+        sp.steps = vec![(0, 0, 60, 100), (0, 1, 64, 100), (0, 2, 67, 100)];
+        let mut si = Instrument::from_package(&sp, 44_100.0, &none).unwrap();
+        let mut b = vec![0i16; 2205];
+        si.render(&mut b);
+        assert!(b.iter().all(|&x| x == 0), "stopped until Start");
+        si.midi_bytes(&[0xFA, 0xF8]);
+        assert_eq!(si.get_seq_param(crate::seq::P_ON), Some(1), "Start starts a synced sequencer");
+        let mut c = vec![0i16; 2205];
+        si.render(&mut c);
+        assert!(c.iter().any(|&x| x.abs() > 100), "its first step sounded on the first tick");
+        si.midi_bytes(&[0xFC]);
+        assert_eq!(si.get_seq_param(crate::seq::P_ON), Some(0), "Stop stops it");
+        // real-time bytes inside a message do not break it, and active sensing or reset are ignored
+        let mut m = Instrument::from_package(&Package::new("M", "analog", "MIT"), 44_100.0, &none).unwrap();
+        m.midi_bytes(&[0x90, 0xF8, 60, 0xFE, 100]);
+        let mut d = vec![0i16; 2000];
+        m.render(&mut d);
+        assert!(d.iter().any(|&x| x.abs() > 100), "a clock byte between a status and its data leaves the note whole");
     }
 }

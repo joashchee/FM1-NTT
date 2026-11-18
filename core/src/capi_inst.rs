@@ -652,13 +652,13 @@ mod tests {
             crate::capi::fm1ntt_free(mach);
             fm1ntt_evq_free(q);
             fm1ntt_evq_free(std::ptr::null_mut());
-            assert_eq!((fm1ntt_inst_seq_count(h, 0), fm1ntt_inst_seq_count(h, 1), fm1ntt_inst_seq_count(h, 9)), (10, 33, 33));
+            assert_eq!((fm1ntt_inst_seq_count(h, 0), fm1ntt_inst_seq_count(h, 1), fm1ntt_inst_seq_count(h, 9)), (11, 33, 33));
             assert_eq!(fm1ntt_inst_seq_param(h, 1, 1, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
             assert_eq!((info[0], info[1], info[2], CStr::from_ptr(pn.as_ptr()).to_str().unwrap()), (101, 0, 127, "STEP 1 NOTE (0 REST)"));
             assert_eq!((fm1ntt_inst_seq_set(h, 101, 62), fm1ntt_inst_seq_get(h, 101)), (0, 62));
             assert_eq!((fm1ntt_inst_seq_set(h, 55, 1), fm1ntt_inst_seq_get(h, 55)), (-1, i32::MIN));
             assert_eq!(fm1ntt_inst_seq_set(h, 101, 0), 0);
-            assert_eq!(fm1ntt_inst_arp_count(h), 10);
+            assert_eq!(fm1ntt_inst_arp_count(h), 11);
             assert_eq!(fm1ntt_inst_arp_param(h, 3, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
             assert_eq!((CStr::from_ptr(pn.as_ptr()).to_str().unwrap(), info[1], info[2]), ("BPM", 30, 300));
             assert_eq!(fm1ntt_inst_arp_set(h, 3, 9999), 0);

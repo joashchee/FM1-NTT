@@ -21,7 +21,9 @@ pub const P_CHAIN: u16 = 6;
 pub const P_PATTERN: u16 = 7;
 pub const P_TRANSPOSE: u16 = 8;
 pub const P_RECORD: u16 = 9;
-pub const P_COUNT: usize = 10;
+/// 0 its own tempo, 1 follow the MIDI clock (24 ticks a quarter note; Start begins the pattern, Stop ends it).
+pub const P_SYNC: u16 = 10;
+pub const P_COUNT: usize = 11;
 /// The pattern now being edited (`P_PATTERN`): its voice, then each step's note and velocity.
 pub const ID_VOICE: u16 = 100;
 pub const ID_STEP: u16 = 101;
@@ -40,6 +42,7 @@ const DESC: [(&str, i32, i32, i32, &str); P_COUNT] = [
     ("EDIT PATTERN", 1, 16, 1, ""),
     ("TRANSPOSE", -24, 24, 0, ""),
     ("RECORD (BY PLAYING)", 0, 1, 0, ""),
+    ("SYNC (0 INTERNAL 1 MIDI CLOCK)", 0, 1, 0, ""),
 ];
 
 const STEPS_PER_BEAT: [f64; 7] = [1.0, 2.0, 4.0, 8.0, 1.5, 3.0, 6.0];
@@ -59,6 +62,9 @@ pub struct Seq {
     sounding: Option<u8>,
     to_off: f64,
     pending: Vec<Event>,
+    /// external clock: ticks since the last Start and their spacing in frames
+    tick_n: u64,
+    tick_frames: f64,
 }
 
 impl Seq {
@@ -67,7 +73,7 @@ impl Seq {
         for (i, d) in DESC.iter().enumerate() {
             p[i] = d.3;
         }
-        Seq { rate: rate.clamp(8000.0, 192_000.0), p, notes: [[0; STEPS]; PATTERNS], vels: [[100; STEPS]; PATTERNS], voice: [-1; PATTERNS], running: false, chain_at: 0, step_at: 0, to_next: 0.0, sounding: None, to_off: f64::MAX, pending: Vec::new() }
+        Seq { rate: rate.clamp(8000.0, 192_000.0), p, notes: [[0; STEPS]; PATTERNS], vels: [[100; STEPS]; PATTERNS], voice: [-1; PATTERNS], running: false, chain_at: 0, step_at: 0, to_next: 0.0, sounding: None, to_off: f64::MAX, pending: Vec::new(), tick_n: 0, tick_frames: 0.0 }
     }
 
     /// The scalar settings (group 0) or the edited pattern's voice and steps (group 1).
@@ -112,6 +118,7 @@ impl Seq {
             match id {
                 P_ON if v == 1 && before == 0 => self.start(),
                 P_ON if v == 0 && before == 1 => self.stop(),
+                P_SYNC if v != before && self.running => self.to_next = if v == 1 { f64::MAX } else { 0.0 },
                 P_CHAIN if self.chain_at >= v as usize => self.chain_at = 0,
                 P_STEPS if self.step_at >= v as usize => self.step_at = 0,
                 _ => {}
@@ -174,7 +181,32 @@ impl Seq {
         self.running = true;
         self.chain_at = 0;
         self.step_at = 0;
-        self.to_next = 0.0;
+        self.to_next = if self.p[P_SYNC as usize] == 1 { f64::MAX } else { 0.0 }; // at once, or on the next tick that starts a step
+    }
+
+    /// One MIDI clock tick (`0xF8`), `tick_frames` frames after the last: with SYNC on, every `TICKS_PER_STEP`th tick starts a step (an odd step a swing's delay after it).
+    pub fn clock_tick(&mut self, tick_frames: f64) {
+        if self.p[P_SYNC as usize] != 1 {
+            return;
+        }
+        self.tick_frames = tick_frames.max(1.0);
+        let tps = crate::arp::TICKS_PER_STEP[self.p[P_RATE as usize] as usize];
+        let n = self.tick_n;
+        self.tick_n += 1;
+        if self.on() && self.running && n.checked_rem(tps) == Some(0) {
+            let swing = self.p[P_SWING as usize] as f64 / 100.0;
+            self.to_next = if self.step_at % 2 == 1 { swing * tps as f64 * self.tick_frames } else { 0.0 };
+        }
+    }
+
+    /// MIDI Start or Continue: the grid counts again from this tick and the pattern from its first step (the host also sets PLAYING).
+    pub fn clock_start(&mut self) {
+        self.tick_n = 0;
+        self.chain_at = 0;
+        self.step_at = 0;
+        if self.running && self.p[P_SYNC as usize] == 1 {
+            self.to_next = f64::MAX;
+        }
     }
 
     fn stop(&mut self) {
@@ -225,7 +257,8 @@ impl Seq {
         if !self.on() || !self.running {
             return;
         }
-        let step_len = self.step_len();
+        let ext = self.p[P_SYNC as usize] == 1;
+        let step_len = if ext && self.tick_frames > 0.0 { crate::arp::TICKS_PER_STEP[self.p[P_RATE as usize] as usize] as f64 * self.tick_frames } else { self.step_len() };
         let gate = self.p[P_GATE as usize] as f64 / 100.0;
         let swing = self.p[P_SWING as usize] as f64 / 100.0;
         let steps = self.p[P_STEPS as usize] as usize;
@@ -274,7 +307,11 @@ impl Seq {
                 self.step_at = 0;
                 self.chain_at = (self.chain_at + 1) % chain;
             }
-            self.to_next += if k & 1 == 0 { step_len * (1.0 + swing) } else { step_len * (1.0 - swing) };
+            if ext {
+                self.to_next = f64::MAX; // the next tick that starts a step says when
+            } else {
+                self.to_next += if k & 1 == 0 { step_len * (1.0 + swing) } else { step_len * (1.0 - swing) };
+            }
         }
     }
 }
@@ -435,5 +472,68 @@ mod tests {
         r.set(P_STEPS, 1);
         r.set(P_CHAIN, 1);
         let _ = run(&mut r, 44_100, 512);
+    }
+
+    fn clocked(s: &mut Seq, from_tick: usize, ticks: usize, gap: f64) -> Vec<(usize, Event)> {
+        let mut all = Vec::new();
+        let mut at = (from_tick as f64 * gap).round() as usize;
+        for i in from_tick..from_tick + ticks {
+            let target = (i as f64 * gap).round() as usize;
+            let mut ev = Vec::new();
+            s.advance(target - at, &mut ev);
+            all.extend(ev.into_iter().map(|(f, e)| (at + f, e)));
+            at = target;
+            s.clock_tick(gap);
+        }
+        let mut ev = Vec::new();
+        s.advance(2000, &mut ev);
+        all.extend(ev.into_iter().map(|(f, e)| (at + f, e)));
+        all
+    }
+
+    #[test]
+    fn clock_sync_steps_on_ticks_follows_the_tempo_and_waits_for_the_clock() {
+        let mut s = Seq::new(44_100.0);
+        four(&mut s);
+        s.set(P_BPM, 40); // not used
+        s.set(P_SYNC, 1);
+        s.set(P_ON, 1);
+        assert!(run(&mut s, 30_000, 512).is_empty(), "no clock, no step");
+        let ev = clocked(&mut s, 0, 26, 918.75);
+        let on: Vec<(usize, u8)> = ev.iter().filter_map(|(f, e)| if let Event::On(n, _) = e { Some((*f, *n)) } else { None }).collect();
+        assert_eq!(on[..3], [(0, 60), (5513, 64), (11_025, 67)]);
+        // a rest then the loop: the fourth step is a rest, so the fifth tick group plays step 1 again
+        assert_eq!(on[3], (22_050, 60), "{on:?}");
+        // half the tick spacing, twice the speed
+        let mut f = Seq::new(44_100.0);
+        four(&mut f);
+        f.set(P_SYNC, 1);
+        f.set(P_ON, 1);
+        let fast: Vec<usize> = clocked(&mut f, 0, 13, 459.375).iter().filter(|(_, e)| matches!(e, Event::On(..))).map(|(f, _)| *f).collect();
+        assert_eq!(fast[..3], [0, 2756, 5513]);
+        // internal mode ignores ticks
+        let mut i = Seq::new(44_100.0);
+        four(&mut i);
+        i.set(P_ON, 1);
+        let base = run(&mut i, 12_000, 512);
+        let mut j = Seq::new(44_100.0);
+        four(&mut j);
+        j.set(P_ON, 1);
+        for _ in 0..8 {
+            j.clock_tick(918.75);
+        }
+        assert_eq!(base, run(&mut j, 12_000, 512));
+    }
+
+    #[test]
+    fn clock_start_returns_the_pattern_to_its_first_step() {
+        let mut s = Seq::new(44_100.0);
+        four(&mut s);
+        s.set(P_SYNC, 1);
+        s.set(P_ON, 1);
+        let _ = clocked(&mut s, 0, 14, 918.75); // two steps and a bit in
+        s.clock_start();
+        let again = clocked(&mut s, 0, 7, 918.75);
+        assert_eq!(ons(&again)[..2], [60, 64].map(|x| x), "back to the first step: {again:?}");
     }
 }

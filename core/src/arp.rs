@@ -19,7 +19,9 @@ pub const P_SWING: u16 = 6;
 pub const P_LATCH: u16 = 7;
 pub const P_CHANCE: u16 = 8;
 pub const P_SEED: u16 = 9;
-pub const P_COUNT: usize = 10;
+/// 0 the arpeggiator's own tempo, 1 follow the MIDI clock (24 ticks a quarter note): a step falls on the tick that starts it, and the tempo, for the gate, is the ticks' spacing.
+pub const P_SYNC: u16 = 10;
+pub const P_COUNT: usize = 11;
 
 /// name, min, max, default, unit
 const DESC: [(&str, i32, i32, i32, &str); P_COUNT] = [
@@ -33,10 +35,13 @@ const DESC: [(&str, i32, i32, i32, &str); P_COUNT] = [
     ("LATCH", 0, 1, 0, ""),
     ("CHANCE", 0, 100, 100, "%"),
     ("SEED", 0, 9999, 1, ""),
+    ("SYNC (0 INTERNAL 1 MIDI CLOCK)", 0, 1, 0, ""),
 ];
 
 /// Steps in a beat (a quarter note) for each RATE.
 const STEPS_PER_BEAT: [f64; 7] = [1.0, 2.0, 4.0, 8.0, 1.5, 3.0, 6.0];
+/// MIDI clock ticks in a step for each RATE (24 ticks a quarter note).
+pub const TICKS_PER_STEP: [u64; 7] = [24, 12, 6, 3, 16, 8, 4];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -61,6 +66,10 @@ pub struct Arp {
     running: bool,
     pending: Vec<Event>,
     rng: u64,
+    /// external clock: the ticks counted since the last Start, whether the clock is running (Stop pauses it), and the spacing of the ticks in frames
+    tick_n: u64,
+    clock_run: bool,
+    tick_frames: f64,
 }
 
 impl Arp {
@@ -69,7 +78,7 @@ impl Arp {
         for (i, d) in DESC.iter().enumerate() {
             p[i] = d.3;
         }
-        let mut a = Arp { rate: rate.clamp(8000.0, 192_000.0), p, held: Vec::new(), down: Vec::new(), step: 0, to_next: 0.0, sounding: None, to_off: f64::MAX, running: false, pending: Vec::new(), rng: 0 };
+        let mut a = Arp { rate: rate.clamp(8000.0, 192_000.0), p, held: Vec::new(), down: Vec::new(), step: 0, to_next: 0.0, sounding: None, to_off: f64::MAX, running: false, pending: Vec::new(), rng: 0, tick_n: 0, clock_run: true, tick_frames: 0.0 };
         a.reseed();
         a
     }
@@ -99,6 +108,7 @@ impl Arp {
                 }
             }
             P_SEED => self.reseed(),
+            P_SYNC if v != before && self.running => self.to_next = if v == 1 { f64::MAX } else { 0.0 },
             _ => {}
         }
         true
@@ -155,8 +165,47 @@ impl Arp {
         if !self.running {
             self.running = true;
             self.step = 0;
-            self.to_next = 0.0; // the first step is at once
+            self.to_next = if self.p[P_SYNC as usize] == 1 { f64::MAX } else { 0.0 }; // the first step is at once, or on the next tick that starts a step
         }
+    }
+
+    /// One MIDI clock tick (a `0xF8`), `tick_frames` frames after the last: with SYNC on, every `TICKS_PER_STEP`th tick starts a step (an odd step a swing's delay after it).
+    pub fn clock_tick(&mut self, tick_frames: f64) {
+        if self.p[P_SYNC as usize] != 1 {
+            return;
+        }
+        self.tick_frames = tick_frames.max(1.0);
+        let tps = TICKS_PER_STEP[self.p[P_RATE as usize] as usize];
+        let n = self.tick_n;
+        self.tick_n += 1;
+        if self.on() && self.running && self.clock_run && n.checked_rem(tps) == Some(0) {
+            let swing = self.p[P_SWING as usize] as f64 / 100.0;
+            self.to_next = if self.step % 2 == 1 { swing * tps as f64 * self.tick_frames } else { 0.0 };
+        }
+    }
+
+    /// MIDI Start or Continue (`0xFA`, `0xFB`; the FM-1 treats them alike): the grid and the pattern begin again, and the clock runs.
+    pub fn clock_start(&mut self) {
+        self.tick_n = 0;
+        self.clock_run = true;
+        self.step = 0;
+        if !self.held.is_empty() && !self.running {
+            self.running = true;
+            self.to_next = if self.p[P_SYNC as usize] == 1 { f64::MAX } else { 0.0 };
+        }
+    }
+
+    /// MIDI Stop (`0xFC`): the sounding note ends and no step falls until the next Start; the held notes are kept.
+    pub fn clock_stop(&mut self) {
+        if self.p[P_SYNC as usize] != 1 {
+            return;
+        }
+        self.clock_run = false;
+        if let Some(n) = self.sounding.take() {
+            self.pending.push(Event::Off(n));
+        }
+        self.to_off = f64::MAX;
+        self.to_next = f64::MAX;
     }
 
     pub fn note_off(&mut self, note: u8) {
@@ -232,8 +281,10 @@ impl Arp {
         if !self.on() || !self.running {
             return;
         }
+        let ext = self.p[P_SYNC as usize] == 1;
         let beat = 60.0 / self.p[P_BPM as usize] as f64 * self.rate;
-        let step_len = beat / STEPS_PER_BEAT[self.p[P_RATE as usize] as usize];
+        let rate_i = self.p[P_RATE as usize] as usize;
+        let step_len = if ext && self.tick_frames > 0.0 { TICKS_PER_STEP[rate_i] as f64 * self.tick_frames } else { beat / STEPS_PER_BEAT[rate_i] };
         let gate = self.p[P_GATE as usize] as f64 / 100.0;
         let swing = self.p[P_SWING as usize] as f64 / 100.0;
         let mut t = 0.0f64; // frames into this call
@@ -267,7 +318,11 @@ impl Arp {
                 }
                 self.step += 1;
                 // swing delays every odd step by a fraction of the step, taking it from the step before so the pair keeps its length
-                self.to_next += if self.step % 2 == 1 { step_len * (1.0 + swing) } else { step_len * (1.0 - swing) };
+                if ext {
+                    self.to_next = f64::MAX; // the next tick that starts a step says when
+                } else {
+                    self.to_next += if self.step % 2 == 1 { step_len * (1.0 + swing) } else { step_len * (1.0 - swing) };
+                }
             }
         }
     }
@@ -436,5 +491,108 @@ mod tests {
         a.set(P_ON, 0);
         assert_eq!(a.held(), 0, "off forgets the notes");
         assert!(a.params().len() == P_COUNT);
+    }
+
+    /// Drives the arpeggiator from a MIDI clock: tick `i` at frame `round(i * gap)`, the audio advanced to it first. Returns the events at their absolute frames.
+    fn clocked(a: &mut Arp, from_tick: usize, ticks: usize, gap: f64) -> Vec<(usize, Event)> {
+        let mut all = Vec::new();
+        let mut at = (from_tick as f64 * gap).round() as usize;
+        for i in from_tick..from_tick + ticks {
+            let target = (i as f64 * gap).round() as usize;
+            let mut ev = Vec::new();
+            a.advance(target - at, &mut ev);
+            all.extend(ev.into_iter().map(|(f, e)| (at + f, e)));
+            at = target;
+            a.clock_tick(gap);
+        }
+        let mut ev = Vec::new();
+        a.advance(2000, &mut ev);
+        all.extend(ev.into_iter().map(|(f, e)| (at + f, e)));
+        all
+    }
+
+    const TICK: f64 = 918.75; // 120 BPM: 24 ticks to a 22050-frame quarter note
+
+    #[test]
+    fn clock_sync_puts_each_step_on_a_tick_and_waits_for_the_clock() {
+        let mut a = Arp::new(44_100.0);
+        a.set(P_SYNC, 1);
+        a.set(P_RATE, 2); // 1/16: 6 ticks
+        a.set(P_BPM, 40); // the internal tempo is not used
+        chord(&mut a, &[64, 60, 67]);
+        assert!(run(&mut a, 30_000, 512).is_empty(), "no clock, no step: it waits");
+        a.clock_start();
+        let ev = clocked(&mut a, 0, 25, TICK);
+        let on: Vec<(usize, u8)> = ev.iter().filter_map(|(f, e)| if let Event::On(n, _) = e { Some((*f, *n)) } else { None }).collect();
+        assert_eq!(on[..4], [(0, 60), (5513, 64), (11_025, 67), (16_538, 60)].map(|(f, n)| (f as usize, n)), "{on:?}");
+        let off = ev.iter().find(|(_, e)| matches!(e, Event::Off(_))).unwrap().0;
+        assert_eq!(off, 2756, "the gate (50 %) of a step measured from the ticks"); // the step is 6 ticks of 918.75
+    }
+
+    #[test]
+    fn clock_sync_follows_the_tempo_of_the_ticks_and_swing_delays_odd_steps() {
+        let mut a = Arp::new(44_100.0);
+        a.set(P_SYNC, 1);
+        a.set(P_RATE, 2);
+        a.set(P_SWING, 25);
+        chord(&mut a, &[60]);
+        a.clock_start();
+        let slow = clocked(&mut a, 0, 13, TICK);
+        let on: Vec<usize> = slow.iter().filter(|(_, e)| matches!(e, Event::On(..))).map(|(f, _)| *f).collect();
+        assert_eq!(on[0], 0);
+        assert!((on[1] as i64 - 6_891).abs() <= 1, "the second step is a quarter of a step late: {on:?}");
+        assert!((on[2] as i64 - 11_025).abs() <= 1, "the pair keeps its length: {on:?}");
+        // twice as fast: the same steps come in half the frames
+        let mut b = Arp::new(44_100.0);
+        b.set(P_SYNC, 1);
+        b.set(P_RATE, 2);
+        chord(&mut b, &[60]);
+        b.clock_start();
+        let fast = clocked(&mut b, 0, 13, TICK / 2.0);
+        let f: Vec<usize> = fast.iter().filter(|(_, e)| matches!(e, Event::On(..))).map(|(f, _)| *f).collect();
+        assert_eq!(f[..3], [0, 2756, 5513]);
+    }
+
+    #[test]
+    fn clock_stop_ends_the_note_and_start_begins_again_and_internal_mode_ignores_ticks() {
+        let mut a = Arp::new(44_100.0);
+        a.set(P_SYNC, 1);
+        a.set(P_RATE, 2);
+        chord(&mut a, &[60, 64]);
+        a.clock_start();
+        let _ = clocked(&mut a, 0, 1, TICK); // step one has just begun and its note is still sounding
+        a.clock_stop();
+        let mut ev = Vec::new();
+        a.advance(100, &mut ev);
+        assert!(ev.contains(&(0, Event::Off(60))) || ev.contains(&(0, Event::Off(64))), "stop releases the sounding note: {ev:?}");
+        a.clock_tick(TICK);
+        a.clock_tick(TICK);
+        let mut quiet = Vec::new();
+        a.advance(20_000, &mut quiet);
+        assert!(quiet.is_empty(), "stopped: ticks do not start steps");
+        a.clock_start();
+        let again = clocked(&mut a, 0, 8, TICK);
+        assert_eq!(ons(&again)[..2], [60, 64], "it begins again from the first note");
+        // with SYNC off the ticks change nothing
+        let mut i = Arp::new(44_100.0);
+        chord(&mut i, &[60]);
+        let mut base = Vec::new();
+        i.advance(12_000, &mut base);
+        let mut j = Arp::new(44_100.0);
+        chord(&mut j, &[60]);
+        for _ in 0..10 {
+            j.clock_tick(TICK);
+        }
+        let mut with = Vec::new();
+        j.advance(12_000, &mut with);
+        assert_eq!(base, with);
+        // switching sync on while running waits for a tick; off, it runs on its own again
+        let mut k = Arp::new(44_100.0);
+        chord(&mut k, &[60]);
+        let _ = run(&mut k, 1000, 512);
+        k.set(P_SYNC, 1);
+        assert!(ons(&run(&mut k, 30_000, 512)).is_empty(), "no new step until a tick");
+        k.set(P_SYNC, 0);
+        assert!(!ons(&run(&mut k, 30_000, 512)).is_empty());
     }
 }
