@@ -30,3 +30,7 @@ CLAUDE.local.md
 /web/public/build-info.json
 /web/public/build-info.json.tmp
 
+
+# M-VAVE official documents: kept locally for reference, never committed (not ours to redistribute)
+docs/FM-1-manual.pdf
+docs/FM-1 MIDI EN.docx

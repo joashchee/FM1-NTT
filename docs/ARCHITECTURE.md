@@ -81,7 +81,7 @@ and untested on the unit). A bug in the vendored crates is reported upstream; a 
 | Platform | Route |
 |---|---|
 | R36S (r3i6nos) | `FM1-NTT.deb`, built by `r36s/build-deb.sh`; the device report, Rec demo, splash, hot-plug toast and power section every r3i6nos port has (ROADMAP section 4), drawn in pixels |
-| macOS | free app: Mac App Store **and** a signed, notarized direct download; published as ANSI Apps, bundle id `com.ansiapps.fm1ntt`, signed and notarized by Scoreless Music, the only Apple account (global rule); `scripts/build-release.sh` on the maintainer's Mac, as Coupler's |
+| macOS | free app: a signed, notarized direct download only (**no Mac App Store build**, the maintainer, 2026-11-18); published as ANSI Apps, bundle id `com.ansiapps.fm1ntt`, signed and notarized by Scoreless Music, the only Apple account (global rule); `scripts/build-release.sh` on the maintainer's Mac, as Coupler's |
 | Windows, Linux | the SDL2 host built on CI |
 | Web | the PWA shell, then the WebAssembly build |
 | Plugin (AU, VST3, CLAP) | not planned: `fm1-emu` has one; this project is the sandbox and the R36S |

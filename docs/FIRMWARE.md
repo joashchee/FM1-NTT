@@ -10,7 +10,7 @@ copyleft firmware ships as a **separate pack** rather than inside the MIT app:
 |---|---|---|
 | Licences (AND-joined, from an allowlist) | MIT, BSD-2/3-Clause, Apache-2.0, ISC, Unlicense, CC0-1.0, Zlib; MPL-2.0 and OFL-1.1 as components | those, plus GPL-2.0-only/or-later, GPL-3.0-only/or-later, LGPL-2.1 and 3.0 |
 | Ships in | the MIT app's package, this repository's releases | **its own repository and package** (`FM1-NTT-firmware-pack.deb`), never in this repository or the app's |
-| Mac App Store build | allowed | **never** (the App Store's terms are widely reported to be incompatible with the GPL); `scripts/check-bundled.py --no-pack APP_DIR` fails if any pack file is in a build |
+| Mac App Store build | **none is planned** (the maintainer, 2026-11-18) | **never**, should one ever exist (the App Store's terms are widely reported to be incompatible with the GPL); `scripts/check-bundled.py --no-pack APP_DIR` fails if any pack file is in a build |
 | Extra obligations | licence texts, `SOURCES.md`, `NOTICE`; for MPL parts, where the source is | **the complete corresponding source beside each binary** (hash-checked), a written offer, the GPL text, no added terms |
 | In the FILES panel | marked **B** | marked **G** |
 | Today | Haunted FM-1 v0.1 (5 firmwares) | Felucca 1.8.2, FoMni-1 0.4.1, Jangada 1.0.1 |

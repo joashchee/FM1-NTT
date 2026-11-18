@@ -87,3 +87,24 @@ Each read from the firmware's own licence files at its release tag (not the repo
 
 The three `.fwsc` hash reads that first looked like MISMATCHes were **truncated downloads**, not re-uploads: the same file hashed differently on each read. `fm1tastik/scripts/research.py` now reads to the end and refuses a body shorter than its `Content-Length` (retrying), with tests.
 
+
+## MPL-2.0 firmwares, 2026-11-18
+
+The maintainer asked for all MPL-2.0 firmwares to be included. Each was read from its own notice files at the release tag (not the repository badge); `fm1tastik/scripts/research.py` gave the release, the `.fwsc` and its hash. **Nothing is bundled yet**: this is the result of the first read. Their tier is the Pack (`MPL-2.0` is on its allowlist), with the platform's submodule sources (fm1-base, felucca-bsp) alongside.
+
+| Firmware | Release | Result |
+|---|---|---|
+| **FRASIL 3.3.1** | `.fwsc` published | **Pass.** MPL-2.0 file by file, fonts OFL-1.1, JieLi SDK files not in the repository; the name and logo are the author's, redistributed unchanged |
+| **MIDIMON 0.5** | `.fwsc` published | **Pass, with a caveat.** MPL-2.0; its USB MIDI host is MPL-2.0 only by two authors' own quoted words (recorded in its `LICENSING.md`); Terminus is OFL-1.1 |
+| **MODELAR 0.3** | `.fwsc` published | **Pass on a first read** (README only: MPL-2.0 on fm1-base and felucca-bsp; no notice file at the tag, so read its source's SPDX lines before bundling) |
+| **J6 1.4.0** | `.fwsc` published | **Pass on a first read** (the same: a synthesiser, no samples, README only) |
+| **TRIO 0.1.1** | `.fwsc` published | **Pass, with a caveat.** MPL-2.0; its network weights were trained on FiloBass (CC BY 4.0) and JazzSAMBA (an MIT-style licence), neither included; keep the attribution; JieLi's Bluetooth libraries (Apache-2.0) are in the build |
+| **Erik37 1.3** | `.fwsc` published | **Out:** the piano bank is the Salamander Grand Piano V3, **CC BY 3.0**, a derivative inside every package; CC BY is not on the allowlist |
+| **DelRio 1.0** | `.fwsc` published | **Out:** the kit is freesound recordings under **CC BY 3.0 and CC BY 4.0** (with CC0 VCSL parts) |
+| **Saadet 1.0.5** | `.fwsc` published | **Out:** its licensing says factory sound data (**Roland, Sequential, Casio**) is the vendors', no licence granted (a Melodee fork) |
+| **LUOGU 1.0.2** | `.fwsc` published | **Out:** five arias' scores under **CC BY-NC-ND 4.0** (non-commercial), and two words cut from a comedy recording that "belong to their owners" |
+| **CHOPPAH 1.4.1** | `.fwsc` published | **Out:** eight breaks "from the records" (The Winstons' "Amen, Brother" and others): commercial recordings |
+| **FIZZ 0.13.0** | `.fwsc` published | **Out:** FreeType's FTL (the earlier decision, 2026-11-16: "leave freetype out of allowlist") |
+| **LOOM-8 0.16.2** | `.fwsc` published | **Not MPL as a whole:** its own `LICENSING.md` says the firmware is **GPL-3.0-only** as a whole (the acid engine and the 909 models), with MPL-2.0 files inside; a Pack entry on a full GPL read, with 9W9's permission as a caveat |
+| **VNL-1 0.9.2** | `.fwsc` published | **Not MPL:** **GPL-3.0-only** as a whole since the `mpl-final` tag (FOMAJAM and Optimist drum engines); a Pack entry on a full GPL read |
+| **FIELD, Tonic, AEther, NOCT FM** | none in the release feed | **Cannot be bundled** until the author publishes a `.fwsc` (the app bundles the author's release byte for byte) |
