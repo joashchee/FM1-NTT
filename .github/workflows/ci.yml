@@ -23,6 +23,24 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
       - name: Run checks
         run: scripts/check.sh
+      - name: Benchmark and regression gate
+        # A shared runner is noisy: only a halving of core, screen or io figures fails (scripts/bench-gate.py). With no docs/bench-baseline-linux-x86_64.txt the gate
+        # passes and says so; adopt the uploaded report as the baseline once, from a run on main.
+        env:
+          FM1NTT_DIR: ${{ runner.temp }}/fm1ntt-bench
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          mkdir -p "$FM1NTT_DIR"
+          build/fm1ntt --bench --seconds 1
+          python3 scripts/bench-gate.py docs/bench-baseline-linux-x86_64.txt "$FM1NTT_DIR/bench/latest.txt"
+      - name: Keep the benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-linux-x86_64
+          path: ${{ runner.temp }}/fm1ntt-bench/bench/latest.txt
+          if-no-files-found: ignore
   r36s:
     # The arm64 package, built and smoke-tested in Debian 12 under qemu (r36s/build-deb.sh); the same script the maintainer runs.
     runs-on: ubuntu-24.04

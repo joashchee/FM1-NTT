@@ -124,7 +124,7 @@ My answer was: MIT permits it as **aggregation of separate works**, but it is no
 - [x] **Determinism test** (garbage image: the same frames twice). [ ] The same with a real firmware, locally.
 - [ ] **Compare against real behaviour:** a recording from a real FM-1 vs the emulation, where the maintainer has one (latency, USB-MIDI timing and encoder feel stay different: kit section 4.3).
 - [x] **A CI job for the arm64 package** (`r36s` in `ci.yml`: `docker/setup-qemu-action` then `r36s/build-deb.sh`). [ ] Not yet run on GitHub: only the script, locally in Docker.
-- [ ] **A benchmark regression gate:** CI runs `--bench` on Linux and compares with a stored report, failing on a large drop in `core.*`, `screen.*` or `io.*`.
+- [~] **A benchmark regression gate** (2026-11-19, `scripts/bench-gate.py`, 6 tests in `check.sh`; the CI step in `.github/workflows/ci.yml`): fails when a `core.`, `screen.` or `io.` figure falls below 0.5x of `docs/bench-baseline-linux-x86_64.txt` (a halving, because a shared runner is noisy), refuses a stale baseline (`format` or `workload` changed) and a cut-short run, and passes with a note when there is no baseline yet; the report is kept as an artifact. `--bench --seconds 1` ran headless with the dummy SDL drivers on this Mac (30 s). [ ] **Blocked on the first CI run:** commit the uploaded `latest.txt` as the baseline (it cannot be made here: the baseline must come from the CI machine's own kind); the workflow has never run on GitHub; the step is untested there.
 - [ ] **Watch upstream:** how to take `fm1-emu` updates (`VENDORED.md`).
 
 ## 5a. Firmware extractor, for simulating a firmware's sound from its data (maintainer, 2026-11-17: "start on the extractor"; `docs/EXTRACTOR.md`)

@@ -32,6 +32,8 @@ echo "== firmware update checker"
 if python3 "$REPO/scripts/test_check_firmware_updates.py" >"$REPO/build/check-updates.log" 2>&1; then tail -1 "$REPO/build/check-updates.log"; else cat "$REPO/build/check-updates.log"; echo "check-firmware-updates tests FAILED"; exit 1; fi
 echo "== bench-compare"
 if python3 "$REPO/scripts/test_bench_compare.py" >"$REPO/build/bench-compare.log" 2>&1; then tail -1 "$REPO/build/bench-compare.log"; else cat "$REPO/build/bench-compare.log"; echo "bench-compare tests FAILED"; exit 1; fi
+echo "== bench-gate"
+if python3 "$REPO/scripts/test_bench_gate.py" >"$REPO/build/bench-gate.log" 2>&1; then tail -1 "$REPO/build/bench-gate.log"; else cat "$REPO/build/bench-gate.log"; echo "bench-gate tests FAILED"; exit 1; fi
 echo "== scripts"
 for f in "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/web/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh; do bash -n "$f"; done
 # CI's shellcheck is 0.9 (Ubuntu apt); the Mac's Homebrew 0.11 misses what it flags (SC2015, 2026-11-18). So where Docker runs, lint with the pinned
