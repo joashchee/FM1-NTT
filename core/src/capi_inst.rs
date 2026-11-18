@@ -12,6 +12,74 @@ const MAX_SAMPLE_BYTES: usize = 64 << 20;
 
 pub struct InstHandle(Instrument, Option<Package>);
 
+/// The lock-free queue of timestamped MIDI from one thread to the audio thread (`evq.rs`).
+pub struct EvqHandle(crate::evq::EventQueue);
+
+/// A queue of at least `capacity` messages (16 to 65536). **One thread pushes and one thread renders**; nothing here locks.
+#[no_mangle]
+pub extern "C" fn fm1ntt_evq_new(capacity: usize) -> *mut EvqHandle {
+    Box::into_raw(Box::new(EvqHandle(crate::evq::EventQueue::new(capacity))))
+}
+
+/// # Safety
+/// `q` is null or a queue from `fm1ntt_evq_new`, and no other thread is using it.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_free(q: *mut EvqHandle) {
+    if !q.is_null() {
+        drop(Box::from_raw(q));
+    }
+}
+
+/// Pushes one MIDI message (1 to 3 bytes: a note, controller, pitch bend or program change) stamped `ts_us` on the host's monotonic microsecond clock, from the producer
+/// thread. 0 queued; -1 refused (full, empty, longer than 3 bytes, or null), counted in `fm1ntt_evq_dropped`.
+///
+/// # Safety
+/// `bytes` points at `len` readable bytes; only one thread pushes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_push(q: *const EvqHandle, ts_us: u64, bytes: *const u8, len: usize) -> c_int {
+    let (Some(q), false) = (q.as_ref(), bytes.is_null()) else { return -1 };
+    if len <= crate::evq::MAX_MSG && q.0.push(ts_us, std::slice::from_raw_parts(bytes, len)) {
+        0
+    } else {
+        if len > crate::evq::MAX_MSG {
+            q.0.push(ts_us, &[]); // counts the refusal
+        }
+        -1
+    }
+}
+
+/// Messages waiting, and pushes refused so far.
+///
+/// # Safety
+/// `q` is null or a live queue.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_len(q: *const EvqHandle) -> usize {
+    q.as_ref().map_or(0, |q| q.0.len())
+}
+
+/// # Safety
+/// `q` is null or a live queue.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_dropped(q: *const EvqHandle) -> u64 {
+    q.as_ref().map_or(0, |q| q.0.dropped())
+}
+
+/// Mono, `frames` samples, with the messages of `q` that fall in this buffer applied at their own frames (`now_us` is the host clock at the call, the clock the producer
+/// stamped with). The audio callback calls this; no lock is shared with the pusher. The frames written (0 for more than 1 << 20 or a null).
+///
+/// # Safety
+/// `out` has room for `frames` samples; `h` and `q` are live; only the calling thread consumes `q`.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_render_events(h: *mut InstHandle, q: *const EvqHandle, now_us: u64, out: *mut i16, frames: usize) -> usize {
+    match (h.as_mut(), q.as_ref(), out.is_null()) {
+        (Some(h), Some(q), false) if frames <= MAX_FRAMES => {
+            h.0.render_events(&q.0, now_us, std::slice::from_raw_parts_mut(out, frames));
+            frames
+        }
+        _ => 0,
+    }
+}
+
 /// Reads a file for the loader: called with `cap` 0 to ask the size, then with a buffer of that size; returns the size, or -1 when the file cannot be read.
 pub type ReadFn = unsafe extern "C" fn(user: *mut c_void, name: *const c_char, buf: *mut u8, cap: usize) -> i64;
 
@@ -387,6 +455,18 @@ mod tests {
             assert_eq!(fm1ntt_inst_set(h, 135, 4), 0);
             assert_eq!(fm1ntt_inst_get(h, 135), 4);
             assert_eq!(fm1ntt_inst_set(h, 30000, 4), -1);
+            // the event queue: a note stamped inside the buffer sounds from its frame, a refused message is counted, nulls are tolerated
+            let q = fm1ntt_evq_new(8);
+            let note = [0x90u8, 69, 127];
+            assert_eq!(fm1ntt_evq_push(q, 95_000, note.as_ptr(), 3), 0);
+            assert_eq!(fm1ntt_evq_push(q, 0, note.as_ptr(), 4), -1);
+            assert_eq!((fm1ntt_evq_len(q), fm1ntt_evq_dropped(q)), (1, 1));
+            let mut mono = vec![0i16; 441];
+            assert_eq!(fm1ntt_inst_render_events(h, q, 100_000, mono.as_mut_ptr(), 441), 441);
+            assert!(mono[300..].iter().any(|&x| x != 0), "the queued note sounds (frame placement is tested in instrument.rs)");
+            assert_eq!((fm1ntt_evq_len(q), fm1ntt_inst_render_events(std::ptr::null_mut(), q, 0, mono.as_mut_ptr(), 4), fm1ntt_evq_push(std::ptr::null(), 0, note.as_ptr(), 3)), (0, 0, -1));
+            fm1ntt_evq_free(q);
+            fm1ntt_evq_free(std::ptr::null_mut());
             assert_eq!(fm1ntt_inst_arp_count(h), 10);
             assert_eq!(fm1ntt_inst_arp_param(h, 3, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
             assert_eq!((CStr::from_ptr(pn.as_ptr()).to_str().unwrap(), info[1], info[2]), ("BPM", 30, 300));

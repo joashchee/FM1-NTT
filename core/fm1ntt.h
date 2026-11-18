@@ -111,6 +111,13 @@ size_t fm1ntt_inst_param_count(const fm1ntt_inst *h);
 int fm1ntt_inst_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);   /* info = { id, min, max, default }; 0 ok, -1 out of range */
 int32_t fm1ntt_inst_get(const fm1ntt_inst *h, int id);                                      /* INT32_MIN when there is no such parameter */
 int fm1ntt_inst_set(fm1ntt_inst *h, int id, int value);                                     /* clamped to the range; 0 ok, -1 */
+typedef struct fm1ntt_evq fm1ntt_evq;                                                       /* a lock-free queue of timestamped MIDI, one pushing thread to the audio thread */
+fm1ntt_evq *fm1ntt_evq_new(size_t capacity);                                                /* 16 to 65536 messages */
+void fm1ntt_evq_free(fm1ntt_evq *q);
+int fm1ntt_evq_push(const fm1ntt_evq *q, uint64_t ts_us, const uint8_t *bytes, size_t len);  /* 1 to 3 bytes, stamped on the host's monotonic microsecond clock; 0 queued, -1 refused (counted) */
+size_t fm1ntt_evq_len(const fm1ntt_evq *q);
+uint64_t fm1ntt_evq_dropped(const fm1ntt_evq *q);
+size_t fm1ntt_inst_render_events(fm1ntt_inst *h, const fm1ntt_evq *q, uint64_t now_us, int16_t *out, size_t frames);   /* mono; applies each message at its own frame; no lock shared with the pusher */
 size_t fm1ntt_inst_arp_count(const fm1ntt_inst *h);                                        /* the arpeggiator's parameters (core/src/arp.rs): the same four calls */
 int fm1ntt_inst_arp_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
 int32_t fm1ntt_inst_arp_get(const fm1ntt_inst *h, int id);

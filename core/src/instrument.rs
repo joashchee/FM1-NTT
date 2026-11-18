@@ -33,6 +33,8 @@ pub struct Instrument {
     voices: Vec<[u8; 128]>,
     program: usize,
     mono: Vec<i16>,
+    rate: f64,
+    clock: crate::evq::Clock,
     arp: Arp,
     arp_events: Vec<(usize, Event)>,
     // MIDI parser state
@@ -94,6 +96,8 @@ impl Instrument {
             voices,
             program: pkg.program,
             mono: vec![0; SLICE],
+            rate,
+            clock: crate::evq::Clock::new(),
             arp: Arp::new(rate),
             arp_events: Vec::with_capacity(64),
             status: 0,
@@ -372,6 +376,29 @@ impl Instrument {
         }
     }
 
+    /// Renders `out` (mono) with the messages of `q` that fall in this buffer applied at their own frames: the audio callback's way in, with no lock shared with the
+    /// thread that pushes (`evq.rs`). `now_us` is the host's monotonic microsecond clock at the call, the same clock the producer stamped with. A message stamped
+    /// before the buffer (a stall) is applied at its first frame; one stamped after it stays queued for the next buffer.
+    pub fn render_events(&mut self, q: &crate::evq::EventQueue, now_us: u64, out: &mut [i16]) {
+        let frames = out.len();
+        let (start, per_us) = self.clock.window(now_us, frames, self.rate);
+        let mut at = 0usize;
+        while let Some(m) = q.peek() {
+            let off = (m.ts_us as f64 - start) * per_us;
+            if off >= frames as f64 {
+                break;
+            }
+            q.pop();
+            let frame = (off.max(0.0) as usize).max(at).min(frames);
+            if frame > at {
+                self.render(&mut out[at..frame]);
+                at = frame;
+            }
+            self.midi_bytes(&m.bytes[..m.len as usize]);
+        }
+        self.render(&mut out[at..]);
+    }
+
     /// Replaces `out` with interleaved stereo (the mono mix on both sides); an odd length leaves its last sample silent.
     pub fn render_stereo(&mut self, out: &mut [i16]) {
         let frames = out.len() / 2;
@@ -633,5 +660,44 @@ mod tests {
         let mut q = Package::new("A", "analog", "MIT");
         q.arp.push((77, 1));
         assert!(Instrument::from_package(&q, 44_100.0, &none).is_err(), "an unknown arp parameter is refused");
+    }
+
+    #[test]
+    fn events_land_on_their_frames_and_late_or_future_ones_are_kept_in_order() {
+        use crate::evq::EventQueue;
+        let mut p = Package::new("A", "analog", "MIT");
+        p.params.push((crate::analog::P_ATTACK, 0));
+        p.params.push((crate::analog::P_RELEASE, 1));
+        let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        let q = EventQueue::new(64);
+        // a 441-frame buffer (10 ms) at host time 100_000 us covers 90_000 to 100_000 us; a note stamped at 95_000 starts 220 frames in
+        assert!(q.push(95_000, &[0x90, 69, 127]));
+        let mut b = vec![0i16; 441];
+        i.render_events(&q, 100_000, &mut b);
+        assert!(b[..215].iter().all(|&x| x == 0), "silent before the note");
+        assert!(b[240..].iter().any(|&x| x.abs() > 100), "sounding after it");
+        // a note stamped for the next buffer stays queued; one stamped long ago plays at frame 0; the order of the queue is kept
+        assert!(q.push(112_000, &[0x80, 69, 0]));
+        assert!(q.push(112_500, &[0x90, 60, 100]));
+        let mut c = vec![0i16; 441];
+        i.render_events(&q, 110_000, &mut c);
+        assert_eq!(q.len(), 2, "both are in the future: kept");
+        assert!(c.iter().any(|&x| x.abs() > 100));
+        let mut d = vec![0i16; 441];
+        i.render_events(&q, 120_000, &mut d);
+        assert!(q.is_empty(), "both played in the third buffer");
+        assert!(i.sounding() >= 1);
+        // no queue traffic: the same sound as an ordinary render
+        let (mut x, mut y) = (Instrument::from_package(&p, 44_100.0, &none).unwrap(), Instrument::from_package(&p, 44_100.0, &none).unwrap());
+        x.note_on(57, 100);
+        y.note_on(57, 100);
+        let (mut bx, mut by) = (vec![0i16; 3000], vec![0i16; 3000]);
+        x.render(&mut bx);
+        y.render_events(&q, 5_000_000, &mut by);
+        assert_eq!(bx, by);
+        // messages the instrument ignores (a system-exclusive piece, running status without a status) do nothing and cost nothing
+        assert!(q.push(5_000_001, &[0x42]));
+        i.render_events(&q, 5_020_000, &mut by);
+        assert!(q.is_empty());
     }
 }

@@ -13,6 +13,7 @@ pub mod capi_inst;
 pub mod capi_sound;
 pub mod devices;
 pub mod engine;
+pub mod evq;
 pub mod extract;
 pub mod factory;
 pub mod firmware;

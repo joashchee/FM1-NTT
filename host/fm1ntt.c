@@ -132,6 +132,7 @@ typedef struct {
     int pin, pinned;                    /* --pin: the audio (emulating) thread on the last core, the main thread on the first; pinned: the audio thread has done it */
     /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
     fm1ntt_fm6 *pv;
+    fm1ntt_evq *evq;                    /* the instrument's notes from the UI to the audio thread: timestamped, lock-free, each applied at its own frame (core/src/evq.rs); NULL means the locked path */
     fm1ntt_inst *inst;                  /* an instrument package (docs/PORTING.md) played instead of the fm6 preview: its notes, its program for the voice, its effects */
     uint8_t pv_voices[PV_MAX][128];
     int pv_factory;                     /* the voices are the built-in set (the firmware has none of its own, or none is loaded) */
@@ -220,8 +221,20 @@ static void pv_name(const App *a, char *out, size_t cap) {
     while (k && out[k - 1] == ' ') k--;
     out[k] = 0;
 }
+/* The host's monotonic clock in microseconds: the stamp the queue's producer and consumer share. */
+static uint64_t now_us(void) { return (uint64_t)((double)SDL_GetPerformanceCounter() * 1e6 / (double)SDL_GetPerformanceFrequency()); }
+/* An instrument's note to the audio thread with no lock: the callback applies it at its frame. The slot bookkeeping stays on this side. */
+static void inst_note_q(App *a, int *slot, int note, int down) {
+    uint64_t t = now_us();
+    uint8_t m[3];
+    if (down) {
+        if (*slot) { m[0] = 0x80; m[1] = (uint8_t)(*slot - 1); m[2] = 0; fm1ntt_evq_push(a->evq, t, m, 3); }
+        *slot = note + 1; m[0] = 0x90; m[1] = (uint8_t)note; m[2] = 100; fm1ntt_evq_push(a->evq, t, m, 3);
+    } else if (*slot) { m[0] = 0x80; m[1] = (uint8_t)(*slot - 1); m[2] = 0; fm1ntt_evq_push(a->evq, t, m, 3); *slot = 0; }
+}
 static void pv_note(App *a, int *slot, int note, int down) {
     if (!a->pv && !a->inst) return;
+    if (a->inst && a->evq) { inst_note_q(a, slot, note, down); return; }
     lock(a);
     if (a->inst) {
         if (down) { if (*slot) fm1ntt_inst_note_off(a->inst, *slot - 1); *slot = note + 1; fm1ntt_inst_note_on(a->inst, note, 100); }
@@ -253,7 +266,7 @@ static void pv_solo_toggle(App *a) {
     unlock(a);
     say(a, 0, a->pv_solo ? "Solo: the machine is stopped, only the engine plays" : "Solo off: the machine runs again", NULL);
 }
-static void pv_free(App *a) { if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } if (a->inst) { fm1ntt_inst_free(a->inst); a->inst = NULL; } }
+static void pv_free(App *a) { if (a->evq) { fm1ntt_evq_free(a->evq); a->evq = NULL; } if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } if (a->inst) { fm1ntt_inst_free(a->inst); a->inst = NULL; } }
 
 static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
 static int is_file(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISREG(st.st_mode); }
@@ -695,7 +708,9 @@ static void audio_step(App *a, int16_t *out, size_t frames) {
         int16_t mono[4096];
         for (size_t at = 0; at < frames; ) {
             size_t n = frames - at < 4096 ? frames - at : 4096;
-            if (a->inst) fm1ntt_inst_render(a->inst, mono, n); else fm1ntt_fm6_render(a->pv, mono, n);
+            if (a->inst && a->evq) fm1ntt_inst_render_events(a->inst, a->evq, now_us(), mono, n);
+            else if (a->inst) fm1ntt_inst_render(a->inst, mono, n);
+            else fm1ntt_fm6_render(a->pv, mono, n);
             for (size_t i = 0; i < n; i++) for (int ch = 0; ch < 2; ch++) {
                 int v = out[2 * (at + i) + ch] + mono[i];
                 out[2 * (at + i) + ch] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
@@ -2858,6 +2873,18 @@ static int selftest(void) {
                 long ie = 0; for (int i = 0; i < 2 * 2048; i++) ie += abs(io[i]);
                 CHECK(ie > 2048L * 50);
                 pv_note(&a, &a.pv_key[0], 60, 0);
+                /* with the queue: the note goes in without the lock, the callback takes it, and it sounds on the next buffer */
+                a.evq = fm1ntt_evq_new(64);
+                pv_note(&a, &a.pv_key[0], 60, 1);
+                CHECK(fm1ntt_evq_len(a.evq) == 1);
+                SDL_Delay(2);                                  /* a message stamped at the very instant of the callback belongs to the next buffer */
+                audio_step(&a, io, 2048);
+                CHECK(fm1ntt_evq_len(a.evq) == 0 && fm1ntt_evq_dropped(a.evq) == 0);
+                audio_step(&a, io, 2048);
+                { long qe = 0; for (int i = 0; i < 2 * 2048; i++) qe += abs(io[i]); CHECK(qe > 2048L * 50); }
+                pv_note(&a, &a.pv_key[0], 60, 0);
+                CHECK(fm1ntt_evq_len(a.evq) == 1);
+                fm1ntt_evq_free(a.evq); a.evq = NULL;
                 CHECK(inst_load(&a, "/nonexistent/none.fm1i") != 0 && a.inst != NULL && a.msg_style == 2);   /* a bad load keeps the instrument and says why */
                 pv_set(&a, two, 2); CHECK(a.inst == NULL && a.pv != NULL);
                 remove(ip);
@@ -3368,6 +3395,7 @@ int main(int argc, char **argv) {
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, PX_W, PX_H);
     if (!tex) { fprintf(stderr, "fm1ntt: texture: %s\n", SDL_GetError()); return 1; }
     for (int i = 0; i < SDL_NumJoysticks(); i++) SDL_JoystickOpen(i);
+    a.evq = fm1ntt_evq_new(1024);
 
     draw_splash(canvas, "STARTING", 20);                 /* at once, before anything heavy */
     present(ren, tex, canvas);
