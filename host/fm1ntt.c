@@ -703,7 +703,10 @@ static void audio_step(App *a, int16_t *out, size_t frames) {
         return;
     }
     int solo = a->pv_on && a->pv_solo && (a->pv || a->inst);      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
-    if (a->paused || (!solo && !fm1ntt_loaded(a->m))) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
+    if (a->paused || (!solo && !fm1ntt_loaded(a->m))) {
+        if (a->mevq && fm1ntt_loaded(a->m)) fm1ntt_apply_events(a->m, a->mevq);      /* an input sent while paused lands now, not in a burst on resume */
+        memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return;
+    }
     if (solo) memset(out, 0, frames * 4);
     else if (a->mevq) fm1ntt_render_events(a->m, a->mevq, now_us(), out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
     else fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
@@ -771,14 +774,25 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
 }
 
 /* ---- the machine's inputs ---------------------------------------------------------------------------------------------- */
-static void key_id(App *a, int id, int down) { lock(a); fm1ntt_key(a->m, id, down); unlock(a); }
-static void enc(App *a, int e, int clicks) { lock(a); fm1ntt_encoder(a->m, e, clicks); unlock(a); a->enc_turns[e] += clicks; }
+/* The machine's inputs go to the audio thread through its queue (core/src/evq.rs) while the callback runs and a firmware is loaded: no lock, each applied at its frame, in the
+ * order sent. Otherwise (no audio device, the Rec demo, which steps its own clock) they go straight in under the lock. The callback also drains the queue while paused. */
+static int mq_on(const App *a) { return a->mevq && a->mq_live && fm1ntt_loaded(a->m); }
+static void key_id(App *a, int id, int down) {
+    if (mq_on(a)) { fm1ntt_evq_push_key(a->mevq, now_us(), id, down); return; }
+    lock(a); fm1ntt_key(a->m, id, down); unlock(a);
+}
+static void enc(App *a, int e, int clicks) {
+    if (mq_on(a)) fm1ntt_evq_push_encoder(a->mevq, now_us(), e, clicks);
+    else { lock(a); fm1ntt_encoder(a->m, e, clicks); unlock(a); }
+    a->enc_turns[e] += clicks;
+}
 static void pot(App *a, int by) {
     a->pot = a->pot + by < 0 ? 0 : a->pot + by > 1023 ? 1023 : a->pot + by;
+    if (mq_on(a)) { fm1ntt_evq_push_pot(a->mevq, now_us(), a->pot); return; }
     lock(a); fm1ntt_pot(a->m, a->pot); unlock(a);
 }
 static void midi_send(App *a, const uint8_t *b, int n, int log) {
-    if (a->mevq && a->mq_live && !a->paused && fm1ntt_loaded(a->m)) {          /* no lock: the callback puts each message into the jack at its own frame (core/src/evq.rs) */
+    if (mq_on(a)) {          /* no lock: the callback puts each message into the jack at its own frame (core/src/evq.rs) */
         uint64_t t = now_us();
         for (int i = 0; i < n; i += 3) fm1ntt_evq_push(a->mevq, t, b + i, (size_t)(n - i < 3 ? n - i : 3));
     } else {
@@ -797,9 +811,7 @@ static void panic_all(App *a) {
         m[0] = (uint8_t)(0xB0 | ch); m[1] = 123; m[2] = 0; midi_send(a, m, 3, ch == 0);
         m[1] = 120; midi_send(a, m, 3, 0);
     }
-    lock(a);
-    for (int id = 0; id < 41; id++) fm1ntt_key(a->m, id, 0);
-    unlock(a);
+    for (int id = 0; id < 41; id++) key_id(a, id, 0);
     a->midi_held = 0;
     say(a, 1, "All notes off on every channel; every key released", NULL);
 }
@@ -2836,8 +2848,17 @@ static int selftest(void) {
             SDL_Delay(2);
             audio_step(&a, loud, 2048);
             CHECK(fm1ntt_evq_len(a.mevq) == 0 && fm1ntt_evq_dropped(a.mevq) == 0);
-            a.paused = 1; midi_send(&a, on, 3, 0); a.paused = 0;
-            CHECK(fm1ntt_evq_len(a.mevq) == 0);
+            /* keys, encoders and the pot take the same road, in order; the callback applies them at their frames, and while paused it applies them at once */
+            key_id(&a, 20, 1); enc(&a, 2, 3); pot(&a, 5); key_id(&a, 21, 1);
+            CHECK(fm1ntt_evq_len(a.mevq) == 4 && a.enc_turns[2] >= 3 && fm1ntt_keys_down(a.m) == 0);
+            SDL_Delay(2);
+            audio_step(&a, loud, 2048);
+            CHECK(fm1ntt_evq_len(a.mevq) == 0 && fm1ntt_keys_down(a.m) == ((1ULL << 20) | (1ULL << 21)));
+            a.paused = 1; key_id(&a, 20, 0); key_id(&a, 21, 0);
+            CHECK(fm1ntt_evq_len(a.mevq) == 2);
+            audio_step(&a, loud, 2048);
+            CHECK(fm1ntt_evq_len(a.mevq) == 0 && fm1ntt_keys_down(a.m) == 0);       /* paused: applied at once, nothing kept for later */
+            a.paused = 0;
             fm1ntt_evq_free(a.mevq); a.mevq = NULL; a.mq_live = 0;
         }
         act(&a, A_L2); CHECK(a.pv_on == 1);
@@ -3489,9 +3510,9 @@ int main(int argc, char **argv) {
                 char res[240];
                 DemoWin w = {ren, tex, canvas, 0};
                 int pz = a.paused;
-                a.paused = 1;
+                lock(&a); a.paused = 1; a.mq_live = 0; if (a.mevq) fm1ntt_apply_events(a.m, a.mevq); unlock(&a);      /* the demo steps its own clock: its inputs go straight in */
                 rec_demo_run(mask, fm1ntt_loaded(a.m) && a.fw_path[0] ? a.fw_path : (dflt[0] ? dflt : NULL), fm1ntt_loaded(a.m) && a.fw_path[0] ? a.fw_raw : (dflt[0] && has_ext(dflt, ".bin")), 1, demo_win_progress, &w, res, sizeof res);
-                a.paused = pz;
+                a.paused = pz; a.mq_live = a.dev != 0;
                 say(&a, strstr(res, "done") ? 1 : 2, "%s", res);
             } else say(&a, 0, "Rec demo cancelled", NULL);
             dirty = 1;

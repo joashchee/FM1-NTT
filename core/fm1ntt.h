@@ -115,6 +115,10 @@ typedef struct fm1ntt_evq fm1ntt_evq;                                           
 fm1ntt_evq *fm1ntt_evq_new(size_t capacity);                                                /* 16 to 65536 messages */
 void fm1ntt_evq_free(fm1ntt_evq *q);
 int fm1ntt_evq_push(const fm1ntt_evq *q, uint64_t ts_us, const uint8_t *bytes, size_t len);  /* 1 to 3 bytes, stamped on the host's monotonic microsecond clock; 0 queued, -1 refused (counted) */
+int fm1ntt_evq_push_key(const fm1ntt_evq *q, uint64_t ts_us, int id, int down);               /* the machine's inputs through the same queue, in the same order: a key 0-40, */
+int fm1ntt_evq_push_encoder(const fm1ntt_evq *q, uint64_t ts_us, int enc, int clicks);      /* an encoder 0-6, */
+int fm1ntt_evq_push_pot(const fm1ntt_evq *q, uint64_t ts_us, int value);                    /* the pot 0-1023; each 0 queued, -1 refused */
+void fm1ntt_apply_events(fm1ntt_machine *m, const fm1ntt_evq *q);                           /* everything waiting into the machine at once, without running it (paused) */
 size_t fm1ntt_evq_len(const fm1ntt_evq *q);
 uint64_t fm1ntt_evq_dropped(const fm1ntt_evq *q);
 size_t fm1ntt_render_events(fm1ntt_machine *m, const fm1ntt_evq *q, uint64_t now_us, int16_t *out, size_t frames, uint32_t max_insns);   /* fm1ntt_render, with the queue's MIDI bytes put into the jack at their own frames */

@@ -48,6 +48,53 @@ pub unsafe extern "C" fn fm1ntt_evq_push(q: *const EvqHandle, ts_us: u64, bytes:
     }
 }
 
+/// A key of the machine's matrix (0 to 40) goes down (`down` non-zero) or up, stamped `ts_us`. 0 queued, -1 refused or an id out of range.
+///
+/// # Safety
+/// `q` is null or a live queue; only one thread pushes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_push_key(q: *const EvqHandle, ts_us: u64, id: c_int, down: c_int) -> c_int {
+    match q.as_ref() {
+        Some(q) if (0..41).contains(&id) && q.0.push_key(ts_us, id as u8, down != 0) => 0,
+        _ => -1,
+    }
+}
+
+/// An encoder (0 to 6) turns by `clicks`. 0 queued, -1 refused or out of range.
+///
+/// # Safety
+/// `q` is null or a live queue; only one thread pushes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_push_encoder(q: *const EvqHandle, ts_us: u64, enc: c_int, clicks: c_int) -> c_int {
+    match q.as_ref() {
+        Some(q) if (0..7).contains(&enc) && q.0.push_encoder(ts_us, enc as u8, clicks) => 0,
+        _ => -1,
+    }
+}
+
+/// The pot moves to `value` (0 to 1023, clamped). 0 queued, -1 refused.
+///
+/// # Safety
+/// `q` is null or a live queue; only one thread pushes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_evq_push_pot(q: *const EvqHandle, ts_us: u64, value: c_int) -> c_int {
+    match q.as_ref() {
+        Some(q) if q.0.push_pot(ts_us, value.clamp(0, 1023)) => 0,
+        _ => -1,
+    }
+}
+
+/// Takes every message waiting in `q` into the machine at once, without running it (the callback does this while paused, so nothing waits to land late).
+///
+/// # Safety
+/// `m` and `q` are live; only the calling thread consumes `q`.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_apply_events(m: *mut crate::capi::Handle, q: *const EvqHandle) {
+    if let Some(q) = q.as_ref() {
+        crate::capi::with(m, (), |mach| mach.apply_events(&q.0));
+    }
+}
+
 /// Messages waiting, and pushes refused so far.
 ///
 /// # Safety

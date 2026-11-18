@@ -394,7 +394,9 @@ impl Instrument {
                 self.render(&mut out[at..frame]);
                 at = frame;
             }
-            self.midi_bytes(&m.bytes[..m.len as usize]);
+            if m.kind == crate::evq::Kind::Midi {
+                self.midi_bytes(&m.bytes[..m.len as usize]);
+            }
         }
         self.render(&mut out[at..]);
     }

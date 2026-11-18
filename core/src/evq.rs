@@ -1,4 +1,4 @@
-//! A lock-free queue of timestamped MIDI messages from one producing thread (the UI, a MIDI port) to one consuming thread (the audio callback).
+//! A lock-free queue of timestamped input messages (MIDI, and the machine's keys, encoders and pot) from one producing thread (the UI, a MIDI port) to one consuming thread (the audio callback).
 //!
 //! The audio thread must never wait for a lock the UI thread holds (a stall is a dropout), and a note should land on its own frame, not at the start of the
 //! next buffer. The producer stamps each message with the host's monotonic microsecond clock and pushes it; the consumer (`Instrument::render_events`)
@@ -13,14 +13,28 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// A message longer than this is not queued (note, controller, pitch bend and program change fit; a system-exclusive does not, and the instrument ignores it anyway).
 pub const MAX_MSG: usize = 3;
 
+/// What a message is. MIDI carries 1 to 3 bytes; the others carry their numbers in `bytes[0]` and `val`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Midi,
+    /// `bytes[0]` the matrix id, `bytes[1]` 1 for down
+    Key,
+    /// `bytes[0]` the encoder, `val` the clicks
+    Encoder,
+    /// `val` the pot, 0 to 1023
+    Pot,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message {
     pub ts_us: u64,
+    pub kind: Kind,
     pub len: u8,
     pub bytes: [u8; MAX_MSG],
+    pub val: i32,
 }
 
-const EMPTY: Message = Message { ts_us: 0, len: 0, bytes: [0; MAX_MSG] };
+const EMPTY: Message = Message { ts_us: 0, kind: Kind::Midi, len: 0, bytes: [0; MAX_MSG], val: 0 };
 
 pub struct EventQueue {
     slots: Box<[UnsafeCell<Message>]>,
@@ -55,14 +69,9 @@ impl EventQueue {
         self.len() == 0
     }
 
-    /// Pushes from the producer thread: false (and a count) when the queue is full or the message is empty or longer than `MAX_MSG`.
+    /// Pushes MIDI from the producer thread: false (and a count) when the queue is full or the message is empty or longer than `MAX_MSG`.
     pub fn push(&self, ts_us: u64, bytes: &[u8]) -> bool {
         if bytes.is_empty() || bytes.len() > MAX_MSG {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        let head = self.head.load(Ordering::Relaxed);
-        if head.wrapping_sub(self.tail.load(Ordering::Acquire)) > self.mask {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -70,6 +79,30 @@ impl EventQueue {
         m.ts_us = ts_us;
         m.len = bytes.len() as u8;
         m.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.push_message(m)
+    }
+
+    /// A key of the machine's matrix (0 to 40) goes down or up.
+    pub fn push_key(&self, ts_us: u64, id: u8, down: bool) -> bool {
+        self.push_message(Message { ts_us, kind: Kind::Key, len: 2, bytes: [id, u8::from(down), 0], val: 0 })
+    }
+
+    /// An encoder (0 to 6) turns by `clicks`.
+    pub fn push_encoder(&self, ts_us: u64, enc: u8, clicks: i32) -> bool {
+        self.push_message(Message { ts_us, kind: Kind::Encoder, len: 1, bytes: [enc, 0, 0], val: clicks })
+    }
+
+    /// The pot moves to `value` (0 to 1023).
+    pub fn push_pot(&self, ts_us: u64, value: i32) -> bool {
+        self.push_message(Message { ts_us, kind: Kind::Pot, len: 0, bytes: [0; MAX_MSG], val: value })
+    }
+
+    fn push_message(&self, m: Message) -> bool {
+        let head = self.head.load(Ordering::Relaxed);
+        if head.wrapping_sub(self.tail.load(Ordering::Acquire)) > self.mask {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         // SAFETY: the slot at `head` is not readable by the consumer until `head` moves past it, and the producer is the only writer of it.
         unsafe { *self.slots[head & self.mask].get() = m };
         self.head.store(head.wrapping_add(1), Ordering::Release);
@@ -154,12 +187,25 @@ mod tests {
         assert_eq!(q.len(), 32);
         for i in 0..32u8 {
             let m = q.pop().unwrap();
-            assert_eq!((m.ts_us, m.len, m.bytes), (i as u64, 3, [0x90, i, 100]));
+            assert_eq!((m.ts_us, m.len, m.bytes, m.kind), (i as u64, 3, [0x90, i, 100], Kind::Midi));
         }
         assert!(q.pop().is_none());
         assert!(q.push(1, &[0xC0, 5]) && q.pop().unwrap().len == 2);
         assert!(!q.push(1, &[]) && !q.push(1, &[1, 2, 3, 4]), "empty and long messages are refused");
         assert_eq!(q.dropped(), 3);
+    }
+
+    #[test]
+    fn keys_encoders_and_the_pot_keep_their_numbers_and_their_order() {
+        let q = EventQueue::new(16);
+        assert!(q.push_key(1, 40, true) && q.push_encoder(2, 6, -3) && q.push_pot(3, 1023) && q.push(4, &[0x90, 60, 1]) && q.push_key(5, 14, false));
+        let got: Vec<Message> = std::iter::from_fn(|| q.pop()).collect();
+        assert_eq!(got.iter().map(|m| m.ts_us).collect::<Vec<_>>(), [1, 2, 3, 4, 5], "one queue, one order");
+        assert_eq!((got[0].kind, got[0].bytes[0], got[0].bytes[1]), (Kind::Key, 40, 1));
+        assert_eq!((got[1].kind, got[1].bytes[0], got[1].val), (Kind::Encoder, 6, -3));
+        assert_eq!((got[2].kind, got[2].val), (Kind::Pot, 1023));
+        assert_eq!((got[3].kind, got[3].len), (Kind::Midi, 3));
+        assert_eq!((got[4].kind, got[4].bytes[0], got[4].bytes[1]), (Kind::Key, 14, 0));
     }
 
     #[test]

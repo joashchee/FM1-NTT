@@ -236,11 +236,32 @@ impl Machine {
                 left = left.saturating_sub((self.instructions - before).min(u64::from(u32::MAX)) as u32);
                 at = frame;
             }
-            for &b in &m.bytes[..usize::from(m.len)] {
-                self.midi_in(b);
-            }
+            self.apply(&m);
         }
         real + self.render(&mut out[at * 2..], left)
+    }
+
+    /// One queued message into the machine: MIDI bytes into the jack, a key, an encoder, the pot.
+    fn apply(&mut self, m: &crate::evq::Message) {
+        use crate::evq::Kind;
+        match m.kind {
+            Kind::Midi => {
+                for &b in &m.bytes[..usize::from(m.len)] {
+                    self.midi_in(b);
+                }
+            }
+            Kind::Key => self.key(m.bytes[0], m.bytes[1] != 0),
+            Kind::Encoder => self.encoder(m.bytes[0], m.val),
+            Kind::Pot => self.pot(m.val.clamp(0, 1023) as u16),
+        }
+    }
+
+    /// Takes every message waiting in `q` into the machine at once, whatever its stamp, without running it: what the audio callback does while the machine is paused or
+    /// has nothing to render, so an input sent then is neither lost nor kept to be applied late, in a burst, on resume.
+    pub fn apply_events(&mut self, q: &crate::evq::EventQueue) {
+        while let Some(m) = q.pop() {
+            self.apply(&m);
+        }
     }
 
     /// Main-loop pacing, 0 (off, exact) to 3 (the most): the firmware's main loop is slowed to leave the host time, and nothing else is.
@@ -713,5 +734,65 @@ mod tests {
         c.render_events(&q, end + 100_000, &mut o, 400_000_000);
         assert_eq!(q.len(), 1, "the future message waits");
         q.pop();
+    }
+
+    /// Keys, encoders and the pot through the queue, stamped at frames, are the same as sending them directly after those frames; `apply_events` takes them at once
+    /// without running the machine. Needs a firmware that answers its panel (the stock one, or Felucca from the Pack).
+    #[test]
+    fn queued_keys_encoders_and_pot_equal_direct() {
+        use crate::evq::EventQueue;
+        let candidates = [concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/FM-1.fwsc"), concat!(env!("CARGO_MANIFEST_DIR"), "/../../FM1-NTT-Firmware-Pack/felucca/felucca-1.8.2.fwsc")];
+        let Some(pkg) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else {
+            eprintln!("skipped: neither the stock firmware nor the Pack's Felucca is here");
+            return;
+        };
+        let boot = || {
+            let mut m = Machine::from_package(&pkg).unwrap();
+            let mut w = vec![0i16; 2 * 44_100];
+            for _ in 0..3 {
+                m.render(&mut w, 400_000_000);
+            }
+            m
+        };
+        let frames = 12_000usize;
+        // at frame 2000 a note key goes down, at 4000 an encoder turns, at 6000 the pot moves, at 8000 the key comes up
+        let mut a = boot();
+        let mut direct = vec![0i16; 2 * frames];
+        let seg = |m: &mut Machine, out: &mut [i16], from: usize, to: usize| {
+            m.render(&mut out[2 * from..2 * to], 400_000_000);
+        };
+        seg(&mut a, &mut direct, 0, 2000);
+        a.key(30, true);
+        seg(&mut a, &mut direct, 2000, 4000);
+        a.encoder(2, 3);
+        seg(&mut a, &mut direct, 4000, 6000);
+        a.pot(300);
+        seg(&mut a, &mut direct, 6000, 8000);
+        a.key(30, false);
+        seg(&mut a, &mut direct, 8000, frames);
+        let mut b = boot();
+        let q = EventQueue::new(32);
+        let us = |f: f64| 5_000_000 + (f * 1e6 / 44_100.0).round() as u64;
+        assert!(q.push_key(us(2000.0), 30, true) && q.push_encoder(us(4000.0), 2, 3) && q.push_pot(us(6000.0), 300) && q.push_key(us(8000.0), 30, false));
+        let mut queued = vec![0i16; 2 * frames];
+        b.render_events(&q, us(frames as f64), &mut queued, 1_200_000_000);
+        assert!(q.is_empty());
+        assert_eq!(direct, queued, "the queued inputs are the direct ones, to the sample");
+        let mut none = boot();
+        let mut silent = vec![0i16; 2 * frames];
+        none.render(&mut silent, 1_200_000_000);
+        assert!(silent.iter().zip(&queued).filter(|(x, y)| x != y).count() > 1000, "the inputs change the sound (otherwise this test proves nothing)");
+        // apply_events: at once, without running
+        let mut c = boot();
+        let before = c.instructions();
+        assert!(q.push_key(1, 30, true) && q.push_key(2, 31, true) && q.push_encoder(3, 2, 1) && q.push_pot(4, 5000));
+        c.apply_events(&q);
+        assert!(q.is_empty());
+        assert_eq!(c.keys_down(), (1 << 30) | (1 << 31));
+        assert_eq!(c.instructions(), before, "applying runs nothing");
+        // out-of-range ids and numbers are ignored or clamped by the machine, never a panic
+        assert!(q.push_key(1, 200, true) && q.push_encoder(1, 99, 5) && q.push_pot(1, -50));
+        c.apply_events(&q);
+        assert_eq!(c.keys_down(), (1 << 30) | (1 << 31));
     }
 }
