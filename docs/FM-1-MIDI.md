@@ -71,3 +71,10 @@ Sent through the emulated 3.5 mm MIDI jack (`fwprobe midi:`), read off the scree
 ## What FM1-NTT does with the table (2026-11-19)
 
 The instrument host can answer the effect channel like the stock firmware's table says (`core/src/stockmap.rs`; the global **STOCK EFFECT CCS**, off by default). Controllers 0 to 23 on the effect channel go to the first effect of that name in the package's chain; a switch bypasses the effect (not saved in a package); a missing effect is ignored. The note channel is untouched, so CC 1 there is still the mod wheel. **How a value lands on our effects is our own** (they are written fresh and fitted to nothing): cutoff is 100 Hz to 20 kHz in 100 log steps, Q 0-10 is our 0-100, a reverb's type is its damping and its decay its room, a delay's decay is its feedback and its rate a shorter time, chorus and phaser frequencies are 0.1 Hz units with 0 the slowest. This follows the table, not a measurement: the stock firmware itself reacted to only three of these controllers in the emulator (above).
+
+## More tried in the emulator (2026-11-19, `core/tests/stock.rs`)
+
+- **All 128 Program Changes** each draw a screen unlike the one before and come back identical (values 0 to 127 are voices 001 to 128).
+- **A DX7 bulk dump** (`F0 43 00 09 20 00`, 4096 bytes, checksum, `F7`) over the jack changes the screen (the bank question); it must be paced like a real 31250 baud wire: 16 bytes then 10 ms worked, the whole dump at once did nothing.
+- **FB (Continue) and FA (Start)** leave the machine in exactly the same state (identical sound and screen after a Stop); that they start anything was not shown.
+- **CC 1 is the filter type on channel 1 as well as channel 2, sample for sample, with the note channel at its default ALL.** The table's warning that CC 1 on the effect channel is not the mod wheel is right, but it does not mean channel 1 keeps a mod wheel: with omni notes both channels act as effect controllers. A set note channel (GLO page 1) was not tried.

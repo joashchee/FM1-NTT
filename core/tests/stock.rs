@@ -202,3 +202,125 @@ fn both_octave_buttons_reset() {
     assert!(differs(&changed, &reset) > 20, "the reset showed no change from a transposed, raised state");
     assert_eq!(differs(&reset, &shot(&fresh)), 0, "after the reset the machine looks like a fresh one that was reset");
 }
+
+/// Renders `ms` of emulated time and returns the left channel.
+fn capture(m: &mut Machine, ms: usize) -> Vec<i16> {
+    let mut all = Vec::new();
+    let mut out = vec![0i16; 2 * 441];
+    for _ in 0..ms / 10 {
+        m.render(&mut out, 4_000_000);
+        all.extend(out.iter().step_by(2));
+    }
+    all
+}
+
+fn send(m: &mut Machine, bytes: &[u8]) {
+    for &b in bytes {
+        m.midi_in(b);
+    }
+}
+
+fn mean_diff(a: &[i16], b: &[i16]) -> f64 {
+    let n = a.len().min(b.len()).max(1);
+    a.iter().zip(b).map(|(x, y)| (f64::from(*x) - f64::from(*y)).abs()).sum::<f64>() / n as f64
+}
+
+/// Program Change 0 to 127 is voices 001 to 128 (MIDI table): every value draws a screen unlike the one before it, going up and coming back down, and the same value
+/// twice draws the same screen (the emulator is deterministic, so a name that did not change is a program that did not take).
+#[test]
+fn program_change_reaches_all_128_voices() {
+    let Some(mut m) = stock() else { return };
+    run(&mut m, 3000);
+    // the machine starts on voice 001, so program 0 shows no change from boot: begin from 1 and fill 0 in afterwards
+    send(&mut m, &[0xC0, 1]);
+    run(&mut m, 250);
+    let mut last = shot(&m);
+    let mut seen = vec![Vec::new(), last.clone()];
+    for p in 2..128u8 {
+        send(&mut m, &[0xC0, p]);
+        run(&mut m, 250);
+        let s = shot(&m);
+        assert!(differs(&last, &s) > 20, "program {p} looks like program {}", p - 1);
+        seen.push(s.clone());
+        last = s;
+    }
+    send(&mut m, &[0xC0, 0]);
+    run(&mut m, 250);
+    assert!(differs(&last, &shot(&m)) > 20, "program 0 looks like program 127");
+    for p in [127u8, 64, 1] {
+        send(&mut m, &[0xC0, p]);
+        run(&mut m, 250);
+        assert_eq!(differs(&seen[p as usize], &shot(&m)), 0, "program {p} drew a different screen the second time");
+    }
+}
+
+/// CC 1 is the filter type (MIDI table: on the effect channel, default 2, not the mod wheel). **Found in the emulator: with the note channel at its default, ALL (omni),
+/// CC 1 does the same on channel 1 as on channel 2, to the sample**: the table's warning about the mod wheel holds only when a note channel is set apart from the
+/// effect channel (not tried: that setting is on a GLO page). This pins what was seen.
+#[test]
+fn cc1_is_the_filter_type_on_every_channel_with_omni_notes() {
+    let played = |msg: &[u8]| {
+        let mut m = stock().unwrap();
+        run(&mut m, 3000);
+        send(&mut m, msg);
+        run(&mut m, 100);
+        send(&mut m, &[0x90, 60, 100]);
+        let held = capture(&mut m, 800);
+        send(&mut m, &[0x80, 60, 0]);
+        let mut all = held;
+        all.extend(capture(&mut m, 600));
+        all
+    };
+    let none = played(&[]);
+    let fx = played(&[0xB1, 1, 2]);
+    let note_ch = played(&[0xB0, 1, 2]);
+    assert!(none.iter().any(|s| s.abs() > 100), "the voice made no sound");
+    assert!(mean_diff(&none, &fx) > 5.0, "CC 1 on channel 2 did not change the sound");
+    assert_eq!(fx, note_ch, "with omni notes CC 1 on channels 1 and 2 sounded different");
+}
+
+/// Continue (FB) is the same as Start (FA) (MIDI table: no resume). Neither is a no-op against a run with no real-time byte... that is not asserted (nothing is
+/// playing to start); what is: FA and FB leave the machine in exactly the same state, and Stop after either does too.
+#[test]
+fn continue_acts_as_start() {
+    let run_with = |rt: &[u8]| {
+        let mut m = stock().unwrap();
+        run(&mut m, 3000);
+        send(&mut m, rt);
+        let a = capture(&mut m, 500);
+        send(&mut m, &[0xFC]);
+        let b = capture(&mut m, 300);
+        (a, b, shot(&m))
+    };
+    let start = run_with(&[0xF8, 0xFA, 0xF8, 0xF8]);
+    let cont = run_with(&[0xF8, 0xFB, 0xF8, 0xF8]);
+    assert_eq!(start, cont, "Continue did not act as Start");
+}
+
+/// A DX7 32-voice bulk dump (F0 43 00 09 20 00, 4096 bytes, checksum, F7) is accepted and the unit asks which bank to write it to: the screen changes
+/// from the home screen and the machine stays alive. **The jack must be paced** (16 bytes, then 10 ms, a little over 31250 baud): the whole dump sent at once drew
+/// nothing, because the jack's buffer overflows (the real wire is that slow too).
+#[test]
+fn a_dx7_bank_dump_asks_for_a_bank() {
+    let Some(mut m) = stock() else { return };
+    run(&mut m, 3000);
+    let home = shot(&m);
+    let mut data = vec![0u8; 4096];
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = (i * 7 % 100) as u8;
+    }
+    let sum = (!data.iter().fold(0u32, |a, b| a + u32::from(*b)) as u8).wrapping_add(1) & 0x7F;
+    let mut msg = vec![0xF0, 0x43, 0x00, 0x09, 0x20, 0x00];
+    msg.extend(&data);
+    msg.push(sum);
+    msg.push(0xF7);
+    for chunk in msg.chunks(16) {
+        send(&mut m, chunk);
+        run(&mut m, 10);
+    }
+    run(&mut m, 2000);
+    assert!(!m.halted());
+    let asked = shot(&m);
+
+    assert!(differs(&home, &asked) > 200, "a bank dump drew no question");
+}
