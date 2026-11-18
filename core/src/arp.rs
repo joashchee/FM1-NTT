@@ -42,6 +42,8 @@ const STEPS_PER_BEAT: [f64; 7] = [1.0, 2.0, 4.0, 8.0, 1.5, 3.0, 6.0];
 pub enum Event {
     On(u8, u8),
     Off(u8),
+    /// select a voice (the sequencer's patterns do; the arpeggiator never)
+    Program(u8),
 }
 
 pub struct Arp {
@@ -427,6 +429,7 @@ mod tests {
         assert!(ev.iter().all(|(_, e)| match e {
             Event::On(n, v) => *n < 128 && *v >= 1,
             Event::Off(n) => *n < 128,
+            Event::Program(_) => false,
         }));
         assert!(a.set(P_BPM, 9999) && a.get(P_BPM) == Some(300));
         assert!(!a.set(99, 1) && a.get(99).is_none());

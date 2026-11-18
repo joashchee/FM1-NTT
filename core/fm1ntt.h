@@ -127,6 +127,10 @@ size_t fm1ntt_inst_arp_count(const fm1ntt_inst *h);                             
 int fm1ntt_inst_arp_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
 int32_t fm1ntt_inst_arp_get(const fm1ntt_inst *h, int id);
 int fm1ntt_inst_arp_set(fm1ntt_inst *h, int id, int value);                                 /* off releases the held note */
+size_t fm1ntt_inst_seq_count(const fm1ntt_inst *h, size_t group);                           /* the step sequencer (core/src/seq.rs): group 0 its settings, 1 the pattern being edited */
+int fm1ntt_inst_seq_param(const fm1ntt_inst *h, size_t group, size_t index, int32_t info[4], char *name, size_t cap);
+int32_t fm1ntt_inst_seq_get(const fm1ntt_inst *h, int id);
+int fm1ntt_inst_seq_set(fm1ntt_inst *h, int id, int value);                                 /* starting it stops the arpeggiator */
 size_t fm1ntt_inst_fx_count(const fm1ntt_inst *h);                                          /* the effects in order, and each one's name and parameters as the engine's */
 size_t fm1ntt_inst_fx_name(const fm1ntt_inst *h, size_t index, char *out, size_t cap);
 size_t fm1ntt_inst_fx_param_count(const fm1ntt_inst *h, size_t fx);

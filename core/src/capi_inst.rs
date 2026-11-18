@@ -461,6 +461,54 @@ pub unsafe extern "C" fn fm1ntt_inst_arp_set(h: *mut InstHandle, id: c_int, valu
     }
 }
 
+/// The sequencer's parameters (`seq.rs`): `group` 0 the settings, 1 the pattern being edited (its voice and each step's note and velocity). Count, then `index`'s
+/// { id, min, max, default } and name (0 ok, -1 out of range).
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_seq_count(h: *const InstHandle, group: usize) -> usize {
+    h.as_ref().map_or(0, |h| h.0.seq_params(group.min(1)).len())
+}
+
+/// # Safety
+/// `info` has room for 4 values; `name` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_seq_param(h: *const InstHandle, group: usize, index: usize, info: *mut i32, name: *mut c_char, cap: usize) -> c_int {
+    let (Some(h), false) = (h.as_ref(), info.is_null()) else { return -1 };
+    let p = h.0.seq_params(group.min(1));
+    let Some(d) = p.get(index) else { return -1 };
+    *info = d.id as i32;
+    *info.add(1) = d.min;
+    *info.add(2) = d.max;
+    *info.add(3) = d.default;
+    put_str(&d.name, name, cap);
+    0
+}
+
+/// The value of sequencer parameter `id` (step ids belong to the pattern being edited), or `i32::MIN`.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_seq_get(h: *const InstHandle, id: c_int) -> i32 {
+    h.as_ref().and_then(|h| h.0.get_seq_param(id.clamp(0, 65535) as u16)).unwrap_or(i32::MIN)
+}
+
+/// Sets sequencer parameter `id` (clamped); 0 ok, -1 no such parameter. Starting it stops the arpeggiator (they exclude each other); stopping it releases its note.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_seq_set(h: *mut InstHandle, id: c_int, value: c_int) -> c_int {
+    let Some(h) = h.as_mut() else { return -1 };
+    if (0..=65535).contains(&id) && h.0.set_seq_param(id as u16, value) {
+        0
+    } else {
+        -1
+    }
+}
+
 /// The instrument's effects, in order: how many, and an effect's name (`out`, NUL-terminated, cut to `cap`; the full length, 0 for none).
 ///
 /// # Safety
@@ -604,6 +652,12 @@ mod tests {
             crate::capi::fm1ntt_free(mach);
             fm1ntt_evq_free(q);
             fm1ntt_evq_free(std::ptr::null_mut());
+            assert_eq!((fm1ntt_inst_seq_count(h, 0), fm1ntt_inst_seq_count(h, 1), fm1ntt_inst_seq_count(h, 9)), (10, 33, 33));
+            assert_eq!(fm1ntt_inst_seq_param(h, 1, 1, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
+            assert_eq!((info[0], info[1], info[2], CStr::from_ptr(pn.as_ptr()).to_str().unwrap()), (101, 0, 127, "STEP 1 NOTE (0 REST)"));
+            assert_eq!((fm1ntt_inst_seq_set(h, 101, 62), fm1ntt_inst_seq_get(h, 101)), (0, 62));
+            assert_eq!((fm1ntt_inst_seq_set(h, 55, 1), fm1ntt_inst_seq_get(h, 55)), (-1, i32::MIN));
+            assert_eq!(fm1ntt_inst_seq_set(h, 101, 0), 0);
             assert_eq!(fm1ntt_inst_arp_count(h), 10);
             assert_eq!(fm1ntt_inst_arp_param(h, 3, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
             assert_eq!((CStr::from_ptr(pn.as_ptr()).to_str().unwrap(), info[1], info[2]), ("BPM", 30, 300));

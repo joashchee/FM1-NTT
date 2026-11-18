@@ -7,6 +7,7 @@
 use crate::{
     analog::Analog,
     arp::{Arp, Event},
+    seq::Seq,
     fm4::Fm4,
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
@@ -36,6 +37,7 @@ pub struct Instrument {
     rate: f64,
     clock: crate::evq::Clock,
     arp: Arp,
+    seq: Seq,
     arp_events: Vec<(usize, Event)>,
     // MIDI parser state
     status: u8,
@@ -99,6 +101,7 @@ impl Instrument {
             rate,
             clock: crate::evq::Clock::new(),
             arp: Arp::new(rate),
+            seq: Seq::new(rate),
             arp_events: Vec::with_capacity(64),
             status: 0,
             data: [0; 2],
@@ -114,6 +117,24 @@ impl Instrument {
             if !inst.arp.set(id, v) {
                 return fail(format!("the arpeggiator has no parameter {id}"));
             }
+        }
+        for &(id, v) in &pkg.seq {
+            if !inst.seq.set(id, v) {
+                return fail(format!("the sequencer has no parameter {id}"));
+            }
+        }
+        for &(p, st, note, vel) in &pkg.steps {
+            if !inst.seq.set_step(usize::from(p), usize::from(st), note, vel) {
+                return fail(format!("step {p}.{st} is outside 16 patterns of 16 steps"));
+            }
+        }
+        for &(p, v) in &pkg.seq_voices {
+            if !inst.seq.set_voice(usize::from(p), v) {
+                return fail(format!("pattern {p} is outside 16 patterns"));
+            }
+        }
+        if inst.arp.on() && inst.seq.on() {
+            return fail("the arpeggiator and the sequencer exclude each other: a package has only one on");
         }
         for f in &pkg.fx {
             let Some(mut e) = fx::make(&f.name, rate) else { return fail(format!("no effect called {:?}", f.name)) };
@@ -211,6 +232,9 @@ impl Instrument {
     pub fn note_on(&mut self, note: u8, velocity: u8) {
         if self.arp.on() {
             self.arp.note_on(note, velocity);
+        } else if self.seq.on() {
+            self.seq.record_note(note, velocity); // when armed, into the step it is nearest to; either way it is played live over the sequence
+            self.engine.note_on(note, velocity);
         } else {
             self.engine.note_on(note, velocity);
         }
@@ -226,6 +250,7 @@ impl Instrument {
 
     pub fn all_off(&mut self) {
         self.arp.all_off();
+        self.seq.all_off();
         self.flush_arp();
         self.engine.all_off();
     }
@@ -242,21 +267,51 @@ impl Instrument {
     /// Sets an arpeggiator parameter. Switching it off releases the note it was holding; switching it on does not touch notes the engine is already playing.
     pub fn set_arp_param(&mut self, id: u16, v: i32) -> bool {
         let ok = self.arp.set(id, v);
+        if ok && id == crate::arp::P_ON && v == 1 {
+            self.seq.all_off(); // the arpeggiator and the sequencer exclude each other
+        }
         self.flush_arp();
         ok
     }
 
-    /// Applies the arpeggiator's queued note-offs (a stop) at once.
+    /// One event of the arpeggiator or the sequencer into the engine: a note on or off, or a pattern's voice.
+    fn apply_event(&mut self, ev: Event) {
+        match ev {
+            Event::On(n, v) => self.engine.note_on(n, v),
+            Event::Off(n) => self.engine.note_off(n),
+            Event::Program(p) => self.set_program(usize::from(p)),
+        }
+    }
+
+    /// Applies the arpeggiator's and the sequencer's queued note-offs (a stop) at once.
     fn flush_arp(&mut self) {
         self.arp_events.clear();
         self.arp.advance(0, &mut self.arp_events);
+        self.seq.advance(0, &mut self.arp_events);
         for k in 0..self.arp_events.len() {
-            match self.arp_events[k].1 {
-                Event::On(n, v) => self.engine.note_on(n, v),
-                Event::Off(n) => self.engine.note_off(n),
-            }
+            let ev = self.arp_events[k].1;
+            self.apply_event(ev);
         }
         self.arp_events.clear();
+    }
+
+    /// The sequencer's parameters: group 0 the settings, group 1 the pattern being edited (`seq.rs`).
+    pub fn seq_params(&self, group: usize) -> Vec<ParamDesc> {
+        self.seq.params(group)
+    }
+
+    pub fn get_seq_param(&self, id: u16) -> Option<i32> {
+        self.seq.get(id)
+    }
+
+    /// Sets a sequencer parameter. The sequencer and the arpeggiator exclude each other (as on the FM-1): starting one stops the other.
+    pub fn set_seq_param(&mut self, id: u16, v: i32) -> bool {
+        let ok = self.seq.set(id, v);
+        if ok && id == crate::seq::P_ON && v == 1 {
+            self.arp.set(crate::arp::P_ON, 0);
+        }
+        self.flush_arp();
+        ok
     }
 
     pub fn sounding(&self) -> usize {
@@ -351,6 +406,7 @@ impl Instrument {
         for chunk in out.chunks_mut(SLICE) {
             self.arp_events.clear();
             self.arp.advance(chunk.len(), &mut self.arp_events);
+            self.seq.advance(chunk.len(), &mut self.arp_events);
             if self.arp_events.is_empty() {
                 self.engine.render(chunk);
             } else {
@@ -362,10 +418,7 @@ impl Instrument {
                         self.engine.render(&mut chunk[at..frame]);
                         at = frame;
                     }
-                    match ev {
-                        Event::On(n, v) => self.engine.note_on(n, v),
-                        Event::Off(n) => self.engine.note_off(n),
-                    }
+                    self.apply_event(ev);
                 }
                 self.engine.render(&mut chunk[at..]);
             }
@@ -447,6 +500,24 @@ impl Instrument {
             let v = self.arp.get(d.id).unwrap_or(d.default);
             if v != d.default {
                 p.arp.push((d.id, v));
+            }
+        }
+        for d in self.seq.params(0) {
+            let v = self.seq.get(d.id).unwrap_or(d.default);
+            if v != d.default {
+                p.seq.push((d.id, v));
+            }
+        }
+        for pat in 0..crate::seq::PATTERNS {
+            for st in 0..crate::seq::STEPS {
+                if let Some((note, vel)) = self.seq.step(pat, st) {
+                    if note != 0 {
+                        p.steps.push((pat as u8, st as u8, note, vel));
+                    }
+                }
+            }
+            if let Some(v) = self.seq.voice(pat).filter(|&v| v >= 0) {
+                p.seq_voices.push((pat as u8, v));
             }
         }
         let skip_patch = self.engine.current_voice().is_some();
@@ -701,5 +772,51 @@ mod tests {
         assert!(q.push(5_000_001, &[0x42]));
         i.render_events(&q, 5_020_000, &mut by);
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_sequencer_package_plays_its_patterns_with_their_voices_and_excludes_the_arpeggiator() {
+        let mut p = Package::new("S", "fm6", "MIT");
+        p.seq = vec![(crate::seq::P_ON, 1), (crate::seq::P_BPM, 240), (crate::seq::P_STEPS, 2), (crate::seq::P_CHAIN, 2)];
+        p.steps = vec![(0, 0, 60, 100), (0, 1, 64, 100), (1, 0, 67, 100)];
+        p.seq_voices = vec![(1, 3)];
+        let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut loud = 0;
+        let mut b = vec![0i16; 1024];
+        for _ in 0..90 {
+            i.render(&mut b);
+            seen.insert(i.program());
+            loud += b.iter().filter(|&&x| x.abs() > 200).count();
+        }
+        assert!(seen.contains(&3) && seen.contains(&0), "pattern 2 selected voice 3 and pattern 1 left voice 0: {seen:?}");
+        assert!(loud > 2000, "the sequence sounded ({loud})");
+        // text and back
+        let back = i.to_package("t", "0");
+        let again = Package::parse(&back.to_text()).unwrap();
+        assert_eq!((again.seq.clone(), again.steps.clone(), again.seq_voices.clone()), (back.seq.clone(), back.steps.clone(), back.seq_voices.clone()));
+        assert!(back.steps.contains(&(0, 0, 60, 100)) && back.seq_voices == vec![(1, 3)]);
+        // starting the arpeggiator stops the sequencer, and the other way round
+        assert!(i.set_arp_param(crate::arp::P_ON, 1));
+        assert_eq!(i.get_seq_param(crate::seq::P_ON), Some(0));
+        assert!(i.set_seq_param(crate::seq::P_ON, 1));
+        assert_eq!(i.get_arp_param(crate::arp::P_ON), Some(0));
+        // a package with both on, an unknown id and a step off the grid are refused
+        let mut both = p.clone();
+        both.arp = vec![(crate::arp::P_ON, 1)];
+        assert!(Instrument::from_package(&both, 44_100.0, &none).is_err());
+        let mut bad = p.clone();
+        bad.seq.push((77, 1));
+        assert!(Instrument::from_package(&bad, 44_100.0, &none).is_err());
+        let mut off = p.clone();
+        off.steps.push((0, 16, 60, 100));
+        assert!(Instrument::from_package(&off, 44_100.0, &none).is_err());
+        // stopping releases the note it was playing
+        i.set_seq_param(crate::seq::P_ON, 0);
+        let mut c = vec![0i16; 4410];
+        for _ in 0..40 {
+            i.render(&mut c);
+        }
+        assert_eq!(i.sounding(), 0);
     }
 }

@@ -13,6 +13,7 @@ pub const MAX_FX: usize = 64;
 pub const MAX_MAP: usize = 128;
 pub const MAX_PARAMS: usize = 1024;
 pub const MAX_ARP: usize = 32;
+pub const MAX_STEPS: usize = 256;
 
 fn bad<T>(why: impl Into<String>) -> Result<T> {
     Err(Error::BadImage(format!("package: {}", why.into())))
@@ -159,6 +160,10 @@ pub struct Package {
     pub params: Vec<(u16, i32)>,
     /// the arpeggiator's settings (`arp N = V`, ids as in `arp.rs`); empty means it is off
     pub arp: Vec<(u16, i32)>,
+    /// the step sequencer (`seq.rs`): its settings (`seq N = V`), the steps that are not rests (`step P S = NOTE VELOCITY`) and each pattern's voice (`seqvoice P = V`)
+    pub seq: Vec<(u16, i32)>,
+    pub steps: Vec<(u8, u8, u8, u8)>,
+    pub seq_voices: Vec<(u8, i32)>,
     pub samples: Vec<SampleRef>,
     pub fx: Vec<FxEntry>,
     pub map: Vec<MapEntry>,
@@ -178,6 +183,9 @@ impl Package {
             voices: Vec::new(),
             params: Vec::new(),
             arp: Vec::new(),
+            seq: Vec::new(),
+            steps: Vec::new(),
+            seq_voices: Vec::new(),
             samples: Vec::new(),
             fx: Vec::new(),
             map: Vec::new(),
@@ -215,6 +223,15 @@ impl Package {
         }
         for (id, v) in &self.arp {
             t += &format!("arp {id} = {v}\n");
+        }
+        for (id, v) in &self.seq {
+            t += &format!("seq {id} = {v}\n");
+        }
+        for &(p, st, note, vel) in &self.steps {
+            t += &format!("step {p} {st} = {note} {vel}\n");
+        }
+        for (p, v) in &self.seq_voices {
+            t += &format!("seqvoice {p} = {v}\n");
         }
         for s in &self.samples {
             t += &format!("sample {} = {}", s.note, one(&s.file));
@@ -305,6 +322,33 @@ impl Package {
                     let id = kw.next().and_then(|s| s.parse::<u16>().ok());
                     let Some(id) = id else { return bad(format!("line {at}: arp needs an id")) };
                     p.arp.push((id, num(v)?));
+                }
+                "seq" => {
+                    if p.seq.len() >= MAX_ARP {
+                        return bad("too many sequencer settings");
+                    }
+                    let id = kw.next().and_then(|s| s.parse::<u16>().ok());
+                    let Some(id) = id else { return bad(format!("line {at}: seq needs an id")) };
+                    p.seq.push((id, num(v)?));
+                }
+                "step" => {
+                    if p.steps.len() >= MAX_STEPS {
+                        return bad("more than 256 steps");
+                    }
+                    let (pat, st) = (kw.next().and_then(|s| s.parse::<u8>().ok()), kw.next().and_then(|s| s.parse::<u8>().ok()));
+                    let (Some(pat), Some(st)) = (pat, st) else { return bad(format!("line {at}: step needs a pattern and a step")) };
+                    let mut it = v.split_whitespace();
+                    let (note, vel) = (it.next().and_then(|s| s.parse::<u8>().ok()), it.next().and_then(|s| s.parse::<u8>().ok()));
+                    let (Some(note), Some(vel)) = (note, vel) else { return bad(format!("line {at}: a step is `NOTE VELOCITY`")) };
+                    p.steps.push((pat, st, note, vel));
+                }
+                "seqvoice" => {
+                    if p.seq_voices.len() >= 16 {
+                        return bad("more than 16 pattern voices");
+                    }
+                    let pat = kw.next().and_then(|s| s.parse::<u8>().ok());
+                    let Some(pat) = pat else { return bad(format!("line {at}: seqvoice needs a pattern")) };
+                    p.seq_voices.push((pat, num(v)?));
                 }
                 "sample" => {
                     if p.samples.len() >= MAX_SAMPLES {
@@ -464,5 +508,18 @@ mod tests {
         assert_eq!(p.engine, "analog");
         assert_eq!(p.program, 0, "past the bank: back to 0");
         assert!(!p.verified());
+    }
+
+    #[test]
+    fn sequencer_lines_parse_round_trip_and_refuse_nonsense() {
+        let t = "fm1i = 1\nname = S\nengine = analog\nlicence = MIT\nseq 0 = 1\nseq 1 = 90\nstep 0 3 = 60 100\nstep 15 15 = 127 1\nseqvoice 2 = 5\n";
+        let p = Package::parse(t).unwrap();
+        assert_eq!((p.seq.clone(), p.steps.clone(), p.seq_voices.clone()), (vec![(0, 1), (1, 90)], vec![(0, 3, 60, 100), (15, 15, 127, 1)], vec![(2, 5)]));
+        assert_eq!(Package::parse(&p.to_text()).unwrap(), p);
+        for bad in ["step 0 = 60 100", "step 0 3 = 60", "step 0 3 = 300 100", "step x 3 = 60 100", "seqvoice = 3", "seq = 3"] {
+            assert!(Package::parse(&format!("fm1i = 1\nname = S\nengine = analog\nlicence = MIT\n{bad}\n")).is_err(), "{bad}");
+        }
+        let many: String = (0..300).map(|i| format!("step {} {} = 60 100\n", i % 16, i % 16)).collect();
+        assert!(Package::parse(&format!("fm1i = 1\nname = S\nengine = analog\nlicence = MIT\n{many}")).is_err(), "more than 256 steps");
     }
 }
