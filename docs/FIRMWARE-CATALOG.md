@@ -90,7 +90,7 @@ The three `.fwsc` hash reads that first looked like MISMATCHes were **truncated 
 
 ## MPL-2.0 firmwares, 2026-11-18
 
-The maintainer asked for all MPL-2.0 firmwares to be included. Each was read from its own notice files at the release tag (not the repository badge); `fm1tastik/scripts/research.py` gave the release, the `.fwsc` and its hash. **Built into the Pack on 2026-11-18: FRASIL, MIDIMON, MODELAR, J6 and TRIO** (the "Pass" rows; not yet committed there). Their tier is the Pack (`MPL-2.0` is on its allowlist), with the platform's submodule sources (fm1-base, felucca-bsp) alongside.
+The maintainer asked for all MPL-2.0 firmwares to be included. Each was read from its own notice files at the release tag (not the repository badge); `fm1tastik/scripts/research.py` gave the release, the `.fwsc` and its hash. **Built into the Pack on 2026-11-18: FRASIL, MIDIMON, MODELAR, J6 and TRIO** (the "Pass" rows; committed and pushed there, `a2c9717`). Their tier is the Pack (`MPL-2.0` is on its allowlist), with the platform's submodule sources (fm1-base, felucca-bsp) alongside.
 
 | Firmware | Release | Result |
 |---|---|---|
