@@ -5,6 +5,7 @@
 //! quarter of real time). Only a level and a pitch are compared: a package whose timbre is wrong can still pass, and the line says what it measured.
 
 use crate::{
+    devices,
     engine::Engine,
     machine::Machine,
     Error, Result,
@@ -129,9 +130,20 @@ pub fn render_note(engine: &mut dyn Engine, note: u8, velocity: u8, secs: f64) -
     buf.iter().map(|&v| v as f64 / 32768.0).collect()
 }
 
-/// Plays `note` on a firmware in the emulated machine: boots it for 3 s, selects `program` (a MIDI program change on `channel`) if given, holds the note for
-/// `secs` s on the MIDI IN jack, and returns the held audio (mono, -1..1). The emulator runs at the speed of the host; on an R36S this is far slower than real time.
-pub fn emulator_note(firmware: &[u8], channel: u8, program: Option<u8>, note: u8, velocity: u8, secs: f64) -> Result<Vec<f64>> {
+/// One thing done to the emulated panel before the note: a firmware's own way to a preset (docs/FM6.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Turn encoder `n` (`devices::ENCODER_NAMES` order) by this many clicks at once.
+    Encoder(usize, i32),
+    /// Turn encoder `n` one click at a time, this many times (negative: down): for a list the firmware does not take a big turn of.
+    EncoderSingles(usize, i32),
+    /// Press and release button `n` (`devices::BUTTON_NAMES` order).
+    Button(usize),
+}
+
+/// Plays `note` on a firmware in the emulated machine: boots it for 3 s, selects `program` (a MIDI program change on `channel`) if given, does the panel `steps`, holds
+/// the note for `secs` s on the MIDI IN jack, and returns the held audio (mono, -1..1). The emulator runs at the speed of the host; on an R36S this is far slower than real time.
+pub fn emulator_note(firmware: &[u8], channel: u8, program: Option<u8>, steps: &[Step], note: u8, velocity: u8, secs: f64) -> Result<Vec<f64>> {
     let mut m = Machine::from_package(firmware)?;
     m.set_jit(true);
     let mut buf = vec![0i16; 2 * 4096];
@@ -156,6 +168,24 @@ pub fn emulator_note(firmware: &[u8], channel: u8, program: Option<u8>, note: u8
         m.midi_in(0xC0 | (channel & 15));
         m.midi_in(p & 127);
         run(&mut m, 0.2, None);
+    }
+    for &st in steps {
+        match st {
+            Step::Encoder(n, c) => m.encoder(n.min(devices::ENCODERS - 1) as u8, c),
+            Step::EncoderSingles(n, c) => {
+                for _ in 0..c.unsigned_abs().min(512) {
+                    m.encoder(n.min(devices::ENCODERS - 1) as u8, c.signum());
+                    run(&mut m, 0.12, None);
+                }
+            }
+            Step::Button(n) => {
+                let id = n.min(devices::BUTTONS - 1) as u8;
+                m.key(id, true);
+                run(&mut m, 0.15, None);
+                m.key(id, false);
+            }
+        }
+        run(&mut m, 1.2, None);
     }
     let mut out = Vec::new();
     m.midi_in(0x90 | (channel & 15));

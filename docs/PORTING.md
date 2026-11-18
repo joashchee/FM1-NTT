@@ -21,7 +21,7 @@ FM-1 firmware (.fwsc / .bin)
 R36S: the instrument host loads the package, plays it (pad, keys, USB MIDI), and edits it
 ```
 
-`port` (`core/examples/port.rs`) runs 1, 2 and 6 and, for a firmware with a bank, a first form of 5 (`port --verify`). **First run (Felucca 1.8.2, 2026-11-18): 8 voices ported, Copyleft tier; verification pitch within 5 cents on most voices but level not within 1 dB**, because a firmware's preset is chosen by encoder clicks and not a MIDI program change, so a voice cannot yet be paired with its preset automatically (ROADMAP 5c).
+`port` (`core/examples/port.rs`) runs 1, 2 and 6 and, for a firmware with a bank, a first form of 5 (`port --verify`). **Felucca 1.8.2, 2026-11-18: 8 voices ported, Copyleft tier; verified over its 5 FM6 presets x 3 notes (15 runs): level mean -0.03 dB, worst +0.35 dB, pitch worst 0.45 cent** (`port --felucca-sweep 5`; level and pitch only, not timbre). A firmware's preset is reached by its own panel steps (here the ones `scripts/fm6-compare.sh` uses), so each family needs its recipe: Felucca and Skiff are in `port::felucca_steps`, Jangada's 55 single clicks are not yet.
 
 ## Three levels of port
 

@@ -1,4 +1,4 @@
-//! `port FIRMWARE.fwsc --licence EXPR [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify [--program P] [--voice I] [--channel C] [--note N] [--vel V]] [--out FILE.ntt]`
+//! `port FIRMWARE.fwsc --licence EXPR [--felucca-sweep N] [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify [--program P] [--voice I] [--channel C] [--note N] [--vel V]] [--out FILE.ntt]`
 //! `port --check PACKAGE.ntt`
 //!
 //! The porting tool (docs/PORTING.md): identify a firmware, make a level-A port (its DX7-style bank into the `fm6` engine) and optionally verify it against the
@@ -57,6 +57,7 @@ fn check(path: &str) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut file, mut licence, mut name, mut source, mut out, mut model) = (None, None, None, None, None, "msfa".to_string());
+    let mut sweep = 0usize;
     let (mut verify, mut program, mut voice, mut channel, mut note, mut vel) = (false, None, 0usize, 0u8, 60u8, 100u8);
     let mut i = 0;
     while i < args.len() {
@@ -72,6 +73,10 @@ fn main() -> ExitCode {
             "--out" => out = next(&mut i),
             "--model" => model = next(&mut i).unwrap_or_default(),
             "--verify" => verify = true,
+            "--felucca-sweep" => {
+                verify = true;
+                sweep = next(&mut i).and_then(|s| s.parse().ok()).unwrap_or(5);
+            }
             "--program" => program = next(&mut i).and_then(|s| s.parse().ok()),
             "--voice" => voice = next(&mut i).and_then(|s| s.parse().ok()).unwrap_or(0),
             "--channel" => channel = next(&mut i).and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -122,7 +127,18 @@ fn main() -> ExitCode {
         }
     };
     println!("  licence {licence} -> {}", tier_line(tier));
-    if verify {
+    if verify && sweep > 0 {
+        match port::verify_felucca_family(&bytes, &pkg, sweep) {
+            Ok(w) => {
+                pkg.verify = w.summary(&format!("fm6 ({model}) vs the firmware's FM6 presets in the emulator"), sweep);
+                println!("  verify: {}", pkg.verify);
+            }
+            Err(e) => {
+                eprintln!("verify failed: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else if verify {
         match port::verify_fm6(&bytes, &pkg, voice, channel, program, note, vel) {
             Ok(c) => {
                 pkg.verify = c.summary(&format!("fm6 ({model}) vs the firmware in the emulator"));
