@@ -15,7 +15,7 @@ CARGO_TARGET_DIR="$OUT/target" cargo build -q --release --manifest-path "$REPO/c
 LIB="$OUT/target/release/libfm1ntt.a"
 [ -f "$LIB" ] || { echo "build.sh: the core did not build" >&2; exit 1; }
 case "$(uname -s)" in
-    Darwin) SYS="-lm" ;;
+    Darwin) SYS="-lm -framework IOKit -framework CoreFoundation" ;;
     *) SYS="-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" ;;
 esac
 echo "[*] fm1ntt (C, SDL2)..."

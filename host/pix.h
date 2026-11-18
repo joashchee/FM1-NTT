@@ -664,7 +664,8 @@ static inline void px_mon_app(uint32_t *c, PxRect b, const MonView *v) {
     px_box(c, b, "THIS APP");
     if (p->speed_pct >= 0) { int lv = mon_level(TH_SPEED, p->speed_pct); px_textf(c, x, y, px_lv_col(lv), w, "SPEED %d.%02dX%c", p->speed_pct / 100, p->speed_pct % 100, mon_glyph(lv)); }
     else px_text(c, x, y, "SPEED -  (NOT RUNNING)", C_DIM, 1, w);
-    px_textf(c, x, y + 11, C_TEXT, w, "JIT %s  AUDIO %d/S", p->jit ? "ON" : "OFF", p->cb_per_s);
+    if (p->jit && p->jit_blocks >= 0) px_textf(c, x, y + 11, C_TEXT, w, "JIT %d BLK%s AUDIO %d/S", p->jit_blocks, p->jit_given_up ? "!" : "", p->cb_per_s);
+    else px_textf(c, x, y + 11, C_TEXT, w, "JIT %s  AUDIO %d/S", p->jit ? "ON" : "OFF", p->cb_per_s);
     px_textf(c, x, y + 22, p->late_cb ? C_ERR : C_TEXT, w, "LATE BUFFERS %d%s", p->late_cb, p->late_cb ? "!" : "");
     int fl = mon_level(TH_FRAME, p->frame_ms);
     px_textf(c, x, y + 33, px_lv_col(fl), w, "FRAME %dMS%c MAX %d", p->frame_ms, mon_glyph(fl), p->frame_max_ms);
@@ -675,7 +676,7 @@ static inline void px_mon_app(uint32_t *c, PxRect b, const MonView *v) {
     px_textf(c, x, y + 77, C_DIM, w, "PANEL %d.%02d%% %dUS", v->share_x100 / 100, v->share_x100 % 100, v->sample_us);
 }
 
-static inline int px_mon_dev_h(int narrow) { return narrow ? 10 + 11 * 11 + 6 : 10 + 5 * 11 + 6; }
+static inline int px_mon_dev_h(int narrow) { return narrow ? 10 + 13 * 11 + 6 : 10 + 6 * 11 + 6; }
 static inline void px_mon_dev(uint32_t *c, PxRect b, const MonView *v, int narrow) {
     int x = b.x + 8, y = b.y + 10, w = b.w - 16, x2 = narrow ? x : x + 196, w2 = narrow ? w : 184;
     int r2 = narrow ? 4 : 0;                         /* the second column's first row: below the first column's in Zoomed, beside it in Standard */
@@ -692,13 +693,18 @@ static inline void px_mon_dev(uint32_t *c, PxRect b, const MonView *v, int narro
     }
     if (v->wake_ps >= 0) px_textf(c, x, y + 33, C_TEXT, w, "WAKE-UPS %d/S", v->wake_ps); else px_text(c, x, y + 33, "WAKE-UPS -", C_DIM, 1, w);
     int y2 = y + r2 * 11;
-    px_textf(c, x2, y2, C_TEXT, w2, "PADS %d", v->app.njoy);
+    px_textf(c, x2, y2, C_TEXT, w2, "PADS %d %s", v->app.njoy, v->app.pad[0]);
     px_textf(c, x2, y2 + 11, v->app.midi[0] ? C_TEXT : C_DIM, w2, "MIDI %s", v->app.midi[0] ? v->app.midi : "NONE");
     px_textf(c, x2, y2 + 22, v->net[0] ? C_TEXT : C_DIM, w2, "NET %s", v->net[0] ? v->net : "N/A");
+    if (v->platform == MON_PLAT_LINUX) {
+        char u3[96] = "";
+        for (int i = 0; i < v->nusb; i++) { size_t k = strlen(u3); snprintf(u3 + k, sizeof u3 - k, "%s%s", i ? ", " : "", v->usb[i]); }
+        px_textf(c, x2, y2 + 33, v->nusb ? C_TEXT : C_DIM, w2, "USB %s", v->nusb ? u3 : "NONE");
+    } else px_text(c, x2, y2 + 33, "USB N/A", C_DIM, 1, w2);
     int nh = narrow ? 3 : 2;                         /* the hot-plug history, newest first */
-    if (narrow) px_text(c, x2, y2 + 33, "HOT-PLUG:", C_HEAD, 1, w2);
+    if (narrow) px_text(c, x2, y2 + 44, "HOT-PLUG:", C_HEAD, 1, w2);
     for (int i = 0; i < nh; i++) {
-        int hy = narrow ? y2 + 44 + i * 11 : y2 + 33 + i * 11;
+        int hy = narrow ? y2 + 55 + i * 11 : y2 + 44 + i * 11;
         if (v->app.hot[i][0]) px_text(c, x2, hy, v->app.hot[i], i ? C_DIM : C_TEXT, 1, w2);
         else if (i == 0) px_text(c, x2, hy, narrow ? "NONE YET" : "HOT-PLUG: NONE YET", C_DIM, 1, w2);
     }

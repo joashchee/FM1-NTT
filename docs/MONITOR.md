@@ -13,8 +13,8 @@ figures for the unit are still to come (ROADMAP 5e, last item).
 | MEMORY: RAM used / total, cached, free, swap, this app's RSS, the emulated machine's buffers, free space on the card | `/proc/meminfo`, `/proc/self/statm`, `statvfs` of the app's folder | `vm_statistics64`, `hw.memsize`, `vm.swapusage`, `task_info`, `statvfs` | n/a |
 | PROCESSES (pages): the busiest by CPU, memory or PID, with a bar | `/proc/<pid>/stat`, the first 192 parsed | `proc_listpids` and `proc_pidinfo` (only what the system lets the app see) | n/a |
 | THIS APP'S THREADS | `thr_snapshot` (`host/threads.h`) | `task_threads` and `thread_info` | n/a |
-| THIS APP: emulated speed against real time, JIT on or off, audio buffers a second and **late buffers**, frame time and its worst in the last second, the job and its progress, the firmware | the app's own counters | the same | the same |
-| DEVICE: battery level, state and draw in mW, wake-ups a second, pads seen, the MIDI jack's counts, the network link, the last hot-plug events | `power_supply` (`type` Battery, `capacity`, `status`, `current_now` x `voltage_now`), `getrusage`, `/sys/class/net/*/operstate`, `host/toast.h` | `getrusage`, `getifaddrs`; no battery (n/a) | n/a |
+| THIS APP: emulated speed against real time, JIT compiled blocks (`!` when some were given up on), audio buffers a second and **late buffers**, frame time and its worst in the last second, the job and its progress, the firmware | the app's own counters | the same | the same |
+| DEVICE: battery level, state and draw in mW, wake-ups a second, pads seen, the MIDI jack's counts, the network link, the last hot-plug events | `power_supply` (`type` Battery, `capacity`, `status`, `current_now` x `voltage_now`), `getrusage`, `/sys/class/net/*/operstate`, `/sys/bus/usb/devices` (products, hubs left out), `host/toast.h` | `getrusage`, `getifaddrs`, IOKit battery level and state (no draw, no USB list) | n/a |
 
 A value nobody read is a dash and a box with no source on the platform says n/a; the layout does not move. The first second after the panel opens is a
 baseline (`SAMPLING...`): a percent needs two samples, and a counter that went backwards or stood still is a dash, never a number.
@@ -73,8 +73,8 @@ keys; the TOOLS row; the hot-plug history. `FM1NTT_MON_SHOTS=DIR build/fm1ntt --
 
 ## Not done
 
-Figures from the unit (the panel's own cost, whether a one-second sample sees a spike, the rain's cost, power and heat). The JIT's compiled share and block
-counts (only on/off is shown; the counters need the profiling mode, which slows the run). USB devices by name (the pads are counted; the hot-plug events name
-the rest). A real MIDI port (the jack's sent and dropped counts are shown). macOS battery, temperature and clock. The web build: it does not run the host's
-panels yet (ROADMAP 6, `docs/SCREEN-MIRROR.md` B), so the browser's own readings (`hardwareConcurrency`, `performance.memory`) have no panel to go in. The rain
-shows the emulated RAM it reads, not the bus writes, and does not show the job's file as it is read.
+Figures from the unit (the panel's own cost, whether a one-second sample sees a spike, the rain's cost, power and heat). The share of instructions run
+compiled (it needs the JIT's profiling mode, which slows the run). A real MIDI port (the jack's sent and dropped counts are shown). macOS temperature,
+clock and battery draw. The web build: it does not run the host's panels yet (ROADMAP 6, `docs/SCREEN-MIRROR.md` B), so the browser's own readings
+(`hardwareConcurrency`, `performance.memory`) have no panel to go in. The rain shows the emulated RAM it reads, not the bus writes, and does not show the
+job's file as it is read.

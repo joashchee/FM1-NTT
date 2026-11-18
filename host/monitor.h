@@ -32,6 +32,9 @@
 #include <mach/mach_time.h>
 #include <net/if.h>
 #include <pthread.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/ps/IOPowerSources.h>
+#include <IOKit/ps/IOPSKeys.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -71,6 +74,8 @@ typedef struct { int has, pct, mw; char status[16]; } MonBat;                   
 
 /* What the app itself knows (the host fills it: fm1ntt.c). */
 typedef struct {
+    int jit_blocks, jit_given_up;                                      /* blocks compiled, blocks given up on (-1: no machine) */
+    char pad[2][28];                                                   /* the first two pads' names, from SDL */
     int speed_pct, jit, cb_per_s, late_cb, frame_ms, frame_max_ms;      /* speed in percent of real time (-1: no firmware running) */
     char job[40];                                                      /* "" when none */
     int job_pct;                                                       /* -1 unknown */
@@ -97,6 +102,7 @@ typedef struct {
     int nthr; MonThread thr[MON_THR];
     MonBat bat;
     int wake_ps, app_cpu_x10;                                          /* context switches a second; this app's own CPU, tenths of a percent of a core */
+    int nusb; char usb[3][28];                                         /* USB products seen (Linux /sys/bus/usb: the first three that are not hubs) */
     char net[24];                                                      /* "WLAN0 UP", "NONE", or "" when unknown here */
     int sample_us, share_x100;                                         /* the cost of the last sample, and its share of a core in hundredths of a percent */
     int sort, self_pid;
@@ -499,6 +505,70 @@ static int mon_mac_net(char *out, size_t cap) {
 }
 #endif
 
+/* "blocks_compiled":N and "blocks_given_up":M from fm1ntt_jit_report's one line of JSON; 1 when both were found. */
+static int mon_parse_jit(const char *json, int *compiled, int *given_up) {
+    const char *a = strstr(json, "\"blocks_compiled\":"), *b = strstr(json, "\"blocks_given_up\":");
+    if (!a || !b) return 0;
+    long x = strtol(a + 18, NULL, 10), y = strtol(b + 18, NULL, 10);
+    *compiled = x < 0 ? 0 : x > 99999999 ? 99999999 : (int)x;
+    *given_up = y < 0 ? 0 : y > 99999999 ? 99999999 : (int)y;
+    return 1;
+}
+
+/* USB products from bus/usb/devices (each folder's product file): the first `max` whose name is not a hub. How many were stored. */
+static int mon_read_usb(char (*out)[28], int max) {
+    char base[300], p[420], t[64];
+    if (mon_path(base, sizeof base, mon_root("FM1NTT_MON_SYS", "/sys"), "bus/usb/devices") != 0) return 0;
+    g_mon_reads++;
+    DIR *d = opendir(base);
+    if (!d) return 0;
+    struct dirent *e;
+    int n = 0;
+    for (int seen = 0; n < max && (e = readdir(d)) && seen < 64; ) {
+        if (e->d_name[0] == '.') continue;
+        seen++;
+        snprintf(p, sizeof p, "%s/%.100s/product", base, e->d_name);
+        if (mon_slurp(p, t, sizeof t) <= 0) continue;
+        size_t k = 0;
+        for (; t[k] && t[k] != '\n' && k < 27; k++) out[n][k] = t[k] >= 32 && t[k] < 127 ? t[k] : '?';
+        out[n][k] = 0;
+        if (!k || strstr(out[n], "Hub") || strstr(out[n], "hub") || strstr(out[n], "HCI") || strstr(out[n], "Host Controller")) continue;
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
+#ifdef __APPLE__
+/* The first power source that is a battery: level and state (no draw: IOKit's public keys do not carry it). */
+static int mon_mac_battery(MonBat *b) {
+    memset(b, 0, sizeof *b);
+    b->pct = b->mw = MON_NA;
+    CFTypeRef info = IOPSCopyPowerSourcesInfo();
+    if (!info) return 0;
+    CFArrayRef list = IOPSCopyPowerSourcesList(info);
+    int found = 0;
+    for (CFIndex i = 0; list && i < CFArrayGetCount(list) && !found; i++) {
+        CFDictionaryRef ps = IOPSGetPowerSourceDescription(info, CFArrayGetValueAtIndex(list, i));
+        if (!ps) continue;
+        CFStringRef type = CFDictionaryGetValue(ps, CFSTR(kIOPSTypeKey));
+        if (!type || CFStringCompare(type, CFSTR(kIOPSInternalBatteryType), 0) != kCFCompareEqualTo) continue;
+        int cur = 0, max = 0;
+        CFNumberRef c = CFDictionaryGetValue(ps, CFSTR(kIOPSCurrentCapacityKey)), m = CFDictionaryGetValue(ps, CFSTR(kIOPSMaxCapacityKey));
+        if (c) CFNumberGetValue(c, kCFNumberIntType, &cur);
+        if (m) CFNumberGetValue(m, kCFNumberIntType, &max);
+        if (max > 0 && cur >= 0 && cur <= max) b->pct = cur * 100 / max;
+        CFBooleanRef ch = CFDictionaryGetValue(ps, CFSTR(kIOPSIsChargingKey));
+        CFStringRef st = CFDictionaryGetValue(ps, CFSTR(kIOPSPowerSourceStateKey));
+        snprintf(b->status, sizeof b->status, "%s", ch && CFBooleanGetValue(ch) ? "Charging" : st && CFStringCompare(st, CFSTR(kIOPSBatteryPowerValue), 0) == kCFCompareEqualTo ? "Discharging" : "AC power");
+        b->has = found = 1;
+    }
+    if (list) CFRelease(list);
+    CFRelease(info);
+    return found;
+}
+#endif
+
 static double mon_self_cpu_s(void) {
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
@@ -549,6 +619,7 @@ static void mon_sample(Mon *m, double now_ms, int want_procs) {
         v->temp_c = mon_read_temp();
         if (!mon_read_battery(&v->bat)) memset(&v->bat, 0, sizeof v->bat);
         if (!mon_read_net(v->net, sizeof v->net)) v->net[0] = 0;
+        v->nusb = mon_read_usb(v->usb, 3);
         v->nthr = 0;
         ThrSnap ts;
         if (thr_snapshot(&ts, now_ms) > 0) {
@@ -588,7 +659,8 @@ static void mon_sample(Mon *m, double now_ms, int want_procs) {
         v->temp_c = MON_NA;
         v->gov[0] = 0;
         for (int i = 0; i < MON_CORES; i++) v->core_mhz[i] = MON_NA;
-        memset(&v->bat, 0, sizeof v->bat);
+        if (!mon_mac_battery(&v->bat)) memset(&v->bat, 0, sizeof v->bat);
+        v->nusb = 0;
     }
 #endif
     if (!proc_root) {

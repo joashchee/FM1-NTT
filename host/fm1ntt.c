@@ -135,6 +135,7 @@ typedef struct {
     Mon mon;
     MonRain rain;
     int mon_page, rain_on, reduced_motion, njoy, cb_rate;
+    char padn[2][28];                   /* the first two pads' names (SDL), read once a second while the monitor shows */
     uint32_t last_input_ms, frame_ms, frame_max_ms;
     int cb_prev; double cb_prev_ms;
     SDL_atomic_t late_cb;               /* audio buffers that took longer than their own length to make */
@@ -909,6 +910,9 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
         if (a->job) { snprintf(p->job, sizeof p->job, "%s", a->job_kind == JOB_REPORT ? "REPORT" : "BENCHMARK"); p->job_pct = job_pct(a); } else p->job_pct = MON_NA;
         snprintf(p->fw, sizeof p->fw, "%s", a->file);
         p->njoy = a->njoy;
+        memcpy(p->pad, a->padn, sizeof p->pad);
+        p->jit_blocks = p->jit_given_up = MON_NA;
+        if (loaded_now && u->jit) { char js[400]; if (use_lock) lock(a); size_t jn = fm1ntt_jit_report(a->m, js, sizeof js); if (use_lock) unlock(a); if (!jn || !mon_parse_jit(js, &p->jit_blocks, &p->jit_given_up)) p->jit_blocks = p->jit_given_up = MON_NA; }
         if (u->midi_queued) snprintf(p->midi, sizeof p->midi, "SENT %llu DROP %llu", (unsigned long long)u->midi_queued, (unsigned long long)u->midi_dropped);
         for (int k = 0; k < 3; k++) snprintf(p->hot[k], sizeof p->hot[k], "%s", a->toast.hist[k]);
         if (loaded_now) { size_t kb = 0; for (int rgn = 0; rgn < 3; rgn++) { uint32_t b32; size_t sz = 0; fm1ntt_region(a->m, rgn, &b32, &sz); kb += sz / 1024; } p->emu_kb = (int)kb; }
@@ -1383,6 +1387,10 @@ static int mon_selftest(const char *root, App *app) {
     MCHECK(mon_top(big, 3, top, MON_SORT_PID) == 3 && top[0].pid < top[1].pid && mon_top(big, 0, top, 0) == 0);
     MCHECK(mon_pages(0, 0) == 2 && mon_pages(1, 0) == 3 && mon_pages(0, MON_ROWS_STD) == 2 && mon_pages(0, MON_ROWS_STD + 1) == 3 && mon_pages(1, MON_TOP) == 2 + (MON_TOP + MON_ROWS_NARROW - 1) / MON_ROWS_NARROW);
     MCHECK(!mon_page_has_procs(0, 0) && mon_page_has_procs(0, 1) && !mon_page_has_procs(1, 1) && mon_page_has_procs(1, 2));
+    int jc = -5, jg = -5;
+    MCHECK(mon_parse_jit("{\"blocks_cold\":3,\"blocks_compiled\":120,\"blocks_given_up\":2,\"cache_bytes\":9}", &jc, &jg) && jc == 120 && jg == 2);
+    MCHECK(!mon_parse_jit("", &jc, &jg) && !mon_parse_jit("{\"blocks_compiled\":1}", &jc, &jg));
+    MCHECK(mon_parse_jit("{\"blocks_compiled\":-4,\"blocks_given_up\":99999999999999}", &jc, &jg) && jc == 0 && jg == 99999999);
     char kb[16];
     mon_kb_text(kb, sizeof kb, 512); MCHECK(!strcmp(kb, "512K"));
     mon_kb_text(kb, sizeof kb, 3 * 1024 * 1024 / 2); MCHECK(!strcmp(kb, "1.5G"));
@@ -1408,6 +1416,10 @@ static int mon_selftest(const char *root, App *app) {
     mon_put(d, "type", "Battery\n"); mon_put(d, "capacity", "12\n"); mon_put(d, "status", "Discharging\n"); mon_put(d, "current_now", "-500000\n"); mon_put(d, "voltage_now", "3800000\n");
     snprintf(d, sizeof d, "%s/class/thermal/thermal_zone0", sy); mon_put(d, "temp", "71000\n");
     snprintf(d, sizeof d, "%s/devices/system/cpu/cpu0/cpufreq", sy); mon_put(d, "scaling_cur_freq", "1512000\n"); mon_put(d, "scaling_governor", "schedutil\n");
+    snprintf(d, sizeof d, "%s/bus/usb/devices/1-1", sy); mon_put(d, "product", "USB Keyboard\n");
+    snprintf(d, sizeof d, "%s/bus/usb/devices/usb1", sy); mon_put(d, "product", "xHCI Host Controller\n");
+    snprintf(d, sizeof d, "%s/bus/usb/devices/1-2", sy); mon_put(d, "product", "Generic Hub\n");
+    snprintf(d, sizeof d, "%s/bus/usb/devices/1-3", sy); mon_put(d, "product", "M-VAVE FM-1 \xff\n");
     snprintf(d, sizeof d, "%s/class/net/eth0", sy); mon_put(d, "operstate", "up\n");
     snprintf(d, sizeof d, "%s/class/net/lo", sy); mon_put(d, "operstate", "unknown\n");
     static Mon m;
@@ -1417,6 +1429,7 @@ static int mon_selftest(const char *root, App *app) {
     MCHECK(g_mon_reads == r0);
     MCHECK(mon_tick(&m, 1, 10000, 0) == 1 && g_mon_reads > r0 && !m.v.sampled && m.v.core_pct[0] == MON_NA && m.v.ncores == 2);   /* the first sample is a baseline: dashes, not guesses */
     MCHECK(m.v.mem.has && m.v.mem.used_kb == 900000 && m.v.has_load && m.v.temp_c == 71 && m.v.core_mhz[0] == 1512 && !strcmp(m.v.gov, "SCHEDUTIL") && !strcmp(m.v.net, "ETH0 UP"));
+    MCHECK(m.v.nusb == 2 && ((!strcmp(m.v.usb[0], "USB Keyboard") && !strncmp(m.v.usb[1], "M-VAVE FM-1", 11)) || (!strncmp(m.v.usb[0], "M-VAVE FM-1", 11) && !strcmp(m.v.usb[1], "USB Keyboard"))));   /* hubs and host controllers are not listed; a odd byte is a ?, not passed on */
     MCHECK(m.v.bat.has && m.v.bat.pct == 12 && m.v.bat.mw == 1900 && m.v.self_rss_kb == 500 * mon_page_kb());
     MCHECK(!m.v.procs_read && m.v.nprocs == 0);                                                      /* the process list was not wanted: not read */
     unsigned long r1 = g_mon_reads;
@@ -1503,6 +1516,7 @@ static int mon_selftest(const char *root, App *app) {
                 for (int k = 0; k < MON_TOP; k++) { v->procs[k].pid = 1 + k; snprintf(v->procs[k].name, MON_NAME, "%.15s", "proc-with-a-long-name"); v->procs[k].cpu_x10 = (1000 - k * 15) > 0 ? 1000 - k * 15 : 0; v->procs[k].rss_kb = 120000 - k * 1000; }
                 v->nthr = MON_THR; for (int k = 0; k < MON_THR; k++) { snprintf(v->thr[k].name, sizeof v->thr[k].name, "thread-name-%d", k); v->thr[k].cpu_x10 = 900 - k * 80; v->thr[k].core = k % 4; }
                 v->bat.has = 1; v->bat.pct = 100 - loads[li]; v->bat.mw = 1840; snprintf(v->bat.status, sizeof v->bat.status, "Discharging");
+                v->nusb = 3; snprintf(v->usb[0], 28, "USB MIDI KEYBOARD"); snprintf(v->usb[1], 28, "M-VAVE FM-1"); snprintf(v->usb[2], 28, "GAMEPAD"); snprintf(v->app.pad[0], 28, "GAMEPAD NAME"); v->app.jit_blocks = 120; v->app.jit_given_up = li;
                 v->wake_ps = 25; snprintf(v->net, sizeof v->net, "WLAN0 UP"); v->sample_us = 450; v->share_x100 = 5; v->app_cpu_x10 = loads[li] * 10;
                 v->app.speed_pct = loads[li] < 50 ? 120 : 20; v->app.jit = 1; v->app.cb_per_s = 86; v->app.late_cb = li; v->app.frame_ms = 4 + li * 12; v->app.frame_max_ms = 30; v->app.njoy = 2;
                 snprintf(v->app.job, sizeof v->app.job, "BENCHMARK"); v->app.job_pct = 40; snprintf(v->app.fw, sizeof v->app.fw, "A-LONG-FIRMWARE-NAME.FWSC"); snprintf(v->app.midi, sizeof v->app.midi, "SENT 12 DROP 12");
@@ -2497,6 +2511,7 @@ int main(int argc, char **argv) {
                 if (a.cb_prev_ms > 0 && nowm > a.cb_prev_ms) a.cb_rate = (int)((double)(cb - a.cb_prev) * 1000.0 / (nowm - a.cb_prev_ms) + 0.5);
                 a.cb_prev = cb; a.cb_prev_ms = nowm;
                 a.njoy = SDL_NumJoysticks();
+                for (int pi = 0; pi < 2; pi++) { const char *pn = pi < a.njoy ? SDL_JoystickNameForIndex(pi) : NULL; snprintf(a.padn[pi], sizeof a.padn[pi], "%s", pn ? pn : ""); for (char *q = a.padn[pi]; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); }
                 a.frame_max_ms = 0;
             }
             if (mon_on && a.rain_on && !a.job && !(a.mon.v.bat.has && a.mon.v.bat.pct >= 0 && a.mon.v.bat.pct <= 15) && rain_due(&a.rain, nowm, a.reduced_motion)) { rain_row_feed(&a, nowm); dirty = 1; }
