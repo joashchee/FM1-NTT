@@ -2126,6 +2126,7 @@ static int show_selftest(const char *root) {
     SCHECK(showcase_run("/nonexistent/fw.fwsc", 0, 0, 0, base, 0, res, sizeof res) == 2);
     char empty[460]; snprintf(empty, sizeof empty, "%s/empty.fwsc", root); { FILE *f = fopen(empty, "wb"); if (f) fclose(f); }
     SCHECK(showcase_run(empty, 0, 0, 0, base, 0, res, sizeof res) == 2);
+    if (getenv("FM1NTT_SELFTEST_LIGHT")) { fprintf(stderr, "  showcase: light run (an emulated CPU): the real runs, the worker and the cancel are left to the native run\n"); return fails; }
     char dflt[300];
     { char *sv = getenv("FM1NTT_BUNDLED") ? strdup(getenv("FM1NTT_BUNDLED")) : NULL; unsetenv("FM1NTT_BUNDLED"); default_firmware(dflt, sizeof dflt); if (sv) { setenv("FM1NTT_BUNDLED", sv, 1); free(sv); } }
     if (!dflt[0]) { fprintf(stderr, "  showcase: no bundled firmware here, the runs are skipped\n"); return fails; }
@@ -2146,7 +2147,7 @@ static int show_selftest(const char *root) {
     /* two real runs: the same bytes (pictures, table, sound, state), and what they wrote reads back */
     char a_base[420], b_base[420], da[460], db[460];
     snprintf(a_base, sizeof a_base, "%s/runa", root); snprintf(b_base, sizeof b_base, "%s/runb", root);
-    SCHECK(showcase_run(dflt, 0, 0, 0, a_base, 0, res, sizeof res) == 0 && strstr(res, "ready"));
+    { int rcx = showcase_run(dflt, 0, 0, 0, a_base, 0, res, sizeof res); if (rcx != 0 || !strstr(res, "ready")) fprintf(stderr, "  showcase run said (%d): %s\n", rcx, res); SCHECK(rcx == 0 && strstr(res, "ready")); }
     SCHECK(showcase_run(dflt, 0, 0, 0, b_base, 0, res, sizeof res) == 0);
     { char sh[65], why[64]; size_t n = 0; uint8_t *bb = read_file(dflt, &n, why, sizeof why); fm1ntt_sha256_hex(bb, n, sh); free(bb); show_dir(da, sizeof da, a_base, sh); show_dir(db, sizeof db, b_base, sh); }
     SCHECK(show_tree_hash(da) == show_tree_hash(db));
@@ -2212,6 +2213,7 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     a->last_input_ms = 1000;
     a->job = (SDL_Thread *)(uintptr_t)1; ACHECK(show_may_run(a, 100000.0) == 0); a->job = NULL;
     a->sw_low = 1; ACHECK(show_may_run(a, 100000.0) == 0); a->sw_low = 0;
+    if (getenv("FM1NTT_SELFTEST_LIGHT")) goto draw_tests;                                         /* an emulated CPU: no real worker, no real demo to play */
     /* the queue starts nothing while it is off, and no more than one worker; a worker is cancelled and leaves nothing */
     a->bg_demos = 0; a->sw_next_ms = 0; a->sw_cursor = 0; a->paused = 1;
     show_queue(a, 100000.0); ACHECK(a->sw_pid == 0);
@@ -2240,6 +2242,7 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     show_queue(a, 300000.0); ACHECK(a->sw_pid > 0);
     for (int k = 0; k < 1200 && a->sw_pid; k++) { show_poll(a, 300000.0 + k * 100.0); usleep(100000); }
     show_state_read(d0, &s);
+    if (a->sw_pid || strcmp(s.state, "ready")) fprintf(stderr, "  worker: pid %d, state '%s', reason '%s', msg '%s'\n", (int)a->sw_pid, s.state, s.reason, a->msg);
     ACHECK(a->sw_pid == 0 && !strcmp(s.state, "ready") && s.frames > 20 && strstr(a->msg, "ready"));
     a->sw_next_ms = 0; a->sw_cursor = 0;
     show_queue(a, 500000.0); ACHECK(a->sw_pid == 0);                                               /* a demo exists: no worker */
@@ -2302,6 +2305,7 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     ACHECK(!a->pl.on && a->pl.pos == a->pl.frames);                                                 /* played to its end */
     show_poll(a, 800100.0); ACHECK(!a->pl.pcm);
     fill_ui(a, ui, 0); ACHECK(!ui->playing && strcmp(ui->run_state, "DEMO") != 0);
+draw_tests:;
     /* the page and the progress box drawn, both layouts: the FM-1's screen intact, the same pixels every time, above the foot */
     static uint32_t cv[PX_W * PX_H], cv2[PX_W * PX_H];
     const char *shots = getenv("FM1NTT_MON_SHOTS");

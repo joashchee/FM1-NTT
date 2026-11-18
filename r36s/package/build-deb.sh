@@ -121,7 +121,9 @@ if [ -n "$SMOKE" ]; then
     dpkg-deb -x "$OUT/FM1-NTT.deb" "$tmp"
     if [ -n "$NATIVE" ]; then run=(); else run=(qemu-aarch64-static -L /); fi
     echo "[*] Smoke test (the installed layout, dummy video and audio)..."
-    out="$(cd "$tmp" && env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 300 ${run[@]+"${run[@]}"} "$tmp/usr/games/fm1ntt" --selftest 2>&1)" || { echo "$out"; die "smoke test FAILED"; }
+    # under qemu-user (CI: x86_64 emulating arm64) the self-test is light: the showcase's real 15 s runs and workers are many minutes of emulation; the native CI job and a native arm64 build run them
+    light=(); [ -n "$NATIVE" ] || light=(FM1NTT_SELFTEST_LIGHT=1)
+    out="$(cd "$tmp" && env SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ${light[@]+"${light[@]}"} timeout 300 ${run[@]+"${run[@]}"} "$tmp/usr/games/fm1ntt" --selftest 2>&1)" || { echo "$out"; die "smoke test FAILED"; }
     echo "$out" | tail -3
     echo "$out" | grep -q 'selftest: ok' || die "smoke test printed no ok line"
     echo "build-deb: smoke ok"
