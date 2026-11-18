@@ -68,6 +68,14 @@ python3 "$REPO/scripts/check-bundled.py" "$REPO" || { echo "bundled firmware che
 for PACK in "$REPO/../FM1-NTT-Firmware-Pack" "$REPO/FM1-NTT-Firmware-Pack"; do
     if [ -f "$PACK/MANIFEST.tsv" ]; then
         python3 "$PACK/scripts/check-bundled.py" --pack "$PACK" || { echo "the firmware pack repository FAILED its check"; exit 1; }
+        # the firmware scripts live here and in the Pack: change them here first, then copy (CLAUDE.md); a copy that has drifted is an error, not a surprise later
+        for f in check-bundled.py check-firmware-updates.py test_check_bundled.py test_check_firmware_updates.py; do
+            if ! cmp -s "$REPO/scripts/$f" "$PACK/scripts/$f"; then
+                echo "scripts/$f differs from the Pack's copy: change it here first, then copy it to $PACK/scripts/ (and commit there)"
+                exit 1
+            fi
+        done
+        echo "the Pack's copies of the firmware scripts match"
         break
     fi
 done

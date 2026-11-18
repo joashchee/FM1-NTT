@@ -186,6 +186,20 @@ class Separation(unittest.TestCase):
         open(os.path.join(build, "x.fm1i"), "w").write("fm1i = 1\nlicence = LGPL-2.1-only\n")
         self.assertTrue(any("not permissive" in p for p in cb.check_no_pack(self.repo, build, None)))
 
+    def test_a_gitignored_vendor_firmware_is_not_a_stray_but_an_unignored_one_is(self):
+        import subprocess
+        if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
+            self.skipTest("no git")
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        with open(os.path.join(self.repo, ".gitignore"), "w") as f:
+            f.write("docs/*.fwsc\n")
+        os.makedirs(os.path.join(self.repo, "docs"))
+        open(os.path.join(self.repo, "docs", "FM-1.fwsc"), "wb").write(b"vendor firmware kept locally")
+        self.assertEqual(cb.check(self.repo), [], "a gitignored local file is the user's, not a stray")
+        open(os.path.join(self.repo, "docs", "other.fw"), "wb").write(b"x")  # not a firmware suffix
+        open(os.path.join(self.repo, "loose.fwsc"), "wb").write(b"not ignored")
+        self.assertTrue(any("loose.fwsc" in p for p in cb.check(self.repo)))
+
     def test_a_recorded_demo_is_refused_in_the_repository_and_in_a_build(self):
         self.assertEqual(cb.check(self.repo), [])
         d = os.path.join(self.repo, "demos", "ab" * 32)

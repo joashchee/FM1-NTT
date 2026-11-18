@@ -19,6 +19,7 @@ beside it. Any *.fwsc or *.fm1save outside the manifest is an error. The MIT rep
 1 listing every problem. (The Pack repository carries a copy of this file; keep them in step.)"""
 import hashlib
 import os
+import subprocess
 import sys
 
 PERMISSIVE = {"MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "ISC", "Unlicense", "CC0-1.0", "Zlib", "MPL-2.0", "OFL-1.1"}
@@ -125,13 +126,22 @@ def check_tier(repo, tier, root, columns, allowed, need_source, listed):
     return problems
 
 
+def git_ignored(repo, path):
+    """True when git ignores `path` (a vendor file kept locally and gitignored, like docs/FM-1.fwsc: CLAUDE.md rule 2, never committed, so not a stray in the repository).
+    Without git or outside a repository nothing is ignored."""
+    try:
+        return subprocess.run(["git", "-C", repo, "check-ignore", "-q", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def stray_firmware(repo, listed, problems, hint):
     for dirpath, dirnames, filenames in os.walk(repo):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and d != PACK_REPO_NAME]
         for name in filenames:
             if name.endswith(FIRMWARE_SUFFIXES):
                 p = os.path.normpath(os.path.join(dirpath, name))
-                if p not in listed:
+                if p not in listed and not git_ignored(repo, p):
                     problems.append("%s: a firmware file that no manifest lists (%s)" % (os.path.relpath(p, repo), hint))
 
 

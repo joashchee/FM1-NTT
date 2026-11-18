@@ -87,3 +87,26 @@ compares a GitHub project's latest release or a closed firmware's home page (red
 firmware and never edits a manifest; `--write-seen` records the watch baseline after a review. Exit 10 means something needs reading, 1 means something could not be checked. The Pack
 repository runs it weekly from a workflow and opens an issue. First run (2026-11-16): Haunted FM-1 v0.1, Felucca 1.8.2, FoMni 0.4.1 and Jangada 1.0.1 all current with unchanged licence files;
 SLOOP, Melodee, X0X and Quod unchanged; Shrub's page baselined.
+
+## Updating a bundled firmware (the procedure)
+
+When `scripts/check-firmware-updates.py` says **NEWER** or **LICENCE-CHANGED** for an entry in `bundled-firmware/` (or in the Pack repository), do it in this order. Nothing is
+automatic: the script never downloads a firmware or edits a manifest.
+
+1. **Read the licence first.** For LICENCE-CHANGED, read the new licence files at the release tag (not the repository's badge) and the notices in the firmware itself; if a term
+   leaves the allowlist (`docs/FIRMWARE.md`, "What may be bundled") or new embedded data appears whose rights are not granted, **stop**: keep the old version, record why in
+   `docs/FIRMWARE-CATALOG.md`, and move the entry to the watch list (`firmware-watchlist.tsv`). For NEWER with the same licence, a quick diff of the licence files is enough.
+2. **Make a new folder for the new version** (`bundled-firmware/<family>/` keeps one file per version, named with it): download the release `.fwsc` with `curl` (`gh api` fails
+   TLS in the sandbox) into an empty folder outside the repository, check its SHA-256 against the release's `SHA256SUMS` when it publishes one, and copy it in **unmodified**.
+3. **Update the manifest row** (`MANIFEST.tsv`): path, SHA-256, size, the AND-only licence expression, name, version, the release URL, the commit it was built from; and for the
+   Pack, the source archive and its hash (a reproducible archive of the source at that commit, with submodules at their pinned commits).
+4. **Refresh the licence texts, `SOURCES.md` and `NOTICE`** beside it from the new tag (`check-firmware-updates.py` compares the stored licence file with upstream's, so a stale
+   copy is found), and say what changed from the last version.
+5. **Take the old version out** of the manifest and the folder in the same commit (the check fails on a firmware file no manifest lists), unless users should keep both; then the
+   old row stays, with its own source.
+6. **Boot it**: `fm1ntt --report FILE` (or `core/examples/fwprobe FILE wait:8 info`) must draw and not halt; the self-test boots every bundled firmware. If it was ported
+   (`docs/PORTING.md`), run `port FILE --licence EXPR --verify` again: **a port of an older version is not a port of this one** (its `source-sha256` no longer matches).
+7. **Run the checks**: `scripts/check-bundled.py` (and `--pack` in the Pack repository), `scripts/check.sh`, then the package build (`r36s/build-deb.sh`, or `./build-deb.sh` in the Pack),
+   which verifies the installed files against the manifest.
+8. **Record it**: `CHANGELOG.md` and `ROADMAP.md` in the same commit (and the Pack's own), `--write-seen` for a watch entry that was reviewed, and `README.md` if the hero list
+   or the firmware list changed. Rec demo uses UNTRUE STEP by default: if that file changed, rebuild the demo and check that two recordings are still byte-identical.
