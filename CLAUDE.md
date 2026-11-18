@@ -16,6 +16,7 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
 - `host/report.h` (Device report, Benchmark), `host/demo.h` (Rec demo), `host/vendor/r3i6nos_report.h` (MIT, from r3i6nos; `NOTICE`).
 - `scripts/check.sh`: everything CI runs (and the Pack repository's own check when it is beside this one); `scripts/bench-compare.py` compares benchmark files; `scripts/check-firmware-updates.py` (with `firmware-watchlist.tsv`) asks each curated firmware's release feed for news and licence changes, and watches what was left out (Shrub, SLOOP, Melodee, X0X, Quod).
 - **`../FM1-NTT-Firmware-Pack/`** (a separate repository; its folder is inside this working tree, ignored, until moved out): the GPL pack. Its `scripts/` hold copies of the two firmware checkers: change them here first, then copy.
+- **`docs/FM-1-manual.pdf`, `docs/FM-1 MIDI EN.docx`, `docs/FM-1.fwsc`**: M-VAVE's own manual, MIDI table and stock firmware, **local only and gitignored** (vendor files: rule 2; never `git add -A docs`); what they say is in `docs/HARDWARE.md` and `docs/FM-1-MIDI.md`.
 - `docs/BENCHMARKS.md`, `docs/SCREEN-MIRROR.md` (the plan for mirroring a pixel screen).
 
 ## Rules
