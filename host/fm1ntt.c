@@ -123,6 +123,7 @@ typedef struct {
     char fw_path[300];
     int fw_raw;
     SDL_atomic_t callbacks;
+    int audio_asleep;                   /* the sound device is paused because nothing can make a sound and nobody has touched the unit (audio_wanted) */
     SDL_Thread *job;
     SDL_atomic_t job_done;
     int job_kind, job_style, want_demo;
@@ -726,6 +727,21 @@ static void audio_step(App *a, int16_t *out, size_t frames) {
 }
 static uint32_t g_demo_budget;
 static int g_quiet_logs;                /* the self-test keeps report text off stdout */
+/* Whether the sound device must run now. It sleeps (SDL_PauseAudioDevice) when nothing can make a sound and nobody has touched the unit for AUDIO_QUIET_MS: no
+ * firmware running (none loaded, or paused), no preview or Solo, no demo playing, no recording, no job (the report and benchmark count callbacks) and no
+ * showcase worker. The power rule: an idle app must not wake the sound hardware 88 times a second. Any event wakes it before the next frame. */
+#define AUDIO_QUIET_MS 10000u
+static int audio_wanted(const App *a, uint32_t now) {
+    if (now - a->last_input_ms < AUDIO_QUIET_MS) return 1;
+    if (a->pv_on || a->pl.on || a->rec_on || a->rec || a->job || a->want_demo || a->sw_pid) return 1;
+    return fm1ntt_loaded(a->m) && !a->paused;
+}
+static void audio_sleep_tick(App *a, uint32_t now) {
+    if (!a->dev) return;
+    int want = audio_wanted(a, now);
+    if (want && a->audio_asleep) { SDL_PauseAudioDevice(a->dev, 0); a->audio_asleep = 0; }
+    else if (!want && !a->audio_asleep) { SDL_PauseAudioDevice(a->dev, 1); a->audio_asleep = 1; }
+}
 static void audio_cb(void *ud, Uint8 *stream, int len) {
     App *a = ud;
     SDL_AtomicAdd(&a->callbacks, 1);
@@ -2666,6 +2682,16 @@ static int selftest(void) {
     a.m = fm1ntt_new();
     mon_init(&a.mon, NULL);
     a.midi_note = 60; a.midi_vel = 100; a.slot = 1;
+    /* the sound device sleeps after quiet seconds when nothing can make a sound, and wakes for anything that can */
+    a.last_input_ms = 1000;
+    CHECK(audio_wanted(&a, 1000 + AUDIO_QUIET_MS - 1));                       /* touched a moment ago */
+    CHECK(!audio_wanted(&a, 1000 + AUDIO_QUIET_MS));                          /* no firmware, nothing playing, quiet */
+    a.pv_on = 1; CHECK(audio_wanted(&a, 99000)); a.pv_on = 0;
+    a.pl.on = 1; CHECK(audio_wanted(&a, 99000)); a.pl.on = 0;
+    a.rec_on = 1; CHECK(audio_wanted(&a, 99000)); a.rec_on = 0;
+    a.sw_pid = 1; CHECK(audio_wanted(&a, 99000)); a.sw_pid = 0;
+    a.want_demo = 1; CHECK(audio_wanted(&a, 99000)); a.want_demo = 0;
+    CHECK(!audio_wanted(&a, 99000));
     /* the firmware folder: the right extensions, sorted, a Quit row last, a garbage file refused with a reason, a raw file booted */
     char fdir[300], p[400];
     sub_path(fdir, sizeof fdir, "firmware", NULL);
@@ -3380,7 +3406,8 @@ int main(int argc, char **argv) {
                 dispatch(&a, &e); dirty = 1;
             } while (SDL_PollEvent(&e));
         }
-        if (sticks_active(&a)) dirty = 1;
+        if (sticks_active(&a)) { dirty = 1; a.last_input_ms = SDL_GetTicks(); }
+        audio_sleep_tick(&a, SDL_GetTicks());
         if (toast_poll(&a.toast, SDL_GetTicks())) dirty = 1;
         sticks_tick(&a, SDL_GetTicks());
         rec_pump(&a);

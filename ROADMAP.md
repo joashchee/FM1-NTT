@@ -28,7 +28,7 @@ measured (2026-11-17) the core is far too slow to play live (**0.24x real time a
 ## 2. Sound and MIDI
 
 - [x] **Audio callback** (`host/fm1ntt.c`): 44.1 kHz stereo, 512 frames, the device paces the emulation; input under SDL's audio lock; level meters. Untested with a real firmware or on the unit.
-- [ ] **Close the sound device after quiet seconds** so an idle app does not wake it (TinyNTT's `audio_sleep`; power rule).
+- [x] **The sound device sleeps after quiet seconds** (2026-11-18, `audio_wanted` in `host/fm1ntt.c`; TinyNTT's `audio_sleep`, power rule): after 10 s with no input and nothing that can make a sound (no firmware running or it is paused, no preview or Solo, no demo playing, no recording, no job, no showcase worker) the device is paused; any input wakes it before the next frame. Self-tested (the decision); **not heard or measured on a unit**: [ ] re-measure the idle `power` window (the 88 callbacks a second should go) and check no click on waking.
 - [ ] **MIDI in:** a keyboard, USB MIDI, Web MIDI, and the pad; `fm1ntt_midi_in` is in the core. [ ] **MIDI out** from the emulated jack.
 - [ ] **MIDI to a real FM-1** from the R36S's OTG port (kit section 6), as a separate mode. Untested.
 - [ ] **Hear it:** the maintainer listens and says whether the engine is right.
