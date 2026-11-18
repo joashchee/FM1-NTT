@@ -47,7 +47,7 @@ The manual's own ranges differ a little (it shows the filter's Q as 0-100 and th
 
 ## System exclusive
 
-- **Single-parameter write:** `F0 43 10 pp qq vv F7`; the parameter number is `pp x 128 + qq` (0 to 155), the value is `vv`. The parameter numbering is not listed in the table we have.
+- **Single-parameter write:** `F0 43 10 pp qq vv F7`; the parameter number is `pp x 128 + qq` (0 to 155), the value is `vv`. The table does not list the numbering, **but it is the DX7's** (see "What was tried").
 - **Voice dumps:** a standard Yamaha DX7 bank (32 voices) is accepted; the unit then asks which bank (A to D) to write it to.
 
 ## What the FM-1 sends
@@ -63,5 +63,6 @@ Sent through the emulated 3.5 mm MIDI jack (`fwprobe midi:`), read off the scree
   - **Changed the sound:** CC 1 (filter type, 0 to 2: diff 0.19 to 0.20 of the signal), CC 7 (reverb mix) and CC 11 (delay mix) (both about 0.80 for 100 to 20).
   - **Changed nothing audible:** the six switches (CC 0, 4, 8, 12, 16, 20, tried with 0, 1 and 127), the filter cutoff and Q (CC 2, 3), the other reverb, delay, distortion, chorus and phaser parameters, with all parameters set strongly. The same CCs on channel 1 changed nothing.
   - **The effects do work in the emulator:** turning the filter on from the panel (FX, then KNOB 4) changed the sound by 1.27 of the signal, and CC 0, 2 and 3 on top of that still changed nothing.
-  - **Not known why:** the firmware may ignore those CCs, honour them only in a state this probe did not reach (the screen did not show the values change either), or scale them differently from the table; the probe is one note and a short time. **So the table's effect CCs are not confirmed**, and a port must not rely on them. Not tried: the SysEx parameter write, USB MIDI, a firmware other than stock.
+  - **Not known why:** the firmware may ignore those CCs, honour them only in a state this probe did not reach (the screen did not show the values change either), or scale them differently from the table; the probe is one note and a short time. **So the table's effect CCs are not confirmed**, and a port must not rely on them. Not tried: a firmware other than stock.
+- **The SysEx parameter write works, with the DX7's parameter numbers** (`F0 43 10 pp qq vv F7`, number `pp x 128 + qq`; tried over both the 3.5 mm jack and USB MIDI, which gave the same results to three decimals). With OP1's Out Level at 86 on `001 PIANO 3`, writing parameter 121 = 50 made EDIT's OP1 page read `Out Level 50`, and the sound changed. That is the DX7 layout: operators 6 down to 1 at 21 bytes each (OP1 is 105 to 125, its output level the 17th, so 121), then the pitch envelope and the globals. Audible, compared with a run that sent an invalid parameter (the timing control, 0.003 apart): OP1 level 50 by 0.37 of the signal, **algorithm** (134) = 31 by 1.90, **feedback** (135) = 7 by 0.04, **transpose** (144) = 36 (+12) by 0.85 and 12 (-12) by 1.28 (24 is centre). **No audible change:** the name's first character (145, nor did the home screen change) and oscillator sync (136, which may be silent for this voice). Not tried: parameters 0 to 120 and 125 to 133, 137 to 143 and 146 to 155 one by one, whether a write survives a Program Change or SAVE (it changed the voice being played, the edit buffer; whether it reaches flash is unknown), and any firmware but stock.
 
