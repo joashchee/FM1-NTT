@@ -7,6 +7,7 @@
 
 pub mod analog;
 pub mod arp;
+pub mod audition;
 pub mod bench;
 pub mod capi;
 pub mod capi_inst;
