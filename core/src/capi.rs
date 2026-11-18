@@ -313,6 +313,15 @@ pub extern "C" fn fm1ntt_flash_size() -> usize {
     fm1_soc::FLASH_SIZE
 }
 
+/// A counter that changes whenever the emulated flash does (0 for a null handle).
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_flash_revision(h: *mut Handle) -> u32 {
+    with(h, 0, |m| m.flash_revision())
+}
+
 /// Copies the emulated flash (1 MiB) into `out` if `cap` is big enough; returns the bytes copied, 0 if not.
 ///
 /// # Safety
@@ -489,6 +498,8 @@ mod tests {
             assert_eq!(fm1ntt_flash_save(h, flash.as_mut_ptr(), flash.len()), flash.len());
             assert_eq!(fm1ntt_flash_restore(h, flash.as_ptr(), flash.len()), 0);
             assert_eq!(fm1ntt_flash_restore(h, flash.as_ptr(), 5), -1);
+            let _ = fm1ntt_flash_revision(h);
+            assert_eq!(fm1ntt_flash_revision(std::ptr::null_mut()), 0);
             fm1ntt_reset(h);
             assert_eq!(fm1ntt_keys_down(h), 0);
             assert_eq!(fm1ntt_jit_on(h), 0);

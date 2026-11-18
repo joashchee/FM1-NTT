@@ -122,6 +122,12 @@ impl Machine {
         &self.soc.flash.mem
     }
 
+    /// A counter that moves whenever the firmware (or a restore) changes the flash: a host that remembers settings saves when it moves. A reset starts it again from
+    /// the package's own, so a host compares it for a change, never for an order.
+    pub fn flash_revision(&self) -> u32 {
+        self.soc.flash.revision
+    }
+
     /// Writes whole bytes into the flash and, where it overlaps, the execute-in-place view (which holds the decrypted app, so it is never
     /// overwritten with raw flash): what a runtime write by the firmware does (upstream's `replace_flash`).
     fn replace_flash(&mut self, at: usize, data: &[u8]) {

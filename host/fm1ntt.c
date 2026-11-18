@@ -62,7 +62,7 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 14
+#define NTOOLS 15
 #define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
@@ -100,6 +100,9 @@ typedef struct {
     char file[PX_NAME];                 /* the loaded firmware's name */
     /* cpu, memory, midi, tools */
     int cpu_sel, mem_region, midi_chan, midi_note, midi_vel, midi_held, tool_sel, slot;
+    int remember, fl_dirty;               /* TOOLS > REMEMBER SETTINGS: the firmware's flash is kept per firmware between runs */
+    uint32_t fl_rev, fl_t;
+    char fl_sha[65];                      /* the loaded package's SHA-256, the name of its remembered flash */
     int jit_pref;                       /* the native JIT, applied to each firmware as it boots */
     int pace_mode, pace_lvl;            /* main-loop pacing: 0 OFF, 1..3 fixed, PACE_AUTO follows the speed; pace_lvl is the level AUTO has reached */
     uint32_t mem_off;
@@ -488,11 +491,59 @@ static void apply_prefs(App *a) {
     unlock(a);
 }
 
+/* ---- remembered settings: the flash a firmware saved its patches into, kept per firmware (saves/<sha256>.flash) ------------------------------ */
+static void persist_path(App *a, char *out, size_t n) { char nm[96]; snprintf(nm, sizeof nm, "%s.flash", a->fl_sha); sub_path(out, n, "saves", nm); }
+/* Writes the flash of the loaded package when it changed since the last write (and, with `force`, at once rather than after it has been still for 2 s). */
+static void persist_save(App *a, int force, uint32_t now) {
+    if (!a->remember || !a->fl_sha[0] || a->fw_raw || !fm1ntt_loaded(a->m)) return;
+    uint32_t rev = fm1ntt_flash_revision(a->m);
+    if (rev != a->fl_rev) { a->fl_rev = rev; a->fl_dirty = 1; a->fl_t = now; }
+    if (!a->fl_dirty || (!force && now - a->fl_t < 2000)) return;
+    size_t n = fm1ntt_flash_size();
+    uint8_t *buf = malloc(n);
+    if (!buf) return;
+    lock(a);
+    size_t got = fm1ntt_flash_save(a->m, buf, n);
+    unlock(a);
+    char dir[300], p[360];
+    sub_path(dir, sizeof dir, "saves", NULL);
+    persist_path(a, p, sizeof p);
+    if (got == n && mkdir_p(dir) == 0 && write_atomic(p, buf, n) == 0) a->fl_dirty = 0;
+    else if (force) a->fl_dirty = 0;                       /* a failed final write is not retried forever */
+    free(buf);
+}
+/* After a load: the remembered flash of this firmware, if there is one of the right size, goes back in (the machine resets to it). */
+static void persist_restore(App *a) {
+    if (!a->remember || !a->fl_sha[0] || a->fw_raw) return;
+    char p[360], why[128] = "";
+    size_t n = 0;
+    persist_path(a, p, sizeof p);
+    if (!is_file(p)) return;
+    uint8_t *buf = read_file(p, &n, why, sizeof why);
+    if (!buf) return;
+    int rc = -1;
+    if (n == fm1ntt_flash_size()) { lock(a); rc = fm1ntt_flash_restore(a->m, buf, n); unlock(a); }
+    free(buf);
+    a->fl_rev = fm1ntt_flash_revision(a->m);
+    a->fl_dirty = 0;
+    say(a, rc == 0 ? 1 : 2, rc == 0 ? "Booted with your saved settings" : "Saved settings could not be used", NULL);
+}
+/* A factory reset forgets them. */
+static void persist_forget(App *a) {
+    char p[360];
+    if (!a->fl_sha[0]) return;
+    persist_path(a, p, sizeof p);
+    unlink(p);
+    a->fl_rev = fm1ntt_flash_revision(a->m);
+    a->fl_dirty = 0;
+}
+
 static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
     char why[128] = "";
     size_t n = 0;
     uint8_t *buf = read_file(path, &n, why, sizeof why);
     if (!buf) { say(a, 3, "%s", why); return -1; }
+    persist_save(a, 1, SDL_GetTicks());                     /* the firmware being left keeps what it saved */
     lock(a);
     int rc = raw ? fm1ntt_load_raw(a->m, buf, n, entry) : fm1ntt_load_package(a->m, buf, n);
     unlock(a);
@@ -501,6 +552,7 @@ static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
         static uint8_t found[PV_MAX * 128];
         pv_set(a, found, raw ? 0 : (int)fm1ntt_package_voices(buf, n, found, PV_MAX));
     }
+    if (raw) a->fl_sha[0] = 0; else fm1ntt_sha256_hex(buf, n, a->fl_sha);
     free(buf);
     apply_prefs(a);
     a->fb_ok = 0;
@@ -509,8 +561,11 @@ static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
     snprintf(a->fw_path, sizeof a->fw_path, "%s", path);
     a->fw_raw = raw;
     a->midi_held = 0;
+    a->fl_rev = fm1ntt_flash_revision(a->m);
+    a->fl_dirty = 0;
     speed_reset(a);
     say(a, 1, "Booted %s", a->file);
+    persist_restore(a);
     return 0;
 }
 
@@ -999,6 +1054,7 @@ static void screenshot(App *a) {
 }
 static void do_reset(App *a) {
     lock(a); fm1ntt_reset(a->m); unlock(a);
+    persist_forget(a);                                      /* a reset is a factory reset: what the firmware had saved goes too */
     a->midi_held = 0;
     memset(a->enc_turns, 0, sizeof a->enc_turns);
     speed_reset(a);
@@ -1038,6 +1094,7 @@ static void tools_run(App *a) {
     case 9: a->want_demo = 1; break;
     case 10: job_start(a, JOB_BENCH); break;
     case 11: a->pace_mode = (a->pace_mode + 1) % 5; if (a->pace_mode == PACE_AUTO) a->pace_lvl = 0; apply_prefs(a); say(a, 0, a->pace_mode == PACE_AUTO ? "Pace AUTO: slows the main loop only when the unit cannot keep up" : a->pace_mode ? "Pace fixed: the main loop is slowed, the sound is not" : "Pace off: exact timing", NULL); break;
+    case 14: a->remember = !a->remember; a->fl_dirty = 0; if (a->remember) a->fl_rev = fm1ntt_flash_revision(a->m); say(a, 0, a->remember ? "Remembering the firmware's saved settings between runs" : "Saved settings are no longer kept", NULL); break;
     case 13: a->bg_demos = !a->bg_demos; say(a, 0, a->bg_demos ? "Background demos on: one at a time, paused while you play" : "Background demos off", NULL); break;
     case 12: a->rain_on = !a->rain_on; if (a->rain_on && a->reduced_motion) rain_still(a); say(a, 0, a->rain_on ? (a->reduced_motion ? "Data rain on, as a still page (reduced motion)" : "Data rain on: it shows on the MONITOR panel") : "Data rain off", NULL); break;
     default: break;
@@ -1259,6 +1316,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->tools[8], PX_NAME, "  DEVICE REPORT%s", a->job_kind == JOB_REPORT ? " (RUNNING)" : "");
     snprintf(u->tools[9], PX_NAME, "  REC DEMO");
     snprintf(u->tools[10], PX_NAME, "  BENCHMARK%s", a->job_kind == JOB_BENCH ? " (RUNNING)" : "");
+    snprintf(u->tools[14], PX_NAME, "  REMEMBER SETTINGS: %s", a->remember ? "ON" : "OFF");
     if (a->pace_mode == PACE_AUTO) snprintf(u->tools[11], PX_NAME, "  PACE: AUTO (NOW %d)", a->pace_lvl);
     else if (a->pace_mode) snprintf(u->tools[11], PX_NAME, "  PACE: %d", a->pace_mode);
     else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
@@ -1266,7 +1324,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->tools[13], PX_NAME, "  BACKGROUND DEMOS: %s", a->bg_demos ? (a->sw_pid ? "ON (MAKING ONE)" : "ON") : "OFF");
     u->ntools = NTOOLS;
     u->tool_sel = a->tool_sel;
-    if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried.");
+    if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried, and the saved settings are forgotten.");
     else if (a->confirm == CF_RESTORE) snprintf(u->confirm, sizeof u->confirm, "Restore slot %d into the flash? The machine reboots.", a->slot);
     else if (a->confirm == CF_QUIT) snprintf(u->confirm, sizeof u->confirm, "A recording is running. Stop it, save it and quit?");
     ui_showcase(a, u);
@@ -2962,6 +3020,33 @@ static int selftest(void) {
     while (d && (e = readdir(d))) shots += has_ext(e->d_name, ".bmp");
     if (d) closedir(d);
     CHECK(shots == 1);
+    {   /* remembered settings: what a firmware saved into its flash comes back, per firmware, until a reset */
+        char fwp[300]; default_firmware(fwp, sizeof fwp);
+        if (fwp[0]) {
+            size_t fn = fm1ntt_flash_size(); uint8_t *img = malloc(fn), *back = malloc(fn);
+            a.remember = 1;
+            CHECK(load_firmware(&a, fwp, 0, 0) == 0 && a.fl_sha[0] && strlen(a.fl_sha) == 64);
+            char pp[360]; persist_path(&a, pp, sizeof pp);
+            unlink(pp);
+            persist_save(&a, 1, 100000); CHECK(!is_file(pp));                      /* nothing changed: nothing written */
+            fm1ntt_flash_save(a.m, img, fn); memset(img + fn - 4096, 0x5A, 4096);   /* the firmware saves a setting into the last sector */
+            CHECK(fm1ntt_flash_restore(a.m, img, fn) == 0);
+            persist_save(&a, 0, 100000); CHECK(!is_file(pp) && a.fl_dirty);           /* changed a moment ago: waits for it to be still */
+            persist_save(&a, 0, 102500); CHECK(is_file(pp) && !a.fl_dirty);
+            struct stat ps; CHECK(stat(pp, &ps) == 0 && (size_t)ps.st_size == fn);
+            char pt[380]; snprintf(pt, sizeof pt, "%s.part", pp); CHECK(!is_file(pt));
+            a.remember = 0; fm1ntt_flash_save(a.m, back, fn); memset(back + fn - 4096, 0x33, 4096); fm1ntt_flash_restore(a.m, back, fn);
+            persist_save(&a, 1, 200000); CHECK(stat(pp, &ps) == 0);                   /* off: nothing is written (the file is as it was) */
+            a.remember = 1;
+            CHECK(load_firmware(&a, fwp, 0, 0) == 0);                                 /* the next load puts the saved settings back */
+            fm1ntt_flash_save(a.m, back, fn); CHECK(back[fn - 1] == 0x5A && back[fn - 4096] == 0x5A);
+            CHECK(a.msg_style == 1 && !fm1ntt_halted(a.m));
+            do_reset(&a); CHECK(!is_file(pp));                                        /* a reset forgets them */
+            fm1ntt_flash_save(a.m, back, fn); CHECK(back[fn - 1] != 0x5A);
+            a.remember = 0; CHECK(load_firmware(&a, fwp, 0, 0) == 0); fm1ntt_flash_save(a.m, back, fn); CHECK(back[fn - 1] != 0x5A);
+            free(img); free(back);
+        }
+    }
     a.tool_sel = 3; act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == fm1ntt_jit_available()); act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == 0);
     a.tool_sel = 11; act(&a, A_OK); CHECK(a.pace_mode == 1 && fm1ntt_pace_level(a.m) == 1);
     act(&a, A_OK); act(&a, A_OK); CHECK(a.pace_mode == 3 && fm1ntt_pace_level(a.m) == 3);
@@ -3602,6 +3687,7 @@ int main(int argc, char **argv) {
     a.mode = zoomed ? MODE_ZOOMED : MODE_STANDARD;
     a.panel = panel;
     a.midi_note = 60; a.midi_vel = 100; a.slot = 1;
+    a.remember = !getenv("FM1NTT_FORGET");               /* on: a firmware's saved settings come back next run (TOOLS turns it off) */
     a.jit_pref = !no_jit && !getenv("FM1NTT_NO_JIT");     /* on wherever the CPU supports it: the interpreter cannot keep up on a handheld */
     a.pace_mode = pace_opt;
     a.pin = pin_opt || (getenv("FM1NTT_PIN") && *getenv("FM1NTT_PIN") && strcmp(getenv("FM1NTT_PIN"), "0"));
@@ -3729,6 +3815,7 @@ int main(int argc, char **argv) {
         if (sticks_active(&a)) { dirty = 1; a.last_input_ms = SDL_GetTicks(); }
         audio_sleep_tick(&a, SDL_GetTicks());
         if (toast_poll(&a.toast, SDL_GetTicks())) dirty = 1;
+        persist_save(&a, 0, SDL_GetTicks());
         sticks_tick(&a, SDL_GetTicks());
         { static uint32_t mt; uint32_t nowt = SDL_GetTicks(); if (a.min_on && nowt - mt >= 1000) { mt = nowt; midi_in_tick(&a.min); } }
         if (a.min_on) { uint64_t before = a.min_routed; midi_in_pump(&a); if (a.min_routed != before) dirty = 1; }
@@ -3804,6 +3891,7 @@ int main(int argc, char **argv) {
     if (a.dev) SDL_CloseAudioDevice(a.dev);
     free(a.rec_ring);
     pv_free(&a);
+    persist_save(&a, 1, SDL_GetTicks());
     fm1ntt_free(a.m);
     SDL_DestroyTexture(tex);
     SDL_Quit();

@@ -149,7 +149,7 @@ static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", 
 static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
 
 enum { ED_ROWS = 24 };   /* the instrument editor's rows on a page */
-enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 14, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
+enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 15, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
 
 typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
 

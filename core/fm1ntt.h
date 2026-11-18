@@ -50,6 +50,7 @@ void fm1ntt_midi_stats(fm1ntt_machine *m, uint64_t *queued, uint64_t *dropped);
 void fm1ntt_reset(fm1ntt_machine *m);                                                       /* power-on again, same firmware */
 size_t fm1ntt_flash_size(void);                                                             /* 1 MiB */
 size_t fm1ntt_flash_save(fm1ntt_machine *m, uint8_t *out, size_t cap);                      /* bytes copied, 0 if cap is too small */
+uint32_t fm1ntt_flash_revision(fm1ntt_machine *m);                                           /* changes whenever the flash does (a firmware saved a setting); compare for a change, not an order */
 int fm1ntt_flash_restore(fm1ntt_machine *m, const uint8_t *bytes, size_t len);              /* resets, then restores; 0 ok, -1 */
 int fm1ntt_jit_on(fm1ntt_machine *m);
 void fm1ntt_jit_profile(fm1ntt_machine *m, int on);                                        /* count JIT entries and compiled instructions (before the first run; slows it) */
