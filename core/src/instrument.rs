@@ -12,7 +12,7 @@ use crate::{
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
     fx::{self, Effect, Limiter},
-    globals::{Globals, Route, G_BEND, G_MONO},
+    globals::{Globals, Route, G_BEND, G_FX_CHANNEL, G_MONO, G_STOCK_CC},
     package::{Package, Target},
     sampler::{parse_wav, Kit},
     Error, Result,
@@ -30,6 +30,8 @@ pub struct Instrument {
     engine: Box<dyn Engine>,
     fx: Vec<Box<dyn Effect>>,
     fx_names: Vec<String>,
+    /// an effect switched out of the chain by the stock effect controllers (live state, not saved in a package)
+    fx_off: Vec<bool>,
     safety: Limiter,
     map: Vec<crate::package::MapEntry>,
     voices: Vec<[u8; 128]>,
@@ -98,6 +100,7 @@ impl Instrument {
             engine,
             fx: Vec::new(),
             fx_names: Vec::new(),
+            fx_off: Vec::new(),
             safety: {
                 let mut l = Limiter::new(rate);
                 l.set(0, 95);
@@ -169,6 +172,7 @@ impl Instrument {
                 }
             }
             inst.fx_names.push(f.name.clone());
+            inst.fx_off.push(false);
             inst.fx.push(e);
         }
         for m in &pkg.map {
@@ -243,6 +247,8 @@ impl Instrument {
         self.fx.insert(to, e);
         let name = self.fx_names.remove(from);
         self.fx_names.insert(to, name);
+        let off = self.fx_off.remove(from);
+        self.fx_off.insert(to, off);
         let place = |i: usize| -> usize {
             if i == from {
                 to
@@ -474,6 +480,24 @@ impl Instrument {
         hit
     }
 
+    /// A stock FM-1 effect controller (`stockmap.rs`, controllers 0 to 23) on the first effect of that name in the chain; false when there is none or `cc` is not one.
+    fn stock_cc(&mut self, cc: u8, value: u8) -> bool {
+        let Some((name, act)) = crate::stockmap::act(cc, value) else { return false };
+        let Some(i) = self.fx_names.iter().position(|n| n == name) else { return false };
+        match act {
+            crate::stockmap::Act::Switch(on) => self.fx_off[i] = !on,
+            crate::stockmap::Act::Param(id, v) => {
+                self.fx[i].set(id, v);
+            }
+        }
+        true
+    }
+
+    /// Whether the effect at `i` is in the chain (a stock switch can take it out; a package always starts with every effect in).
+    pub fn fx_on(&self, i: usize) -> bool {
+        self.fx_off.get(i).is_some_and(|o| !o)
+    }
+
     /// One MIDI byte. Running status works, real-time bytes are ignored, a system-exclusive message is skipped to its end, the channel is ignored (omni).
     pub fn midi(&mut self, b: u8) {
         if b >= 0xF8 {
@@ -513,6 +537,14 @@ impl Instrument {
         }
         self.have = 0;
         let (d0, d1) = (self.data[0], self.data[1]);
+        // the stock effect controllers: on the effect channel they are the six effects, even when the notes are omni (so the channel also plays, as on the FM-1)
+        if self.status & 0xF0 == 0xB0
+            && self.globals.get(G_STOCK_CC) == Some(1)
+            && self.globals.get(G_FX_CHANNEL).is_some_and(|c| c != 0 && c == i32::from(self.status & 0x0F) + 1)
+            && self.stock_cc(d0, d1)
+        {
+            return;
+        }
         match self.globals.route(self.status & 0x0F) {
             Route::None => return,
             // the effect channel: controllers through the map, nothing that plays or selects
@@ -614,8 +646,10 @@ impl Instrument {
                 }
                 self.engine.render(&mut chunk[at..]);
             }
-            for f in &mut self.fx {
-                f.process(chunk);
+            for (f, off) in self.fx.iter_mut().zip(&self.fx_off) {
+                if !*off {
+                    f.process(chunk);
+                }
             }
             self.safety.process(chunk);
         }
@@ -1085,7 +1119,7 @@ mod tests {
 #[cfg(test)]
 mod tests_globals {
     use super::*;
-    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_VELOCITY};
+    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_STOCK_CC, G_VELOCITY};
 
     fn none(_: &str) -> Option<Vec<u8>> {
         None
@@ -1258,5 +1292,97 @@ mod tests_globals {
         let mut p = Package::new("T", "analog", "MIT");
         p.globals = vec![(99, 1)];
         assert!(Instrument::from_package(&p, 44_100.0, &none).is_err());
+    }
+
+    fn stock_chain() -> Instrument {
+        let mut p = Package::new("T", "analog", "MIT");
+        p.fx = ["delay", "filter", "reverb", "distortion", "chorus", "phaser"].iter().map(|n| crate::package::FxEntry { name: (*n).into(), params: Vec::new() }).collect();
+        // a package controller that the stock mode must not shadow off the effect channel
+        p.map = vec![crate::package::MapEntry { cc: 1, target: Target::Engine(crate::analog::P_CUTOFF), min: 0, max: 100 }];
+        Instrument::from_package(&p, 44_100.0, &none).unwrap()
+    }
+
+    #[test]
+    fn stock_effect_controllers_on_the_effect_channel() {
+        let mut i = stock_chain();
+        let f = 1; // the filter's place
+        // off by default: the effect channel's CC 2 reaches nothing mapped
+        i.midi_bytes(&[0xB1, 2, 100]);
+        assert_eq!(i.get_fx_param(f, 1), Some(8000), "stock mode is off");
+        i.set_global(G_STOCK_CC, 1);
+        i.midi_bytes(&[0xB1, 2, 100, 0xB1, 3, 5, 0xB1, 1, 2]); // cutoff, Q, type: running status
+        assert_eq!((i.get_fx_param(f, 1), i.get_fx_param(f, 2), i.get_fx_param(f, 0)), (Some(20_000), Some(50), Some(2)));
+        // by name, so the chain's order does not matter
+        assert!(i.move_fx(1, 5));
+        assert_eq!(i.fx_name(5), Some("filter"));
+        i.midi_bytes(&[0xB1, 2, 0]);
+        assert_eq!(i.get_fx_param(5, 1), Some(100));
+        // the reverb's mix and the delay's time (a faster rate, a shorter time)
+        i.midi_bytes(&[0xB1, 7, 40, 0xB1, 10, 100]);
+        let (r, d) = ((0..6).find(|&k| i.fx_name(k) == Some("reverb")).unwrap(), (0..6).find(|&k| i.fx_name(k) == Some("delay")).unwrap());
+        assert_eq!((i.get_fx_param(r, 2), i.get_fx_param(d, 0)), (Some(40), Some(50)));
+    }
+
+    #[test]
+    fn stock_switches_take_an_effect_out_and_back_and_follow_a_move() {
+        let mut i = stock_chain();
+        i.set_global(G_STOCK_CC, 1);
+        assert!((0..6).all(|k| i.fx_on(k)) && !i.fx_on(9));
+        i.midi_bytes(&[0xB1, 12, 0]); // distortion off
+        let k = (0..6).find(|&k| i.fx_name(k) == Some("distortion")).unwrap();
+        assert!(!i.fx_on(k));
+        assert!(i.move_fx(k, 0));
+        assert!(!i.fx_on(0) && i.fx_on(k), "the switch moved with the effect");
+        i.midi_bytes(&[0xB1, 12, 1]);
+        assert!(i.fx_on(0));
+        // it is audible: a distortion in the chain changes the signal, out it does not
+        let mut a = stock_chain();
+        let mut b = stock_chain();
+        for m in [&mut a, &mut b] {
+            m.set_global(G_STOCK_CC, 1);
+            m.set_fx_param(3, 0, 100);
+            m.set_fx_param(3, 3, 100);
+            m.note_on(60, 100);
+        }
+        b.midi_bytes(&[0xB1, 12, 0]);
+        let (x, y) = (run(&mut a, 2048), run(&mut b, 2048));
+        assert_ne!(x, y, "a switched-out distortion is not applied");
+    }
+
+    #[test]
+    fn stock_controllers_leave_the_note_channel_alone() {
+        let mut i = stock_chain();
+        i.set_global(G_STOCK_CC, 1);
+        // CC 1 on the note channel is the mod wheel (the package's map), not the filter type
+        i.midi_bytes(&[0xB0, 1, 127]);
+        assert_eq!(i.get_fx_param(1, 0), Some(0), "the filter type did not move");
+        // with the notes on channel 1 the effect channel 2 still reaches the effects, and a note on it does not play
+        i.set_global(G_CHANNEL, 1);
+        i.midi_bytes(&[0xB1, 1, 1]);
+        assert_eq!(i.get_fx_param(1, 0), Some(1));
+        i.midi_bytes(&[0x91, 60, 100]);
+        assert_eq!(i.sounding(), 0);
+        // omni notes: channel 2 plays too, and its controllers are still the effects
+        i.set_global(G_CHANNEL, 0);
+        i.midi_bytes(&[0x91, 60, 100, 0xB1, 1, 2]);
+        assert_eq!((i.sounding(), i.get_fx_param(1, 0)), (1, Some(2)));
+        // a controller the stock table does not have falls through to the package's map on the effect channel
+        i.set_global(G_CHANNEL, 1);
+        i.midi_bytes(&[0xB1, 40, 1]);
+        // an effect the chain lacks: nothing happens and nothing breaks
+        let mut p = Package::new("T", "analog", "MIT");
+        p.fx = vec![crate::package::FxEntry { name: "delay".into(), params: Vec::new() }];
+        let mut j = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        j.set_global(G_STOCK_CC, 1);
+        j.midi_bytes(&[0xB1, 2, 50, 0xB1, 0, 0, 0xB1, 11, 70]);
+        assert_eq!(j.get_fx_param(0, 2), Some(70));
+    }
+
+    #[test]
+    fn the_stock_setting_survives_a_package() {
+        let mut i = stock_chain();
+        i.set_global(G_STOCK_CC, 1);
+        let back = Instrument::from_package(&i.to_package("", ""), 44_100.0, &none).unwrap();
+        assert_eq!(back.get_global(G_STOCK_CC), Some(1));
     }
 }

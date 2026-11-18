@@ -14,7 +14,10 @@ pub const G_BEND: u16 = 2;
 pub const G_VELOCITY: u16 = 3;
 /// 0 polyphonic, 1 one note at a time, the last played, going back to the one before when it is released.
 pub const G_MONO: u16 = 4;
-pub const G_COUNT: usize = 5;
+/// 0 off, 1 on: controllers 0 to 23 on the effect channel are the stock FM-1's six effects (`stockmap.rs`) and no longer go through the package's map. Notes and other
+/// controllers are unchanged.
+pub const G_STOCK_CC: u16 = 5;
+pub const G_COUNT: usize = 6;
 
 /// name, min, max, default, unit
 const DESC: [(&str, i32, i32, i32, &str); G_COUNT] = [
@@ -23,6 +26,7 @@ const DESC: [(&str, i32, i32, i32, &str); G_COUNT] = [
     ("BEND RANGE", 0, 24, 2, "st"),
     ("FIXED VELOCITY (0 OFF)", 0, 127, 0, ""),
     ("MONO", 0, 1, 0, ""),
+    ("STOCK EFFECT CCS", 0, 1, 0, ""),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +103,7 @@ mod tests {
         let mut g = Globals::new();
         assert_eq!(g.params().len(), G_COUNT);
         assert_eq!((g.get(G_CHANNEL), g.get(G_FX_CHANNEL), g.get(G_BEND), g.get(G_VELOCITY), g.get(G_MONO)), (Some(0), Some(2), Some(2), Some(0), Some(0)));
+        assert_eq!(g.get(G_STOCK_CC), Some(0));
         assert!(g.set(G_BEND, 99) && g.get(G_BEND) == Some(24));
         assert!(!g.set(77, 1) && g.get(77).is_none());
     }

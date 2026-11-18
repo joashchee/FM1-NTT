@@ -625,6 +625,18 @@ pub unsafe extern "C" fn fm1ntt_inst_global_set(h: *mut InstHandle, id: c_int, v
     }
 }
 
+/// 1 when effect `index` is in the chain, 0 when a stock effect switch took it out, -1 when there is no such effect.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_on(h: *const InstHandle, index: usize) -> c_int {
+    match h.as_ref() {
+        Some(h) if index < h.0.fx_count() => c_int::from(h.0.fx_on(index)),
+        _ => -1,
+    }
+}
+
 /// Moves effect `from` to place `to` in the chain (the controller map follows); 0 ok, -1 out of range.
 ///
 /// # Safety
@@ -775,7 +787,7 @@ mod tests {
             assert_eq!((fm1ntt_inst_seq_set(h, 101, 62), fm1ntt_inst_seq_get(h, 101)), (0, 62));
             assert_eq!((fm1ntt_inst_seq_set(h, 55, 1), fm1ntt_inst_seq_get(h, 55)), (-1, i32::MIN));
             assert_eq!(fm1ntt_inst_seq_set(h, 101, 0), 0);
-            assert_eq!(fm1ntt_inst_global_count(h), 5);
+            assert_eq!(fm1ntt_inst_global_count(h), 6);
             let mut gi = [0i32; 4];
             let mut gn = [0 as c_char; 40];
             assert_eq!(fm1ntt_inst_global_param(h, 2, gi.as_mut_ptr(), gn.as_mut_ptr(), 40), 0);
@@ -790,6 +802,7 @@ mod tests {
             assert_eq!(fm1ntt_inst_bank_name(h, 8, bn.as_mut_ptr(), 16), -1);
             assert_eq!(fm1ntt_inst_fx_move(h, 0, 1), -1);
             assert_eq!((fm1ntt_inst_global_count(std::ptr::null()), fm1ntt_inst_fx_move(std::ptr::null_mut(), 0, 0)), (0, -1));
+            assert_eq!((fm1ntt_inst_fx_on(std::ptr::null(), 0), fm1ntt_inst_fx_on(h, 99)), (-1, -1));
             assert_eq!(fm1ntt_inst_arp_count(h), 11);
             assert_eq!(fm1ntt_inst_arp_param(h, 3, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
             assert_eq!((CStr::from_ptr(pn.as_ptr()).to_str().unwrap(), info[1], info[2]), ("BPM", 30, 300));
