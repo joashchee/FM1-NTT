@@ -79,7 +79,7 @@ and the modulation matrix are generic over them, so a new engine gets an editor 
 | `fm6` | DX7-style 6-operator (msfa port), fitted to DX747, Felucca; params 0 to 154 are the patch bytes, 200 up the model |
 | `sampler`, `kit` | IMA ADPCM / WAV, drum map, choke, limiter; fitted to X0X |
 | `analog` | subtractive: polyBLEP saw/pulse/triangle/sine, a state-variable filter, ADSR, 8 voices; **written fresh, not fitted to any firmware** |
-| `fm4` | 4-operator FM for the OPERATOR / Mighty Arp family (`core/src/fm4.rs`, 2026-11-18): eight algorithms, feedback on OP4, per operator a ratio, fine ratio, detune, level, velocity sensitivity, key scaling and ADSR (parameter ids: 0 to 2 global, then ten a operator from 10); 8 voices; **built and tested, fitted to nothing** |
+| `fm4` | 4-operator FM for the OPERATOR / Mighty Arp family (`core/src/fm4.rs`, 2026-11-18): eight algorithms, feedback on OP4, per operator a ratio, fine ratio, detune, level, velocity sensitivity, key scaling and ADSR (parameter ids: 0 to 2 global, then ten a operator from 10); 8 voices; **built; a first fit to OPERATOR 0.7 (below)** |
 
 The shared effects (`core/src/fx.rs`): limiter, delay, low-pass, chorus, reverb, **filter** (low, band, high), **distortion** and **phaser** (2026-11-18: written fresh, fitted to nothing, tested for pass bands, stability, bounds and silence).
 
@@ -110,3 +110,20 @@ Stock is the one firmware with a manual, a MIDI table and a known engine (DX747,
 - Nothing here has been heard on, or run on, a real R36S or a real FM-1.
 - Level B and C ports exist only as far as the engines do. `fm4` is built but unfitted; the level-C reimplementations are open.
 - Extracted data from a GPL firmware is that firmware's: no bank leaves this machine except into the Pack (`docs/LICENSING.md`).
+
+## `fm4` against OPERATOR 0.7 (2026-11-18)
+
+OPERATOR (`npi3pak/fm1-operator`, release v0.7, `operator-0.7.fwsc`, SHA-256 `0ad697a2...c48d7`, matches the release's `SHA256SUMS`; GPL-3.0, so it is **bring-your-own, never copied into this repository**; its source was not read, rule 3) was driven in the emulator by MIDI over the jack and by its panel controls, and its audio measured with `core/examples/fm4fit.rs` (levels, the fundamental and 12 partials by a Fourier sum, an envelope trace). The firmware is an Ableton-Operator-style synth: four operators A to D (our OP1 to OP4), coarse ratio, fine, level in dB, waveform, ADSR with a dB sustain, per-operator feedback, a filter, an LFO and 6 voices; its panel draws the algorithm (algorithm 2 is C and D into B into A).
+
+**Panel controls found** (home page): SELECT steps through D coarse/fine, D level, C coarse/fine, C level, B coarse/fine, B level, A coarse/fine, A level; KNOB1 then turns coarse (or level), KNOB2 fine. Level is steep and uneven (about 0.5 dB a click near -70 dB, 20 clicks from -inf to 0 dB), and a big step in one call is taken as a fast turn, so a level is set by clicking and **read off the screen**: after 5, 8, 12, 16 and 20 clicks, B read -54, -42, -26, -9.5 and 0.0 dB.
+
+**Measured** (note 57, velocity 127 unless said):
+- **A alone at 0 dB: 0.0484 peak (-26.3 dBFS)**, a clean sine. fm4 matches with `LEVEL` 16.
+- **Velocity is linear in amplitude**: 0.0244 at velocity 1 to 0.0484 at 127, half at the bottom (the firmware's default sensitivity). fm4's law was quadratic; now linear, `VELOCITY SENS` 0 to 100 %, default 50.
+- **Release**: 399 ms is the time to fall about 64 dB, 16 dB every 100 ms; the same law is used for decay (not measured separately). fm4's decay and release were 40 dB over the time; now 64 dB.
+- **Modulation, algorithm 1 (B into A, ratio 1:1):** harmonic 2 at **-13.7 dB** and harmonic 3 at **-33.9 dB** under the fundamental with B at 0 dB, which is a Bessel index of **0.42 radians**; with B at -54, -42, -26 and -9.5 dB, harmonic 2 sat 13.6 to 14.1 dB below the level, so **the index is linear in the modulator's amplitude**. fm4 has `MOD INDEX` (tenths of a radian, default 40 for a generic patch); **4 matches OPERATOR**.
+- **Pitch: every note is 146.8 cents flat** (ratio 0.9173 to the nominal, the same on notes 45, 57 and 69). 44100/48000 is 146.8 cents, and the emulator's DAC clock is fixed at about 44.1 kHz (`fm1-soc` `periph.rs`, from Felucca's timer), so **OPERATOR looks like a 48 kHz engine played back at 44.1 kHz here**. Whether a real FM-1 gives the right pitch is not known; the fit above is measured with the offset divided out, and the offset is **a finding about the emulator, open** (does the firmware program a different DAC rate that the core ignores?).
+
+`fitted_to_operator_*` tests in `core/src/fm4.rs` hold these numbers (a patch built the same way: algorithm 1, `LEVEL` 16, `MOD INDEX` 4, velocity 50, decay 998, release 399).
+
+**Not fitted:** the algorithm set (OPERATOR has 11, fm4 has 8 of its own; only 1 and 2 are seen), the waveforms, fixed-frequency mode, per-operator feedback (fm4 has it on OP4 only), the filter, the LFO, key scaling, the attack curve, the coarse ratio table and fine step, level below 0 dB beyond the linear-amplitude check, and **Mighty Arp** (not run). The fm4 envelope's sustain is linear in amplitude (OPERATOR's is in dB).

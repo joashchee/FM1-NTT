@@ -9,10 +9,14 @@ use std::f64::consts::TAU;
 
 pub const VOICES: usize = 8;
 pub const OPS: usize = 4;
+/// The decibels a decay or release time spans (see `render`).
+const ENV_DB: f64 = 64.0;
 
 pub const P_ALGORITHM: u16 = 0;
 pub const P_FEEDBACK: u16 = 1;
 pub const P_LEVEL: u16 = 2;
+/// The phase swing of a modulator at full level, in tenths of a radian (OPERATOR 0.7: 4, so 0.4; the generic default is 4 radians).
+pub const P_INDEX: u16 = 3;
 /// Operator `n` (0 to 3, shown as OP1 to OP4) has `OP_PARAMS` parameters from `OP_BASE + n * OP_PARAMS`.
 pub const OP_BASE: u16 = 10;
 pub const OP_PARAMS: u16 = 10;
@@ -34,7 +38,7 @@ pub const fn op_param(op: usize, field: u16) -> u16 {
 }
 
 /// name, min, max, default, unit
-const GLOBAL: [(&str, i32, i32, i32, &str); 3] = [("ALGORITHM (1-8)", 0, 7, 0, ""), ("FEEDBACK (OP4)", 0, 7, 0, ""), ("LEVEL", 0, 100, 70, "%")];
+const GLOBAL: [(&str, i32, i32, i32, &str); 4] = [("ALGORITHM (1-8)", 0, 7, 0, ""), ("FEEDBACK (OP4)", 0, 7, 0, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.1 RAD)", 1, 200, 40, "")];
 const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
     ("RATIO (0 = 0.5)", 0, 31, 1, ""),
     ("FINE RATIO", 0, 99, 0, "%"),
@@ -44,7 +48,7 @@ const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
     ("DECAY", 1, 5000, 400, "ms"),
     ("SUSTAIN", 0, 99, 60, ""),
     ("RELEASE", 1, 5000, 250, "ms"),
-    ("VELOCITY SENS", 0, 7, 2, ""),
+    ("VELOCITY SENS", 0, 100, 50, "%"),
     ("KEY SCALING", 0, 7, 0, ""),
 ];
 
@@ -242,13 +246,15 @@ impl Engine for Fm4 {
         let mut level = [0.0; OPS];
         let mut vsens = [0.0; OPS];
         let mut kscale = [0.0; OPS];
+        // decay and release times are the time to fall 64 dB (fitted to OPERATOR 0.7: 399 ms fell 64 dB, 16 dB a 100 ms); the attack aims past 1 and stops at 1
+        let fall = |ms: i32| 1.0 - (-1.0 / (ms.max(1) as f64 * 0.001 * rate / (ENV_DB / 8.685_889_6))).exp();
         let step = |ms: i32| 1.0 - (-1.0 / (ms.max(1) as f64 * 0.001 * rate / 4.6)).exp();
         for op in 0..OPS {
             ratio[op] = self.ratio(op);
-            a[op] = [step(self.op(op, O_ATTACK).max(1)), step(self.op(op, O_DECAY)), step(self.op(op, O_RELEASE))];
+            a[op] = [step(self.op(op, O_ATTACK).max(1)), fall(self.op(op, O_DECAY)), fall(self.op(op, O_RELEASE))];
             sustain[op] = self.op(op, O_SUSTAIN) as f64 / 99.0;
             level[op] = amp_of(self.op(op, O_LEVEL));
-            vsens[op] = self.op(op, O_VELOCITY) as f64 / 7.0;
+            vsens[op] = self.op(op, O_VELOCITY) as f64 / 100.0;
             kscale[op] = self.op(op, O_KEYSCALE) as f64 / 7.0;
         }
         let alg = &ALGORITHMS[self.p[P_ALGORITHM as usize].clamp(0, 7) as usize];
@@ -258,7 +264,7 @@ impl Engine for Fm4 {
         let live = self.voices.iter().filter(|v| v.active).count().max(1);
         let poly = if live > 4 { (4.0 / live as f64).sqrt() } else { 1.0 };
         let bend = self.bend;
-        const INDEX: f64 = 4.0; // the phase swing (radians) of a modulator at full level
+        let index = self.p[P_INDEX as usize] as f64 / 10.0; // the phase swing (radians) of a modulator at full level
         for o in out.iter_mut() {
             let mut acc = 0.0;
             for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -280,7 +286,7 @@ impl Engine for Fm4 {
                     let mut pm = 0.0;
                     for k in 0..OPS {
                         if alg.modulators[op] >> k & 1 == 1 {
-                            pm += INDEX * v.ops[k].out;
+                            pm += index * v.ops[k].out;
                         }
                     }
                     let s = &mut v.ops[op];
@@ -290,8 +296,8 @@ impl Engine for Fm4 {
                     let inc = v.f0 * bend * ratio[op] / rate;
                     s.ph += inc;
                     s.ph -= s.ph.floor();
-                    // velocity: a sensitivity of 7 takes a soft note down to a fifth; key scaling: higher notes quieter by up to 12 dB an octave-set
-                    let vel = 1.0 - vsens[op] * (1.0 - v.vel * v.vel);
+                    // velocity: linear, from (1 - sensitivity) at velocity 0 to 1 at 127 (OPERATOR 0.7 at its default of 50%: half at 0, measured); key scaling: higher notes quieter
+                    let vel = 1.0 - vsens[op] * (1.0 - v.vel);
                     let key = 1.0 - kscale[op] * ((v.note as f64 - 36.0) / 91.0).clamp(0.0, 1.0) * 0.75;
                     let amp = level[op] * s.env * vel.max(0.05) * key;
                     s.out = (TAU * (s.ph) + pm).sin() * amp;
@@ -463,7 +469,8 @@ mod tests {
             e.render(&mut buf);
             peak(&buf)
         };
-        assert!(level(20, 7) < level(127, 7) / 2);
+        assert!(level(20, 100) < level(127, 100) / 2);
+        assert!((level(1, 50) as f64 / level(127, 50) as f64 - 0.5).abs() < 0.02, "the default: half at velocity 1");
         let flat = (level(20, 0) as f64 - level(127, 0) as f64).abs() / level(127, 0) as f64;
         assert!(flat < 0.05, "no sensitivity: velocity does nothing ({flat})");
         // a slow attack starts quiet; a decay to a low sustain falls
@@ -501,8 +508,95 @@ mod tests {
         assert!(!e.set(P_COUNT as u16, 1) && e.get(5).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 3 + OPS * OP_PARAMS as usize);
+        assert_eq!(ps.len(), 4 + OPS * OP_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
+    }
+
+    /// The amplitude of a sine at `f` Hz in `x` (a single-frequency Fourier sum over whole periods' worth, Hann-weighted).
+    fn tone(x: &[i16], f: f64) -> f64 {
+        let n = x.len();
+        let (mut c, mut s) = (0.0, 0.0);
+        for (i, &v) in x.iter().enumerate() {
+            let w = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n as f64).cos();
+            let a = std::f64::consts::TAU * f * i as f64 / 44_100.0;
+            c += v as f64 / 32768.0 * w * a.cos();
+            s += v as f64 / 32768.0 * w * a.sin();
+        }
+        c.hypot(s) / (n as f64 / 4.0)
+    }
+
+    /// The numbers measured on OPERATOR 0.7 in the emulator (docs/PORTING.md, 2026-11-18): algorithm 1 with B open at 0 dB and A at 0 dB, note 57 at velocity
+    /// 127: A alone 0.0484 peak (-26.3 dBFS), harmonic 2 at -13.7 dB and harmonic 3 at -33.9 dB under the fundamental (a modulation index of 0.42 at 0 dB, linear in
+    /// the level's amplitude), amplitude linear in velocity down to half at velocity 0, and a 399 ms release that falls 16 dB every 100 ms.
+    fn operator() -> Fm4 {
+        let mut e = Fm4::new(44_100.0);
+        e.set(P_ALGORITHM, 0);
+        e.set(P_LEVEL, 16);
+        e.set(P_INDEX, 4);
+        for op in 0..OPS {
+            e.set(op_param(op, O_ATTACK), 1);
+            e.set(op_param(op, O_DECAY), 998);
+            e.set(op_param(op, O_SUSTAIN), 99);
+            e.set(op_param(op, O_RELEASE), 399);
+            e.set(op_param(op, O_VELOCITY), 50);
+            e.set(op_param(op, O_LEVEL), 0);
+        }
+        e.set(op_param(0, O_LEVEL), 99);
+        e
+    }
+
+    #[test]
+    fn fitted_to_operator_a_single_carrier() {
+        let mut e = operator();
+        e.note_on(57, 127);
+        let mut b = vec![0i16; 44_100];
+        e.render(&mut b);
+        let pk = peak(&b[10_000..]) as f64 / 32768.0;
+        assert!((pk / 0.0484 - 1.0).abs() < 0.05, "A alone peaks at {pk}, OPERATOR at 0.0484");
+        let mut q = operator();
+        q.note_on(57, 1);
+        let mut c = vec![0i16; 44_100];
+        q.render(&mut c);
+        let half = peak(&c[10_000..]) as f64 / peak(&b[10_000..]) as f64;
+        assert!((half - 0.5).abs() < 0.02, "velocity 1 is {half} of velocity 127, OPERATOR 0.504");
+    }
+
+    #[test]
+    fn fitted_to_operator_the_modulation_index() {
+        let f0 = 440.0 * 2f64.powf((57.0 - 69.0) / 12.0);
+        let mut e = operator();
+        e.set(op_param(1, O_LEVEL), 99);
+        e.note_on(57, 127);
+        let mut b = vec![0i16; 44_100];
+        e.render(&mut b);
+        let seg = &b[10_000..10_000 + 32_768];
+        let h1 = tone(seg, f0);
+        let db = |h: f64| 20.0 * (tone(seg, f0 * h) / h1).log10();
+        assert!((db(2.0) + 13.7).abs() < 0.6, "harmonic 2 at {:.1} dB, OPERATOR -13.7", db(2.0));
+        assert!((db(3.0) + 33.9).abs() < 2.0, "harmonic 3 at {:.1} dB, OPERATOR -33.9", db(3.0));
+        // linear in the modulator's amplitude: 12 dB down in level (99 -> about 75: 0.75 dB a step is 18 dB, so 3 steps short of a factor 4) is a quarter of the index
+        let mut q = operator();
+        q.set(op_param(1, O_LEVEL), 99 - 16); // 12 dB down
+        q.note_on(57, 127);
+        let mut c = vec![0i16; 44_100];
+        q.render(&mut c);
+        let seg2 = &c[10_000..10_000 + 32_768];
+        let drop = 20.0 * (tone(seg2, f0 * 2.0) / tone(seg2, f0)).log10() - db(2.0);
+        assert!((drop + 12.0).abs() < 0.7, "the second harmonic fell {drop:.1} dB for a 12 dB lower modulator");
+    }
+
+    #[test]
+    fn fitted_to_operator_the_release_slope() {
+        let mut e = operator();
+        e.note_on(57, 127);
+        let mut b = vec![0i16; 22_050];
+        e.render(&mut b);
+        e.note_off(57);
+        let rms = |x: &[i16]| 20.0 * ((x.iter().map(|&v| (v as f64 / 32768.0).powi(2)).sum::<f64>() / x.len() as f64).sqrt()).log10();
+        let mut tail = vec![0i16; 4410 * 4];
+        e.render(&mut tail);
+        let (a, c) = (rms(&tail[..4410]), rms(&tail[4410..8820]));
+        assert!((a - c - 16.0).abs() < 2.0, "{a:.1} then {c:.1}: OPERATOR falls 16 dB in 100 ms");
     }
 }
