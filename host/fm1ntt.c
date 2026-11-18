@@ -42,6 +42,7 @@
 #include "pix.h"
 #include "threads.h"
 #include "toast.h"
+#include "midi_in.h"
 
 #ifndef FM1NTT_BUILD
 #define FM1NTT_BUILD "unknown"
@@ -81,6 +82,9 @@ typedef struct {
     uint32_t axis_t;
     int scale, key_shift, menu_back;
     Toast toast;                        /* the hot-plug toast over row 0 */
+    MidiIn min;                         /* USB MIDI input (host/midi_in.h): a ring the main loop empties into the instrument or the machine */
+    int min_on;                         /* the reader started */
+    uint64_t min_routed;                /* messages sent on */
     volatile int master_att;            /* percent the master level is cut by (0: unity) */
     int pot;
     /* files */
@@ -805,9 +809,8 @@ static void pot(App *a, int by) {
     if (mq_on(a)) { fm1ntt_evq_push_pot(a->mevq, now_us(), a->pot); return; }
     lock(a); fm1ntt_pot(a->m, a->pot); unlock(a);
 }
-static void midi_send(App *a, const uint8_t *b, int n, int log) {
+static void midi_send_at(App *a, const uint8_t *b, int n, int log, uint64_t t) {
     if (mq_on(a)) {          /* no lock: the callback puts each message into the jack at its own frame (core/src/evq.rs) */
-        uint64_t t = now_us();
         for (int i = 0; i < n; i += 3) fm1ntt_evq_push(a->mevq, t, b + i, (size_t)(n - i < 3 ? n - i : 3));
     } else {
         lock(a);
@@ -818,6 +821,28 @@ static void midi_send(App *a, const uint8_t *b, int n, int log) {
         if (a->midi_log_n == PX_MIDI_LOG) { memmove(a->midi_log, a->midi_log + 1, PX_MIDI_LOG - 1); a->midi_log_n--; }
         a->midi_log[a->midi_log_n++] = b[i];
     }
+}
+static void midi_send(App *a, const uint8_t *b, int n, int log) { midi_send_at(a, b, n, log, now_us()); }
+/* A message from a USB MIDI device, with the time it arrived. It plays the instrument when one is on in SOUND (arpeggiator, sequencer and clock included), the
+ * built-in voice when that is what the preview plays, else it goes into the machine's MIDI jack like the MIDI panel's own bytes. Clock bytes are not logged. */
+static void midi_in_route(App *a, const MidiMsg *m) {
+    a->last_input_ms = SDL_GetTicks();
+    a->min_routed++;
+    if (a->inst && a->evq && a->pv_on) { fm1ntt_evq_push(a->evq, m->ts, m->b, m->n); return; }
+    if (a->pv && !a->inst && a->pv_on) {
+        int st = m->b[0] & 0xF0;
+        lock(a);
+        if (st == 0x90 && m->b[2]) fm1ntt_fm6_note_on(a->pv, m->b[1], m->b[2]);
+        else if (st == 0x80 || st == 0x90) fm1ntt_fm6_note_off(a->pv, m->b[1]);
+        unlock(a);
+        return;
+    }
+    if (fm1ntt_loaded(a->m)) midi_send_at(a, m->b, m->n, m->b[0] < 0xF8, m->ts);
+}
+static void midi_in_pump(App *a) {
+    MidiMsg m;
+    if (!a->min_on) return;
+    for (int i = 0; i < 256 && midi_in_pop(&a->min, &m); i++) midi_in_route(a, &m);
 }
 static void panic_all(App *a) {
     uint8_t m[3];
@@ -1104,6 +1129,7 @@ static void act(App *a, int act) {
 /* ---- the UI state, from the app and the core --------------------------------------------------------------------------- */
 static void fill_ui(App *a, UiState *u, int use_lock) {
     memset(u, 0, sizeof *u);
+    u->midi_in_devs = a->min_on ? a->min.devs : -1; u->midi_in_got = a->min_routed;
     u->panel = a->panel;
     if (use_lock) lock(a);
     int loaded = fm1ntt_loaded(a->m);
@@ -2962,6 +2988,36 @@ static int selftest(void) {
         char nm[16]; pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "FIRST"));
         int16_t quiet[2 * 2048], loud[2 * 2048];
         audio_step(&a, quiet, 2048);
+        {   /* USB MIDI input (host/midi_in.h): the byte parser, then the reader on a FIFO named like a raw MIDI device */
+            MidiParser mp; uint8_t o[3];
+            memset(&mp, 0, sizeof mp);
+            CHECK(midi_parse(&mp, 0x90, o) == 0 && midi_parse(&mp, 60, o) == 0 && midi_parse(&mp, 100, o) == 3 && o[0] == 0x90 && o[1] == 60 && o[2] == 100);
+            CHECK(midi_parse(&mp, 62, o) == 0 && midi_parse(&mp, 0xF8, o) == 1 && o[0] == 0xF8 && midi_parse(&mp, 90, o) == 3 && o[0] == 0x90 && o[1] == 62 && o[2] == 90);   /* running status; a clock byte inside a message */
+            CHECK(midi_parse(&mp, 0xC0, o) == 0 && midi_parse(&mp, 7, o) == 2 && o[0] == 0xC0 && o[1] == 7 && o[2] == 0);                       /* program change: one data byte */
+            CHECK(midi_parse(&mp, 0xF0, o) == 0 && midi_parse(&mp, 1, o) == 0 && midi_parse(&mp, 2, o) == 0 && midi_parse(&mp, 0xF7, o) == 0 && midi_parse(&mp, 5, o) == 0);   /* exclusive skipped; no status after it */
+            CHECK(midi_parse(&mp, 0xFA, o) == 1 && midi_parse(&mp, 0xFC, o) == 1);
+            CHECK(midi_parse(&mp, 0xE0, o) == 0 && midi_parse(&mp, 0, o) == 0 && midi_parse(&mp, 64, o) == 3 && o[0] == 0xE0 && o[2] == 64);
+            CHECK(midi_in_isdev("midiC1D0") && midi_in_isdev("midiC12D3") && !midi_in_isdev("midiC1") && !midi_in_isdev("pcmC0D0p") && !midi_in_isdev("midiCD0"));
+            char dir[300], fifo[340];
+            snprintf(dir, sizeof dir, "%s/fm1ntt-midiin-%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+            snprintf(fifo, sizeof fifo, "%s/midiC9D0", dir);
+            mkdir(dir, 0700);
+            if (mkfifo(fifo, 0600) == 0) {
+                int wfd = open(fifo, O_RDWR | O_NONBLOCK);               /* the "device"; held open so the reader sees no end of file */
+                MidiIn mi;
+                CHECK(wfd >= 0 && midi_in_start(&mi, dir) == 0);
+                const uint8_t wire[] = {0x90, 60, 100, 62, 90, 0xF8, 0x80, 60, 0};
+                CHECK(write(wfd, wire, sizeof wire) == (ssize_t)sizeof wire);
+                MidiMsg got[8]; int ng = 0;
+                for (int i = 0; i < 400 && ng < 4; i++) { if (!midi_in_pop(&mi, &got[ng])) SDL_Delay(5); else ng++; }
+                CHECK(ng == 4 && mi.devs == 1 && mi.dropped == 0);
+                CHECK(ng == 4 && got[0].n == 3 && got[0].b[0] == 0x90 && got[0].b[1] == 60 && got[1].b[1] == 62 && got[1].b[2] == 90 && got[2].n == 1 && got[2].b[0] == 0xF8 && got[3].b[0] == 0x80 && got[3].b[2] == 0);
+                CHECK(ng == 4 && got[1].ts >= got[0].ts && got[3].ts >= got[2].ts && now_us() - got[3].ts < 5000000);
+                midi_in_stop(&mi);
+                close(wfd);
+            } else CHECK(0);
+            remove(fifo); rmdir(dir);
+        }
         {   /* the machine's MIDI through its queue: pushed without the lock, taken by the callback, none left; not while paused (that goes straight in) */
             uint8_t on[3] = {0x90, 60, 100};
             a.mevq = fm1ntt_evq_new(64); a.mq_live = 1;
@@ -3047,6 +3103,12 @@ static int selftest(void) {
                 { long qe = 0; for (int i = 0; i < 2 * 2048; i++) qe += abs(io[i]); CHECK(qe > 2048L * 50); }
                 pv_note(&a, &a.pv_key[0], 60, 0);
                 CHECK(fm1ntt_evq_len(a.evq) == 1);
+                {   /* a USB MIDI message plays the instrument through its queue, with the time it arrived, and wakes the audio device */
+                    MidiMsg mm = {.ts = now_us(), .n = 3, .b = {0x90, 64, 100}};
+                    a.pv_on = 1; a.last_input_ms = 0;
+                    midi_in_route(&a, &mm);
+                    CHECK(fm1ntt_evq_len(a.evq) == 2 && a.min_routed == 1 && a.last_input_ms != 0);
+                }
                 fm1ntt_evq_free(a.evq); a.evq = NULL;
                 CHECK(inst_load(&a, "/nonexistent/none.fm1i") != 0 && a.inst != NULL && a.msg_style == 2);   /* a bad load keeps the instrument and says why */
                 {   /* the instrument editor: B opens it, a page of the group's parameters, +-1 and a big step, the groups, a save that never overwrites the source, and the picker */
@@ -3637,6 +3699,7 @@ int main(int argc, char **argv) {
         if (load_firmware(&a, path, raw, entry) != 0) a.panel = PANEL_FILES;
     }
     if (inst_opt && inst_load(&a, inst_opt) == 0) { a.panel = PANEL_SOUND; a.pv_on = 1; a.pv_solo = !fm1ntt_loaded(a.m); }   /* an instrument: play it now, alone when no firmware is given */
+    if (!getenv("FM1NTT_NO_MIDI_IN")) a.min_on = midi_in_start(&a.min, NULL) == 0;
     trace_open();
     toast_init(&a.toast, "/run/r3i6nos-hotplug/events", SDL_GetTicks());
     if (a.dev) SDL_PauseAudioDevice(a.dev, 0);
@@ -3661,6 +3724,8 @@ int main(int argc, char **argv) {
         audio_sleep_tick(&a, SDL_GetTicks());
         if (toast_poll(&a.toast, SDL_GetTicks())) dirty = 1;
         sticks_tick(&a, SDL_GetTicks());
+        { static uint32_t mt; uint32_t nowt = SDL_GetTicks(); if (a.min_on && nowt - mt >= 1000) { mt = nowt; midi_in_tick(&a.min); } }
+        if (a.min_on) { uint64_t before = a.min_routed; midi_in_pump(&a); if (a.min_routed != before) dirty = 1; }
         rec_pump(&a);
         speed_tick(&a);
         if (job_poll(&a)) dirty = 1;
@@ -3725,6 +3790,7 @@ int main(int argc, char **argv) {
             settle--;
         }
     }
+    if (a.min_on) midi_in_stop(&a.min);
     rec_stop(&a);
     show_shutdown(&a);
     player_stop(&a);

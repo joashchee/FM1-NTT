@@ -191,6 +191,8 @@ typedef struct {
     uint8_t midi_log[PX_MIDI_LOG];
     int midi_log_n;
     uint64_t midi_queued, midi_dropped;
+    int midi_in_devs;                 /* USB MIDI inputs open (-1: no reader) */
+    uint64_t midi_in_got;             /* messages received from them */
     /* sound */
     int level_l, level_r, peak_l, peak_r;
     int16_t scope[PX_SCOPE];
@@ -579,6 +581,14 @@ static inline void px_panel_midi(uint32_t *c, PxRect r, const UiState *u, int na
     if (!u->midi_log_n) px_text(c, x, r.y + 150, "NOTHING SENT YET", C_DIM, 1, w);
     px_box(c, (PxRect){r.x + 4, r.y + 236, r.w - 8, 40}, "FROM THE FM-1");
     px_wrap(c, x, r.y + 248, "ITS MIDI OUT IS NOT EXPOSED BY THE CORE YET", C_DIM, w, 2);
+    px_box(c, (PxRect){r.x + 4, r.y + 284, r.w - 8, 40}, "USB MIDI IN");
+    if (u->midi_in_devs < 0) px_text(c, x, r.y + 296, "NOT AVAILABLE", C_DIM, 1, w);
+    else {
+        snprintf(line, sizeof line, "DEVICES  %d", u->midi_in_devs);
+        px_text(c, x, r.y + 296, line, u->midi_in_devs ? C_OK : C_DIM, 1, w);
+        snprintf(line, sizeof line, "RECEIVED %llu", (unsigned long long)u->midi_in_got);
+        px_text(c, x, r.y + 308, line, C_TEXT, 1, w);
+    }
 }
 
 /* The instrument editor: a whole page of the chosen group's parameters (engine, arpeggiator, each effect), the row marked, its value at the right and a bar for where it sits in
