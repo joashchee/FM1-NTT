@@ -95,6 +95,16 @@ across the bank, all notes off), and renders mono or stereo with the limiter las
 The oracle half needs the emulator, so the comparison tool is `fm6cmp` (`docs/FM6.md`); `verify` holds the part both sides share: render a note,
 measure its level (dB RMS), its pitch (a peak search, cents) and its decay, and compare two renders. A package's `verify` line is what that returned.
 
+## What the stock firmware adds to the flow (2026-11-18, from `docs/HARDWARE.md` and `docs/FM-1-MIDI.md`; nothing run)
+
+Stock is the one firmware with a manual, a MIDI table and a known engine (DX747, matched by `fm6` within 0.03 dB). Its port is **local-only**: a vendor binary (rule 2), so any test using it skips when it is absent.
+
+- **EXTRACT has two routes.** The file (`fwx`) finds no packed bank in the stock `.fwsc`; the manual puts voices in flash (4 banks x 32). The second route reads them from the running machine: the emulated flash after boot, or a bank dump over MIDI (precedent: Felucca's `FM6_PUT`). Whether stock's flash can be read this way is unchecked.
+- **OBSERVE can be driven by MIDI.** If the MIDI table (effect channel 2 by default) selects presets and sets effect parameters, a new family needs no panel-click recipe like `port::felucca_steps`. Unchecked against the table.
+- **FIT has an effects target.** Six slots in a reorderable chain: filter (LP/BP/HP, log cutoff, Q), reverb (room/hall/plate), delay, distortion, chorus, phaser. `fx.rs` lacks distortion, phaser, the BP/HP modes and reordering.
+- **A fourth level, between B and C: ARP and SEQ.** Their behaviour is documented well enough to write from the manual and verify against stock, so they are a declarative host feature, not emulator-only level C.
+- **The package is too thin for a complete port.** It must also carry four banks, global settings (MIDI channel, effect channel, bend range, velocity, glide), the effect-chain order, mono/poly and ARP/SEQ patterns.
+
 ## Limits (said plainly)
 
 - Nothing here has been heard on, or run on, a real R36S or a real FM-1.
