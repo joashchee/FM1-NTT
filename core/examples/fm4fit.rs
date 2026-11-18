@@ -2,7 +2,10 @@
 //! `key:NAME`, `wait:S`, `midi:HEX,...`, `shot:FILE.png`) and then `play:NOTE:VEL:HOLD`, which plays a MIDI note over the jack and prints what it
 //! sounded like: the level, the fundamental, and the first 12 partials in dB relative to the strongest (docs/PORTING.md). The firmware is read as data.
 use fm1ntt::{devices, fm4, engine::Engine, fm4::Fm4, machine::Machine};
-use std::{f64::consts::PI, fs, process::ExitCode};
+use std::{f64::consts::PI, fs, process::ExitCode, sync::atomic::{AtomicUsize, Ordering}};
+
+/// The analysis window in samples (`n:8192` for a short one: a firmware that retriggers every third of a second); a power of two.
+static WIN_N: AtomicUsize = AtomicUsize::new(32768);
 
 fn fft(re: &mut [f64], im: &mut [f64]) {
     let n = re.len();
@@ -38,8 +41,10 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
 }
 
 /// The amplitude (0 to 1 of full scale, as a sine's peak) of the spectrum near `f` (the largest bin within 1.5%), from a Hann window of 32768 samples at `at`.
+#[allow(non_snake_case)]
 fn partial(x: &[f64], at: usize, f: f64) -> (f64, f64) {
-    const N: usize = 32768;
+    let n_win = WIN_N.load(Ordering::Relaxed);
+    let N = n_win;
     let mut re = vec![0.0; N];
     let mut im = vec![0.0; N];
     for (i, r) in re.iter_mut().enumerate() {
@@ -59,8 +64,9 @@ fn partial(x: &[f64], at: usize, f: f64) -> (f64, f64) {
 }
 
 /// The amplitude of a sine at exactly `f` Hz in 32768 samples from `at` (a single-frequency Fourier sum, Hann-weighted).
+#[allow(non_snake_case)]
 fn tone_amp(x: &[f64], at: usize, f: f64) -> f64 {
-    const N: usize = 32768;
+    let N = WIN_N.load(Ordering::Relaxed);
     let (mut c, mut s) = (0.0, 0.0);
     let w = 2.0 * PI * f / 44_100.0;
     for i in 0..N {
@@ -111,6 +117,8 @@ fn main() -> ExitCode {
     let Ok(mut m) = Machine::from_package(&bytes) else { eprintln!("not a package"); return ExitCode::from(1) };
     m.set_jit(true);
     let mut rec: Vec<f64> = Vec::new();
+    let mut narrow = false; // `narrow`: the fundamental is where the note says (a firmware in tune), not the strongest peak
+    let mut win: Option<f64> = None; // `win:S`: analyse from S seconds after the first sound (a firmware that arpeggiates starts late and retriggers)
     let run = |m: &mut Machine, secs: f64, rec: Option<&mut Vec<f64>>| {
         let target = m.ms() + (secs * 1000.0) as u64;
         let mut out = vec![0i16; 2 * 1024];
@@ -129,6 +137,9 @@ fn main() -> ExitCode {
         let f: Vec<&str> = a.split(':').collect();
         match f[0] {
             "wait" => run(&mut m, f[1].parse().unwrap_or(0.5), None),
+            "win" => win = f[1].parse().ok(),
+            "narrow" => narrow = true,
+            "n" => WIN_N.store(f[1].parse().unwrap_or(32768usize).next_power_of_two().clamp(1024, 65536), Ordering::Relaxed),
             "enc" => {
                 let Some(e) = devices::ENCODER_NAMES.iter().position(|n| *n == f[1]) else { eprintln!("no encoder {}", f[1]); return ExitCode::from(2) };
                 m.encoder(e as u8, f.get(2).and_then(|c| c.parse().ok()).unwrap_or(1));
@@ -195,12 +206,15 @@ fn main() -> ExitCode {
                     run(&mut m, 1.5, Some(&mut rec));
                 }
                 let mut f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
-                let at = (0.6 * 44_100.0) as usize;
+                let at = match win {
+                    Some(w) => rec.iter().position(|v| v.abs() > 3e-4).unwrap_or(0) + (w * 44_100.0) as usize,
+                    None => (0.6 * 44_100.0) as usize,
+                };
                 // the true fundamental: the strongest peak in 0.5x to 2x of nominal, so a firmware's tuning offset does not hide it
-                let wide = partial_wide(&rec, at, f0 * 0.5, f0 * 2.0);
+                let wide = if narrow { partial_wide(&rec, at, f0 * 0.97, f0 * 1.03) } else { partial_wide(&rec, at, f0 * 0.5, f0 * 2.0) };
                 println!("  strongest peak {:.3} Hz amp {:.4}", wide.1, wide.0);
                 f0 = wide.1;
-                let seg = &rec[at.min(rec.len())..(at + 32768).min(rec.len())];
+                let seg = &rec[at.min(rec.len())..(at + WIN_N.load(Ordering::Relaxed)).min(rec.len())];
                 let peak = seg.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
                 let (a1, fr) = partial(&rec, at, f0);
                 println!("note {note} vel {vel}: peak {:.4} ({:.1} dBFS), fundamental {:.3} Hz (nominal {:.3}, {:+.2} cents) amp {:.4}", peak, 20.0 * peak.max(1e-9).log10(), fr, f0, 1200.0 * (fr / f0).log2(), a1);

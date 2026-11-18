@@ -18,6 +18,8 @@ pub const P_FEEDBACK: u16 = 1;
 pub const P_LEVEL: u16 = 2;
 /// The phase swing of a modulator at full level, in hundredths of a radian (OPERATOR 0.7: 628, one whole cycle; the generic default is 4 radians).
 pub const P_INDEX: u16 = 3;
+/// How an operator's level maps to amplitude: 0 a DX-style law (0.75 dB a step down from 99, OPERATOR 0.7), 1 linear (level / 100, Mighty Arp 1.5).
+pub const P_LEVEL_LAW: u16 = 4;
 /// Operator `n` (0 to 3, shown as OP1 to OP4) has `OP_PARAMS` parameters from `OP_BASE + n * OP_PARAMS`.
 pub const OP_BASE: u16 = 10;
 pub const OP_PARAMS: u16 = 11;
@@ -40,12 +42,12 @@ pub const fn op_param(op: usize, field: u16) -> u16 {
 }
 
 /// name, min, max, default, unit
-const GLOBAL: [(&str, i32, i32, i32, &str); 4] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, "")];
+const GLOBAL: [(&str, i32, i32, i32, &str); 5] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, ""), ("LEVEL LAW (0 DB STEPS 1 LINEAR)", 0, 1, 0, "")];
 const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
     ("RATIO (0 = 0.5)", 0, 31, 1, ""),
     ("FINE RATIO", 0, 99, 0, "%"),
     ("DETUNE", -50, 50, 0, "cents"),
-    ("LEVEL", 0, 99, 99, ""),
+    ("LEVEL", 0, 100, 99, ""),
     ("ATTACK", 0, 5000, 2, "ms"),
     ("DECAY", 1, 5000, 400, "ms"),
     ("SUSTAIN", 0, 99, 60, ""),
@@ -144,7 +146,11 @@ pub struct Fm4 {
 }
 
 /// The amplitude of a level 0 to 99: 0.75 dB a step down from 99 (a DX-like law), and silence at 0.
-fn amp_of(level: i32) -> f64 {
+fn amp_of(level: i32, linear: bool) -> f64 {
+    if linear {
+        return level.clamp(0, 100) as f64 / 100.0;
+    }
+    let level = level.min(99);
     if level <= 0 {
         0.0
     } else {
@@ -261,7 +267,7 @@ impl Engine for Fm4 {
             ratio[op] = self.ratio(op);
             a[op] = [step(self.op(op, O_ATTACK).max(1)), fall(self.op(op, O_DECAY)), fall(self.op(op, O_RELEASE))];
             sustain[op] = self.op(op, O_SUSTAIN) as f64 / 99.0;
-            level[op] = amp_of(self.op(op, O_LEVEL));
+            level[op] = amp_of(self.op(op, O_LEVEL), self.p[P_LEVEL_LAW as usize] == 1);
             vsens[op] = self.op(op, O_VELOCITY) as f64 / 100.0;
             kscale[op] = self.op(op, O_KEYSCALE) as f64 / 7.0;
         }
@@ -516,7 +522,7 @@ mod tests {
         assert!(!e.set(P_COUNT as u16, 1) && e.get(5).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 4 + OPS * OP_PARAMS as usize);
+        assert_eq!(ps.len(), 5 + OPS * OP_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
     }
@@ -682,5 +688,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Mighty Arp 1.5 (2026-11-18, measured in the emulator through its arpeggiator with chance 97 %, one octave, gate 98 %, the effects at 0 and the other operators
+    /// silent): its algorithms 1 to 4, 5, 6, 7 and 8 are OPERATOR's 1 to 4, 7, 9, 10 and 11; the level is linear in amplitude (100 % gave 0.0708 of full scale, 50 % half); and
+    /// a modulator's index is about 5.4 radians at 100 % (OPERATOR's was 6.28). Algorithm 5 (OP2 into OP1, OP4 into OP3), OP1 at 100 %, OP2 at 5, 10, 15, 25 %: harmonics 2 and 3 under the fundamental.
+    #[test]
+    fn fitted_to_mighty_arp_the_linear_level_and_the_index() {
+        let f0 = 440.0 * 2f64.powf((57.0 - 69.0) / 12.0);
+        for (l2, h2, h3) in [(5, -15.9, -40.6), (10, -9.4, -28.4), (15, -5.1, -20.5), (25, 2.1, -8.7)] {
+            let mut e = operator();
+            e.set(P_LEVEL_LAW, 1);
+            e.set(P_LEVEL, 24);
+            e.set(P_INDEX, 540); // about 1.75 pi: a little under OPERATOR's whole cycle, and a little compressive towards 100 % (best fit 520 to 620)
+            e.set(P_ALGORITHM, 6); // OPERATOR's 7 is Mighty Arp's 5
+            for op in 0..OPS {
+                e.set(op_param(op, O_LEVEL), 0);
+                e.set(op_param(op, O_VELOCITY), 0);
+            }
+            e.set(op_param(0, O_LEVEL), 100);
+            e.set(op_param(1, O_LEVEL), l2);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let seg = &b[10_000..10_000 + 8192];
+            let h1 = tone(seg, f0);
+            let db = |h: f64| 20.0 * (tone(seg, f0 * h) / h1).log10();
+            assert!((db(2.0) - h2).abs() < 1.8 && (db(3.0) - h3).abs() < 3.5, "OP2 at {l2} %: harmonics 2 and 3 at {:.1} and {:.1}, Mighty Arp {h2} and {h3}", db(2.0), db(3.0));
+        }
+        let carrier = |level: i32| {
+            let mut c = operator();
+            c.set(P_LEVEL_LAW, 1);
+            c.set(P_LEVEL, 24);
+            c.set(P_ALGORITHM, 10);
+            for op in 0..OPS {
+                c.set(op_param(op, O_LEVEL), 0);
+                c.set(op_param(op, O_VELOCITY), 0);
+            }
+            c.set(op_param(0, O_LEVEL), level);
+            c.note_on(57, 127);
+            let mut b = vec![0i16; 22_050];
+            c.render(&mut b);
+            peak(&b[10_000..]) as f64 / 32768.0
+        };
+        let full = carrier(100);
+        assert!((full / 0.0708 - 1.0).abs() < 0.06, "one carrier at 100 % peaks at {full}, Mighty Arp 0.0708");
+        assert!((carrier(50) / full - 0.5).abs() < 0.03, "50 % is half");
     }
 }
