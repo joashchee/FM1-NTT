@@ -140,6 +140,8 @@ typedef struct {
     int pv_factory;                     /* the voices are the built-in set (the firmware has none of its own, or none is loaded) */
     int pv_solo;                        /* the machine is not run, only the engine (R2): the live-play mode for a unit too slow to emulate the firmware */
     int pv_n, pv_sel, pv_on, pv_oct;    /* voices found, the chosen one, preview on, octave -2..2 */
+    int ed_on, ed_group, ed_sel, ed_dirty;   /* the instrument editor (SOUND panel, B on a loaded instrument): its group (engine, arpeggiator, an effect), the chosen parameter, edited since loaded */
+    char inst_path[300];                /* where the loaded instrument came from */
     int pv_key[27], pv_pad[4];          /* the MIDI note each held key or pad button started (+1; 0 none), so its release matches */
     /* the firmware showcase (host/showcase.h, ROADMAP 5d): a background worker process, the firmware's page in FILES, the demo player */
     int bg_demos;                       /* TOOLS > BACKGROUND DEMOS: make a demo of each firmware that has none (off by default) */
@@ -202,7 +204,7 @@ static void pv_select(App *a, int sel) {
 /* Takes the voices (n of 128 bytes) as the preview's, replacing the last firmware's. */
 static void pv_set(App *a, const uint8_t *voices, int n) {
     pv_notes_off(a);
-    if (a->inst) { lock(a); fm1ntt_inst_free(a->inst); a->inst = NULL; unlock(a); }   /* a firmware's voices replace an instrument */
+    if (a->inst) { lock(a); fm1ntt_inst_free(a->inst); a->inst = NULL; unlock(a); a->ed_on = 0; }   /* a firmware's voices replace an instrument */
     a->pv_n = n < 0 ? 0 : n > PV_MAX ? PV_MAX : n;
     a->pv_factory = 0;
     if (a->pv_n) memcpy(a->pv_voices, voices, (size_t)a->pv_n * 128);
@@ -259,7 +261,7 @@ static void pv_toggle(App *a) {
     say(a, 0, !a->pv_on ? "Preview off" : a->pv_solo ? "Preview on, no firmware: the engine plays alone" : a->pv_factory ? "Preview on: built-in voices (the firmware has none)" : "Preview on: the keys play the voice", NULL);
 }
 /* Leaving SOUND turns the preview off and lets its notes go. */
-static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv || a->inst)) { a->pv_on = 0; a->pv_solo = 0; pv_notes_off(a); } }
+static void pv_leave(App *a) { if (a->panel != PANEL_SOUND) a->ed_on = 0; if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv || a->inst)) { a->pv_on = 0; a->pv_solo = 0; pv_notes_off(a); } }
 /* Solo: the machine stops (its audio and screen freeze) and the engine has the whole processor; only with the preview on. */
 static void pv_solo_toggle(App *a) {
     if (!a->pv_on) { say(a, 2, "Turn the preview on first (L2)", NULL); return; }
@@ -445,6 +447,8 @@ static int inst_load(App *a, const char *path) {
     a->inst = i;
     unlock(a);
     a->pv_factory = 0;
+    snprintf(a->inst_path, sizeof a->inst_path, "%s", path);
+    a->ed_on = 0; a->ed_group = a->ed_sel = a->ed_dirty = 0;
     a->pv_n = (int)fm1ntt_inst_voice_count(i);
     if (a->pv_n < 1) a->pv_n = 1;
     a->pv_sel = (int)fm1ntt_inst_program(i);
@@ -452,6 +456,13 @@ static int inst_load(App *a, const char *path) {
     fm1ntt_inst_text(i, 0, nm, sizeof nm);
     say(a, 0, "Instrument loaded: %s", nm);
     return 0;
+}
+/* An instrument from the FILES list: loaded, the SOUND panel shown with the preview on, played alone when no firmware is loaded (the same as --instrument). */
+static void open_instrument(App *a, const char *path) {
+    if (inst_load(a, path) != 0) return;
+    a->panel = PANEL_SOUND;
+    a->pv_on = 1;
+    lock(a); a->pv_solo = !fm1ntt_loaded(a->m); unlock(a);
 }
 static const char *g_stamp_override;   /* Rec demo fixes the stamp in what the tour writes, so two recordings are the same */
 static void stamp(char *out, size_t n) {
@@ -564,7 +575,7 @@ static int add_dir(FileEnt *out, int n, const char *dir, int bundled) {
         if (e->d_name[0] == '.') continue;
         snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
         if (bundled && is_dir(p)) { if (strcmp(e->d_name, "source") && strcmp(e->d_name, "docs")) n = add_dir(out, n, p, bundled); continue; }   /* one folder a family */
-        if ((has_ext(e->d_name, ".fwsc") || has_ext(e->d_name, ".bin")) && is_file(p) && strlen(e->d_name) < PX_NAME - 4 && strlen(p) < sizeof out->path) {
+        if ((has_ext(e->d_name, ".fwsc") || has_ext(e->d_name, ".bin") || has_ext(e->d_name, ".fm1i")) && is_file(p) && strlen(e->d_name) < PX_NAME - 4 && strlen(p) < sizeof out->path) {
             struct stat sb;
             long long size = stat(p, &sb) == 0 ? (long long)sb.st_size : -1;
             int dup = 0;                  /* the same file twice (a pack repository carries a built copy of its own folders) */
@@ -593,6 +604,9 @@ static void scan_files(App *a) {
     FileEnt *ents = calloc(PX_MAX_FILES, sizeof *ents);
     if (!ents) return;
     int n = add_dir(ents, 0, dir, 0);
+    char idir[300];
+    sub_path(idir, sizeof idir, "instruments", NULL);                           /* instruments (.fm1i packages) sit in the same list; A on one plays it */
+    n = add_dir(ents, n, idir, 0);
     if (bdir[0]) n = add_dir(ents, n, bdir, 1);
     if (pdir[0]) n = add_dir(ents, n, pdir, 2);
     qsort(ents, (size_t)n, sizeof *ents, cmp_ents);
@@ -822,6 +836,87 @@ static void midi_ok(App *a, int down) {
     a->midi_held = down;
 }
 
+/* ---- the instrument editor: any engine's, the arpeggiator's and each effect's parameters, generic over what the core describes (core/src/engine.rs ParamDesc) ------------------ */
+static int ed_groups(const App *a) { return 2 + (int)fm1ntt_inst_fx_count(a->inst); }
+static int ed_count(const App *a, int g) {
+    if (!a->inst) return 0;
+    return (int)(g == 0 ? fm1ntt_inst_param_count(a->inst) : g == 1 ? fm1ntt_inst_arp_count(a->inst) : fm1ntt_inst_fx_param_count(a->inst, (size_t)g - 2));
+}
+/* Parameter i of group g: { id, min, max, default } and its name; 0 ok. */
+static int ed_info(const App *a, int g, int i, int32_t info[4], char *name, size_t cap) {
+    if (!a->inst || i < 0) return -1;
+    return g == 0 ? fm1ntt_inst_param(a->inst, (size_t)i, info, name, cap) : g == 1 ? fm1ntt_inst_arp_param(a->inst, (size_t)i, info, name, cap)
+                                                                              : fm1ntt_inst_fx_param(a->inst, (size_t)g - 2, (size_t)i, info, name, cap);
+}
+static int ed_get(const App *a, int g, int id) {
+    return g == 0 ? fm1ntt_inst_get(a->inst, id) : g == 1 ? fm1ntt_inst_arp_get(a->inst, id) : fm1ntt_inst_fx_get(a->inst, (size_t)g - 2, id);
+}
+static void ed_title(const App *a, int g, char *out, size_t n) {
+    if (g == 0) { char k[16]; fm1ntt_inst_text(a->inst, 1, k, sizeof k); for (char *q = k; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "ENGINE %s", k); }
+    else if (g == 1) snprintf(out, n, "ARPEGGIATOR");
+    else { char f[24]; fm1ntt_inst_fx_name(a->inst, (size_t)g - 2, f, sizeof f); for (char *q = f; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "EFFECT %s", f); }
+}
+static void ed_set(App *a, int g, int id, int v) {
+    lock(a);
+    if (g == 0) fm1ntt_inst_set(a->inst, id, v);
+    else if (g == 1) fm1ntt_inst_arp_set(a->inst, id, v);
+    else fm1ntt_inst_fx_set(a->inst, (size_t)g - 2, id, v);
+    unlock(a);
+    a->ed_dirty = 1;
+}
+/* Moves the chosen parameter's value by delta (clamped by the core), or back to its default (reset). */
+static void ed_change(App *a, int delta, int reset) {
+    int32_t info[4]; char nm[PX_NAME];
+    if (ed_info(a, a->ed_group, a->ed_sel, info, nm, sizeof nm) != 0) return;
+    int v = reset ? info[3] : ed_get(a, a->ed_group, info[0]) + delta;
+    ed_set(a, a->ed_group, info[0], v < info[1] ? info[1] : v > info[2] ? info[2] : v);
+}
+/* Writes the instrument, edits included, to instruments/<name>-edit.fm1i (a temporary name, then a rename): never over the file it was loaded from. */
+static void ed_save(App *a) {
+    char nm[64], file[96], dir[300], path[400];
+    fm1ntt_inst_text(a->inst, 0, nm, sizeof nm);
+    size_t k = 0;
+    for (const char *q = nm; *q && k < 40; q++) {
+        char ch = *q >= 'A' && *q <= 'Z' ? (char)(*q + 32) : *q;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) file[k++] = ch;
+        else if (k && file[k - 1] != '-') file[k++] = '-';
+    }
+    while (k && file[k - 1] == '-') k--;
+    if (!k) { memcpy(file, "instrument", 10); k = 10; }
+    snprintf(file + k, sizeof file - k, "-edit.fm1i");
+    sub_path(dir, sizeof dir, "instruments", NULL);
+    sub_path(path, sizeof path, "instruments", file);
+    lock(a);
+    size_t n = fm1ntt_inst_to_package(a->inst, a->inst_path, NULL, 0);
+    uint8_t *buf = n ? malloc(n) : NULL;
+    if (buf) fm1ntt_inst_to_package(a->inst, a->inst_path, buf, n);
+    unlock(a);
+    if (!buf) { say(a, 2, "Cannot save: nothing to write", NULL); return; }
+    if (mkdir_p(dir) == 0 && write_atomic(path, buf, n) == 0) { say(a, 1, "Saved instruments/%s", file); a->ed_dirty = 0; scan_files(a); }
+    else say(a, 2, "Cannot write the instruments folder", NULL);
+    free(buf);
+}
+static void ed_press(App *a, int act) {
+    if (!a->inst) { a->ed_on = 0; return; }
+    int groups = ed_groups(a), n = ed_count(a, a->ed_group);
+    int32_t info[4]; char nm[PX_NAME];
+    int big = 10;
+    if (ed_info(a, a->ed_group, a->ed_sel, info, nm, sizeof nm) == 0) { big = (info[2] - info[1]) / 10; if (big < 10) big = 10; }
+    switch (act) {
+    case A_UP: if (n) a->ed_sel = (a->ed_sel + n - 1) % n; break;
+    case A_DOWN: if (n) a->ed_sel = (a->ed_sel + 1) % n; break;
+    case A_LEFT: ed_change(a, -1, 0); break;
+    case A_RIGHT: ed_change(a, 1, 0); break;
+    case A_X: ed_change(a, -big, 0); break;
+    case A_Y: ed_change(a, big, 0); break;
+    case A_L2: a->ed_group = (a->ed_group + groups - 1) % groups; a->ed_sel = 0; break;
+    case A_R2: a->ed_group = (a->ed_group + 1) % groups; a->ed_sel = 0; break;
+    case A_OK: ed_save(a); break;
+    case A_BACK: a->ed_on = 0; break;
+    default: break;
+    }
+}
+
 /* ---- flash slots, screenshots, reset ----------------------------------------------------------------------------------- */
 static void slot_path(App *a, char *out, size_t n) { char nm[32]; snprintf(nm, sizeof nm, "slot%d.flash", a->slot); sub_path(out, n, "slots", nm); }
 
@@ -942,7 +1037,8 @@ static void act(App *a, int act) {
             if (a->file_sel >= a->nfiles) request_quit(a);
             else {
                 const char *p = a->fpaths[a->file_sel];
-                load_firmware(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA);
+                if (has_ext(p, ".fm1i")) open_instrument(a, p);
+                else load_firmware(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA);
             }
         }
         break;
@@ -970,6 +1066,8 @@ static void act(App *a, int act) {
         else if (act == A_BACK) panic_all(a);
         break;
     case PANEL_SOUND:
+        if (a->ed_on) { ed_press(a, act); break; }
+        if (act == A_BACK && a->inst) { a->ed_on = 1; a->ed_group = 0; a->ed_sel = 0; break; }
         if (act == A_L2) pv_toggle(a);
         else if (act == A_R2) pv_solo_toggle(a);
         else if (a->pv_on && act == A_UP) pv_select(a, a->pv_sel - 1);
@@ -1046,6 +1144,24 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     u->level_l = a->level_l; u->level_r = a->level_r; u->peak_l = a->peak_l; u->peak_r = a->peak_r;
     u->pv_factory = a->inst ? 2 : a->pv_factory; u->pv_solo = a->pv_solo; u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
     pv_name(a, u->pv_name, sizeof u->pv_name);
+    u->ed_on = a->ed_on && a->inst != NULL;
+    if (u->ed_on) {                                               /* (the instrument is read under the audio lock: the callback renders it) one whole page of the group, the chosen row marked (nothing scrolls) */
+        if (use_lock) lock(a);
+        int g = a->ed_group, total = ed_count(a, g), page = total ? a->ed_sel / ED_ROWS : 0;
+        u->ed_total = total; u->ed_group = g; u->ed_groups = ed_groups(a); u->ed_page = page; u->ed_pages = total ? (total + ED_ROWS - 1) / ED_ROWS : 1;
+        u->ed_sel = a->ed_sel - page * ED_ROWS; u->ed_dirty = a->ed_dirty;
+        ed_title(a, g, u->ed_title, sizeof u->ed_title);
+        fm1ntt_inst_text(a->inst, 0, u->ed_inst, sizeof u->ed_inst);
+        u->ed_n = 0;
+        for (int i = page * ED_ROWS; i < total && u->ed_n < ED_ROWS; i++) {
+            int32_t info[4];
+            if (ed_info(a, g, i, info, u->ed_row[u->ed_n].name, PX_NAME) != 0) break;
+            u->ed_row[u->ed_n].min = info[1]; u->ed_row[u->ed_n].max = info[2];
+            u->ed_row[u->ed_n].val = ed_get(a, g, info[0]);
+            u->ed_n++;
+        }
+        if (use_lock) unlock(a);
+    }
     u->msg = a->msg;
     u->msg_style = a->msg_style;
     /* files */
@@ -1330,7 +1446,8 @@ static void handle(App *a, const SDL_Event *e) {
         if (b < 32 && !down && a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; return; }   /* the release matches the press */
         if (b == PAD_START && !machine_panel) { if (down) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); } return; }
         if (a->panel == PANEL_MIDI && !a->confirm && b == 1) { midi_ok(a, down); return; }
-        if (a->panel == PANEL_SOUND && a->pv_on && !a->confirm && (b == 0 || b == 1 || b == 2 || b == 3)) {   /* the pad plays a chord's notes: Y the root, B the third, A the fifth, X the octave */
+        if (a->panel == PANEL_SOUND && a->inst && b == PAD_SELECT && !a->confirm) { if (down) { a->ed_on = !a->ed_on; a->ed_group = 0; a->ed_sel = 0; } return; }   /* Select opens and closes the editor, whether or not the preview is playing the pad */
+        if (a->panel == PANEL_SOUND && a->pv_on && !a->ed_on && !a->confirm && (b == 0 || b == 1 || b == 2 || b == 3)) {   /* the pad plays a chord's notes: Y the root, B the third, A the fifth, X the octave */
             static const int semi[4] = {4, 7, 12, 0};   /* by raw button 0 B, 1 A, 2 X, 3 Y: semitones above the root */
             pv_note(a, &a->pv_pad[b], 60 + 12 * a->pv_oct + semi[b], down);
             return;
@@ -1363,7 +1480,7 @@ static void dispatch(App *a, const SDL_Event *e) {
     int chord = e->type == SDL_JOYBUTTONDOWN && (e->jbutton.button == PAD_L1 || e->jbutton.button == PAD_R1) && (a->pad_mask >> PAD_L1 & 1) && (a->pad_mask >> PAD_R1 & 1);
     int fn_scale = e->type == SDL_JOYBUTTONDOWN && e->jbutton.button == PAD_FN && a->panel == PANEL_MACHINE && !a->confirm && (a->pad_mask >> PAD_L1 & 1);
     if (e->type == SDL_QUIT) { rec_stop(a); a->quit = 1; }
-    else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->confirm) a->confirm = CF_NONE; else if (a->info_on) a->info_on = 0; else request_quit(a); }
+    else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->confirm) a->confirm = CF_NONE; else if (a->info_on) a->info_on = 0; else if (a->ed_on) a->ed_on = 0; else request_quit(a); }
     else if (is_toggle(e)) a->mode ^= 1;
     else if (chord) { if (!a->confirm) menu_toggle(a); }
     else if (fn_scale) { a->scale = (a->scale + 1) % NSCALES; say(a, 0, "Scale %s", SCALES[a->scale].name); }
@@ -2927,6 +3044,55 @@ static int selftest(void) {
                 CHECK(fm1ntt_evq_len(a.evq) == 1);
                 fm1ntt_evq_free(a.evq); a.evq = NULL;
                 CHECK(inst_load(&a, "/nonexistent/none.fm1i") != 0 && a.inst != NULL && a.msg_style == 2);   /* a bad load keeps the instrument and says why */
+                {   /* the instrument editor: B opens it, a page of the group's parameters, +-1 and a big step, the groups, a save that never overwrites the source, and the picker */
+                    a.panel = PANEL_SOUND; a.pv_on = 0;
+                    act(&a, A_BACK); CHECK(a.ed_on == 1);
+                    fill_ui(&a, ui, 0);
+                    CHECK(ui->ed_on && ui->ed_total == 11 && ui->ed_n == 11 && ui->ed_groups == 2 && ui->ed_page == 0 && ui->ed_pages == 1 && !strcmp(ui->ed_title, "ENGINE ANALOG") && !strcmp(ui->ed_inst, "Selftest"));
+                    a.ed_sel = 2;                                                              /* CUTOFF, 0 to 127 */
+                    int c0 = fm1ntt_inst_get(a.inst, 2);
+                    act(&a, A_RIGHT); CHECK(fm1ntt_inst_get(a.inst, 2) == c0 + 1 && a.ed_dirty);
+                    act(&a, A_X); CHECK(fm1ntt_inst_get(a.inst, 2) == c0 + 1 - 12);            /* the big step is a tenth of the range, at least 10 */
+                    for (int k = 0; k < 30; k++) act(&a, A_X);
+                    CHECK(fm1ntt_inst_get(a.inst, 2) == 0);                                    /* clamped at the bottom */
+                    act(&a, A_Y); act(&a, A_Y);
+                    int c1 = fm1ntt_inst_get(a.inst, 2);
+                    act(&a, A_UP); act(&a, A_UP); act(&a, A_UP); CHECK(a.ed_sel == 10 && a.ed_sel != 2);   /* up wraps through the top */
+                    act(&a, A_R2); CHECK(a.ed_group == 1 && a.ed_sel == 0);
+                    fill_ui(&a, ui, 0);
+                    CHECK(ui->ed_total == 10 && !strcmp(ui->ed_title, "ARPEGGIATOR") && ui->ed_row[3].min == 30 && ui->ed_row[3].max == 300);
+                    act(&a, A_RIGHT); CHECK(fm1ntt_inst_arp_get(a.inst, 0) == 1);               /* ARP ON */
+                    act(&a, A_L2); CHECK(a.ed_group == 0);
+                    act(&a, A_OK);                                                               /* saved to instruments/selftest-edit.fm1i, not over the source */
+                    char sp2[400]; sub_path(sp2, sizeof sp2, "instruments", "selftest-edit.fm1i");
+                    CHECK(is_file(sp2) && a.msg_style == 1 && !a.ed_dirty && is_file(ip));
+                    CHECK(inst_load(&a, sp2) == 0 && fm1ntt_inst_get(a.inst, 2) == c1 && fm1ntt_inst_arp_get(a.inst, 0) == 1);   /* the edits came back */
+                    /* it is in the FILES list and A plays it */
+                    a.panel = PANEL_FILES; scan_files(&a);
+                    int fi = -1; for (int i = 0; i < a.nfiles; i++) if (!strcmp(a.files[i], "selftest-edit.fm1i")) fi = i;
+                    CHECK(fi >= 0);
+                    if (fi >= 0) { a.file_sel = fi; act(&a, A_OK); CHECK(a.panel == PANEL_SOUND && a.pv_on && a.inst != NULL && !a.ed_on); }
+                    /* Select opens and closes it with the preview playing; the pad's faces edit while it is open instead of playing; the panel draws in both layouts */
+                    SDL_Event se; memset(&se, 0, sizeof se); se.type = SDL_JOYBUTTONDOWN; se.jbutton.button = PAD_SELECT;
+                    handle(&a, &se); CHECK(a.ed_on == 1);
+                    se.jbutton.button = 3; handle(&a, &se); CHECK(a.pv_pad[3] == 0);            /* Y did not play a note */
+                    uint32_t *ecv = calloc((size_t)PX_W * PX_H, 4);
+                    for (int md = 0; md < 2 && ecv; md++) {
+                        a.mode = md ? MODE_ZOOMED : MODE_STANDARD;
+                        a.ed_group = 0; a.ed_sel = 0; fill_ui(&a, ui, 0); px_draw(ecv, a.mode, ui);
+                        PxRect co = px_content_rect(a.mode);
+                        long sel = 0, bottom = 0;
+                        for (int y = co.y; y < co.y + co.h; y++) for (int x = co.x; x < co.x + co.w; x++) { uint32_t px = ecv[y * PX_W + x]; sel += px == C_SEL; if (y >= co.y + co.h - 14 && px != C_BG && px != C_PANEL) bottom++; }
+                        if (getenv("FM1NTT_MON_SHOTS")) { char fn[420]; snprintf(fn, sizeof fn, "%s/editor-%s.bmp", getenv("FM1NTT_MON_SHOTS"), md ? "zoomed" : "standard"); mon_dump_bmp(fn, ecv); }
+                        CHECK(sel > 300);                                                       /* the chosen row is marked */
+                        CHECK(bottom < (long)co.w * 14 / 2);                                    /* the foot is the panel's own one-line hint, not the editor's */
+                    }
+                    free(ecv);
+                    a.mode = MODE_STANDARD;
+                    se.jbutton.button = PAD_SELECT; handle(&a, &se); CHECK(a.ed_on == 0);
+                    a.panel = PANEL_SOUND;
+                    remove(sp2);
+                }
                 pv_set(&a, two, 2); CHECK(a.inst == NULL && a.pv != NULL);
                 remove(ip);
             }

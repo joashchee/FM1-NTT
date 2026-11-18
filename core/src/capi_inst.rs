@@ -461,6 +461,73 @@ pub unsafe extern "C" fn fm1ntt_inst_arp_set(h: *mut InstHandle, id: c_int, valu
     }
 }
 
+/// The instrument's effects, in order: how many, and an effect's name (`out`, NUL-terminated, cut to `cap`; the full length, 0 for none).
+///
+/// # Safety
+/// `h` is null or a live handle; `out` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_count(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.fx_count())
+}
+
+/// # Safety
+/// `h` is null or a live handle; `out` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_name(h: *const InstHandle, index: usize, out: *mut c_char, cap: usize) -> usize {
+    match h.as_ref().and_then(|h| h.0.fx_name(index)) {
+        Some(n) => put_str(n, out, cap),
+        None => {
+            put_str("", out, cap);
+            0
+        }
+    }
+}
+
+/// Effect `fx`'s parameters, as the engine's: how many, `index`'s { id, min, max, default } and name, its value and setting it.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_param_count(h: *const InstHandle, fx: usize) -> usize {
+    h.as_ref().map_or(0, |h| h.0.fx_params(fx).len())
+}
+
+/// # Safety
+/// `info` has room for 4 values; `name` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_param(h: *const InstHandle, fx: usize, index: usize, info: *mut i32, name: *mut c_char, cap: usize) -> c_int {
+    let (Some(h), false) = (h.as_ref(), info.is_null()) else { return -1 };
+    let p = h.0.fx_params(fx);
+    let Some(d) = p.get(index) else { return -1 };
+    *info = d.id as i32;
+    *info.add(1) = d.min;
+    *info.add(2) = d.max;
+    *info.add(3) = d.default;
+    put_str(&d.name, name, cap);
+    0
+}
+
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_get(h: *const InstHandle, fx: usize, id: c_int) -> i32 {
+    h.as_ref().and_then(|h| h.0.get_fx_param(fx, id.clamp(0, 65535) as u16)).unwrap_or(i32::MIN)
+}
+
+/// Sets effect `fx`'s parameter `id` (clamped); 0 ok, -1 no such effect or parameter.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_set(h: *mut InstHandle, fx: usize, id: c_int, value: c_int) -> c_int {
+    let Some(h) = h.as_mut() else { return -1 };
+    if (0..=65535).contains(&id) && h.0.set_fx_param(fx, id as u16, value) {
+        0
+    } else {
+        -1
+    }
+}
+
 /// The instrument as package text (the edits included), written to `out` up to `cap` bytes (not NUL-terminated); the full length. `source` is the file it came from.
 ///
 /// # Safety
@@ -572,6 +639,29 @@ mod tests {
             let mut hex = [0 as c_char; 65];
             fm1ntt_sha256_hex(b"abc".as_ptr(), 3, hex.as_mut_ptr());
             assert!(CStr::from_ptr(hex.as_ptr()).to_str().unwrap().starts_with("ba7816bf"));
+        }
+    }
+
+    #[test]
+    fn the_c_face_reaches_the_effects() {
+        let text = "fm1i = 1\nname = FxTest\nengine = analog\nlicence = MIT\nfx = delay\nfxparam 2 = 40\nfx = chorus\n";
+        unsafe {
+            let h = fm1ntt_inst_load(text.as_ptr(), text.len(), 44_100.0, None, std::ptr::null_mut());
+            assert!(!h.is_null());
+            assert_eq!(fm1ntt_inst_fx_count(h), 2);
+            let mut nm = [0 as c_char; 24];
+            assert_eq!(fm1ntt_inst_fx_name(h, 0, nm.as_mut_ptr(), 24), 5);
+            assert_eq!(CStr::from_ptr(nm.as_ptr()).to_str().unwrap(), "delay");
+            assert_eq!(fm1ntt_inst_fx_name(h, 9, nm.as_mut_ptr(), 24), 0);
+            assert_eq!(fm1ntt_inst_fx_param_count(h, 0), 3);
+            let mut info = [0i32; 4];
+            assert_eq!(fm1ntt_inst_fx_param(h, 0, 2, info.as_mut_ptr(), nm.as_mut_ptr(), 24), 0);
+            assert_eq!((info[0], info[1], info[2], CStr::from_ptr(nm.as_ptr()).to_str().unwrap()), (2, 0, 100, "MIX"));
+            assert_eq!(fm1ntt_inst_fx_get(h, 0, 2), 40);
+            assert_eq!((fm1ntt_inst_fx_set(h, 0, 2, 999), fm1ntt_inst_fx_get(h, 0, 2)), (0, 100));
+            assert_eq!((fm1ntt_inst_fx_set(h, 5, 2, 1), fm1ntt_inst_fx_set(h, 0, 77, 1), fm1ntt_inst_fx_get(h, 7, 0), fm1ntt_inst_fx_param_count(h, 9)), (-1, -1, i32::MIN, 0));
+            assert_eq!(fm1ntt_inst_fx_param(h, 0, 9, info.as_mut_ptr(), nm.as_mut_ptr(), 24), -1);
+            fm1ntt_inst_free(h);
         }
     }
 }

@@ -148,6 +148,7 @@ static const char *const PX_BUTTON_NAMES[14] = {"OCT-", "OCT+", "FX", "SCL", "EN
 static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", "KNOB2", "KNOB3", "KNOB4", "PRESETS"};
 static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
 
+enum { ED_ROWS = 24 };   /* the instrument editor's rows on a page */
 enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 14, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
 
 typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
@@ -198,6 +199,10 @@ typedef struct {
     int pv_solo;                       /* the machine is stopped, only the engine plays */
     int pv_on, pv_n, pv_sel, pv_oct;   /* the preview: on, voices found, the chosen one, the octave */
     char pv_name[PX_NAME];
+    /* the instrument editor (SOUND, B on a loaded instrument): one page of the group's parameters, the chosen row marked */
+    int ed_on, ed_n, ed_sel, ed_page, ed_pages, ed_total, ed_dirty, ed_group, ed_groups;
+    char ed_title[PX_NAME], ed_inst[PX_NAME];
+    struct { char name[PX_NAME]; int val, min, max; } ed_row[ED_ROWS];
     uint64_t rec_frames;
     char rec_file[PX_NAME];
     /* tools */
@@ -316,7 +321,7 @@ static const char *const PX_HINTS[PANEL_COUNT][9] = {
     {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
     {"SEND TO THE MIDI JACK", "A  NOTE ON, THEN OFF", "LEFT RIGHT  NOTE", "UP DOWN  OCTAVE", "X Y  VELOCITY", "L2 R2  CHANNEL", "B  ALL NOTES OFF", "", ""},
-    {"SCOPE, RECORDER, PREVIEW", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "L2  PREVIEW ON OR OFF", "UP DOWN  VOICE", "LEFT RIGHT  OCTAVE", "Y B A X  PLAY (PREVIEW)", ""},
+    {"SCOPE, RECORDER, PREVIEW", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "L2  PREVIEW ON OR OFF", "UP DOWN  VOICE", "LEFT RIGHT  OCTAVE", "Y B A X  PLAY (PREVIEW)", "SELECT OR B  EDIT AN INSTRUMENT"},
     {"THIS DEVICE, NOT THE FM-1", "L2 R2  PAGE", "X  SORT CPU MEM PID", "Y  FREEZE OR RESUME", "A BAR NEVER LIES: THE", "NUMBER AND ! * SAY IT TOO", "TOOLS: DATA RAIN", "", ""},
     {"RESET, SLOTS, JIT, PANIC", "UP DOWN  PICK", "LEFT RIGHT  SLOT", "A  RUN", "B  NO TO A QUESTION", "", "", "", ""},
 };
@@ -576,7 +581,49 @@ static inline void px_panel_midi(uint32_t *c, PxRect r, const UiState *u, int na
     px_wrap(c, x, r.y + 248, "ITS MIDI OUT IS NOT EXPOSED BY THE CORE YET", C_DIM, w, 2);
 }
 
+/* The instrument editor: a whole page of the chosen group's parameters (engine, arpeggiator, each effect), the row marked, its value at the right and a bar for where it sits in
+ * its range. Nothing scrolls: a long group is more pages. Replaces the SOUND panel while it is on. */
+static inline void px_panel_inst_edit(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    char line[96];
+    int x = r.x + 10, w = r.w - 20;
+    px_box(c, (PxRect){r.x + 4, r.y + 6, r.w - 8, 50}, "INSTRUMENT EDITOR");
+    px_text(c, x, r.y + 18, u->ed_inst, u->ed_dirty ? C_WARN : C_TEXT, 1, w - (narrow ? 0 : 60));
+    if (!narrow) px_text(c, r.x + r.w - 70, r.y + 18, u->ed_dirty ? "EDITED" : "", C_WARN, 1, 0);
+    if (narrow) snprintf(line, sizeof line, "%s %d/%d", u->ed_title, u->ed_group + 1, u->ed_groups);
+    else snprintf(line, sizeof line, "%s %d/%d  PAGE %d/%d", u->ed_title, u->ed_group + 1, u->ed_groups, u->ed_page + 1, u->ed_pages);
+    px_text(c, x, r.y + 32, line, C_HEAD, 1, w);
+    if (narrow) snprintf(line, sizeof line, "%d PARAMS  PAGE %d/%d", u->ed_total, u->ed_page + 1, u->ed_pages);
+    else snprintf(line, sizeof line, "%d PARAMETERS", u->ed_total);
+    px_text(c, x, r.y + 44, line, C_DIM, 1, w);
+    int top = r.y + 62;
+    if (!u->ed_n) px_text(c, x, top + 4, "NO PARAMETERS HERE", C_DIM, 1, w);
+    for (int i = 0; i < u->ed_n; i++) {
+        int y = top + i * 14, sel = i == u->ed_sel;
+        if (sel) px_rect(c, (PxRect){r.x + 6, y - 2, r.w - 12, 13}, C_SEL);
+        char val[16];
+        snprintf(val, sizeof val, "%d", u->ed_row[i].val);
+        int vw = (int)strlen(val) * 6;
+        px_text(c, r.x + r.w - 10 - vw, y, val, C_TEXT, 1, 0);
+        px_text(c, x, y, u->ed_row[i].name, sel ? C_TEXT : C_DIM, 1, w - vw - 8);
+        int span = u->ed_row[i].max - u->ed_row[i].min;
+        if (span > 0 && !narrow) {   /* where the value sits in its range: a hairline under the name */
+            int bw = (w - 8) * (u->ed_row[i].val - u->ed_row[i].min) / span;
+            px_rect(c, (PxRect){x, y + 9, bw < 1 ? 1 : bw, 1}, sel ? C_HEAD : C_FRAME);
+        }
+    }
+    int fy = r.y + r.h - 54;
+    if (narrow) {
+        px_text(c, x, fy, "UP DOWN PICK  LR +-1", C_DIM, 1, w);
+        px_text(c, x, fy + 12, "X Y BIG  L2 R2 GROUP", C_DIM, 1, w);
+        px_text(c, x, fy + 24, "A SAVE   B LEAVES", C_DIM, 1, w);
+    } else {
+        px_text(c, x, fy, "UP DOWN PICK   LEFT RIGHT +-1   X Y BIG STEP", C_DIM, 1, w);
+        px_text(c, x, fy + 12, "L2 R2 GROUP   A SAVE (INSTRUMENTS FOLDER)   B LEAVES", C_DIM, 1, w);
+    }
+}
+
 static inline void px_panel_sound(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    if (u->ed_on) { px_panel_inst_edit(c, r, u, narrow); return; }
     char line[96];
     int x = r.x + 10, w = r.w - 20;
     px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, 104}, "SCOPE");
