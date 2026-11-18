@@ -28,8 +28,10 @@ pub mod machine;
 pub mod package;
 pub mod port;
 pub mod sampler;
+pub mod screen;
 pub mod seq;
 pub mod stockmap;
+pub mod ui;
 pub mod verify;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

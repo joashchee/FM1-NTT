@@ -171,6 +171,8 @@ pub struct Package {
     /// the global settings (`global N = V`, ids as in `globals.rs`) and the banks' names (`bank N = NAME`), format 2
     pub globals: Vec<(u16, i32)>,
     pub banks: Vec<(u8, String)>,
+    /// the UI model (`ui = ...` directives, `ui.rs`; format 3): validated at load, kept as the author's lines
+    pub ui: Vec<String>,
     pub samples: Vec<SampleRef>,
     pub fx: Vec<FxEntry>,
     pub map: Vec<MapEntry>,
@@ -195,6 +197,7 @@ impl Package {
             seq_voices: Vec::new(),
             globals: Vec::new(),
             banks: Vec::new(),
+            ui: Vec::new(),
             samples: Vec::new(),
             fx: Vec::new(),
             map: Vec::new(),
@@ -212,7 +215,13 @@ impl Package {
     /// The package as text. Values are one line each (a line break in a value becomes a space).
     pub fn to_text(&self) -> String {
         let one = |s: &str| s.replace(['\n', '\r'], " ");
-        let mut t = String::from(if self.globals.is_empty() && self.banks.is_empty() { "fm1i = 1\n" } else { "fm1i = 2\n" });
+        let mut t = String::from(if !self.ui.is_empty() {
+            "fm1i = 3\n"
+        } else if self.globals.is_empty() && self.banks.is_empty() {
+            "fm1i = 1\n"
+        } else {
+            "fm1i = 2\n"
+        });
         t += &format!("name = {}\nengine = {}\nlicence = {}\n", one(&self.name), one(&self.engine), one(&self.licence));
         if !self.source.is_empty() {
             t += &format!("source = {}\n", one(&self.source));
@@ -264,6 +273,9 @@ impl Package {
                 t += &format!("fxparam {id} = {v}\n");
             }
         }
+        for u in &self.ui {
+            t += &format!("ui = {}\n", one(u));
+        }
         for m in &self.map {
             let target = match m.target {
                 Target::Engine(id) => format!("e{id}"),
@@ -297,8 +309,8 @@ impl Package {
             let key = kw.next().unwrap_or("");
             let num = |s: &str| -> Result<i32> { s.parse::<i32>().or_else(|_| bad(format!("line {at}: {s:?} is not a number"))) };
             if !seen_header {
-                if key != "fm1i" || (v != "1" && v != "2") {
-                    return bad("the first line must be `fm1i = 1` (or 2, with global settings and banks)");
+                if key != "fm1i" || (v != "1" && v != "2" && v != "3") {
+                    return bad("the first line must be `fm1i = 1` (or 2, with global settings and banks, or 3, with a UI model)");
                 }
                 seen_header = true;
                 continue;
@@ -364,6 +376,12 @@ impl Package {
                     let pat = kw.next().and_then(|s| s.parse::<u8>().ok());
                     let Some(pat) = pat else { return bad(format!("line {at}: seqvoice needs a pattern")) };
                     p.seq_voices.push((pat, num(v)?));
+                }
+                "ui" => {
+                    if p.ui.len() >= crate::ui::MAX_LINES {
+                        return bad("too many ui lines");
+                    }
+                    p.ui.push(v.to_string());
                 }
                 "global" => {
                     if p.globals.len() >= MAX_GLOBALS {
@@ -456,6 +474,7 @@ impl Package {
             return bad("no licence (every package carries its source's licence)");
         }
         tier(&p.licence)?;
+        crate::ui::Ui::parse(&p.ui)?;
         if p.program > 0 && p.program >= p.voices.len() {
             p.program = 0;
         }
@@ -560,6 +579,21 @@ mod tests_v2 {
     use super::*;
 
     #[test]
+    fn a_ui_model_round_trips_and_a_bad_one_is_refused() {
+        let mut p = Package::new("X", "fm4", "MIT");
+        p.ui = vec!["theme bg=#000000 fg=#ffffff dim=#808080 accent=#ff0000".into(), "page home \"HOME\"".into(), "text home 4 4 \"HI\" size=2".into(), "key HOME page=home".into()];
+        let t = p.to_text();
+        assert!(t.starts_with("fm1i = 3\n"));
+        let q = Package::parse(&t).unwrap();
+        assert_eq!(q.ui, p.ui);
+        assert_eq!(q.to_text(), t);
+        let broken = t.replace("page=home", "page=nowhere");
+        assert!(Package::parse(&broken).is_err());
+        let none = Package::new("Y", "fm4", "MIT");
+        assert!(none.to_text().starts_with("fm1i = 1\n"));
+    }
+
+    #[test]
     fn globals_and_banks_round_trip_and_are_bounded() {
         let t = "fm1i = 2\nname = G\nengine = analog\nlicence = MIT\nglobal 0 = 3\nglobal 4 = 1\nbank 0 = LEADS\nbank 3 = PADS\n";
         let p = Package::parse(t).unwrap();
@@ -572,6 +606,6 @@ mod tests_v2 {
         assert!(Package::parse(&format!("{head}bank 0 = {}\n", "x".repeat(33))).is_err());
         assert!(Package::parse(&format!("{head}global x = 1\n")).is_err());
         assert!(Package::parse(&format!("{head}{}", "global 0 = 1\n".repeat(17))).is_err());
-        assert!(Package::parse("fm1i = 3\nengine = analog\nlicence = MIT\n").is_err());
+        assert!(Package::parse("fm1i = 4\nengine = analog\nlicence = MIT\n").is_err());
     }
 }

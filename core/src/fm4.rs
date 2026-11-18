@@ -22,6 +22,8 @@ pub const P_INDEX: u16 = 3;
 pub const P_LEVEL_LAW: u16 = 4;
 /// How FINE RATIO acts: 0 a percentage of the coarse ratio (generic; 0 to 99), 1 thousandths added to it (OPERATOR 0.7: coarse 1 and fine 26 is 1.026; 0 to 999).
 pub const P_RATIO_LAW: u16 = 5;
+/// How SUSTAIN reads: 0 linear (value / 99, generic), 1 decibels (99 is 0 dB and each step below is 1 dB down; OPERATOR 0.7 shows its sustain in dB).
+pub const P_SUSTAIN_LAW: u16 = 6;
 /// Operator `n` (0 to 3, shown as OP1 to OP4) has `OP_PARAMS` parameters from `OP_BASE + n * OP_PARAMS`.
 pub const OP_BASE: u16 = 10;
 pub const OP_PARAMS: u16 = 11;
@@ -36,7 +38,83 @@ pub const O_RELEASE: u16 = 7;
 pub const O_VELOCITY: u16 = 8;
 pub const O_KEYSCALE: u16 = 9;
 pub const O_FEEDBACK: u16 = 10;
-pub const P_COUNT: usize = OP_BASE as usize + OPS * OP_PARAMS as usize;
+/// The second per-operator block (2026-11-19, from OPERATOR 0.7's pages): `EXT_PARAMS` parameters per operator from `EXT_BASE`, after the first block so every older id
+/// keeps its number. `ext_param(op, E_*)` is the id.
+pub const EXT_BASE: u16 = OP_BASE + OPS as u16 * OP_PARAMS;
+pub const EXT_PARAMS: u16 = 6;
+/// The waveform, `WAVES` (0 to 18).
+pub const E_WAVE: u16 = 0;
+/// The phase a note starts at, in percent of a cycle (OPERATOR's Phase; 66 % starts the sine at -0.83).
+pub const E_PHASE: u16 = 1;
+/// Key scaling in percent, -100 to 100, about note 60: the level changes by `2^(percent / 100 * octaves)` (OPERATOR's Key: +100 % is 6 dB an octave up).
+pub const E_KEYSCALE: u16 = 2;
+/// Fixed-frequency mode (OPERATOR's Fixed): 1 plays `FIXED FREQ` x `FIXED MULTI` Hz whatever the note.
+pub const E_FIXED: u16 = 3;
+/// The fixed frequency in Hz, 10 to 1024 (OPERATOR's Freq).
+pub const E_FIXFREQ: u16 = 4;
+/// The fixed frequency's multiplier: 0 to 4 for x0.001, x0.01, x0.1, x1, x10 (OPERATOR's Multi).
+pub const E_FIXMULTI: u16 = 5;
+/// The voice filter (OPERATOR's Filter page, fitted 2026-11-19): after the operators, before the master level. Off by default so older patches are unchanged.
+pub const FILT_BASE: u16 = EXT_BASE + OPS as u16 * EXT_PARAMS;
+pub const F_ON: u16 = 0;
+/// 0 low-pass, 1 high-pass, 2 band-pass, 3 notch.
+pub const F_TYPE: u16 = 1;
+/// The cutoff as OPERATOR displays it, Hz (30 to 20000). The filter's own corner is this times `2^(key / 100 x (note - 60) / 12)`.
+pub const F_FREQ: u16 = 2;
+/// OPERATOR's Res, in hundredths (0 to 125); the quality factor is `0.5 / (1 - 0.97 x min(res, 0.93))` (0.5 at 0, 0.65 at 0.27).
+pub const F_RES: u16 = 3;
+/// 0 for 12 dB an octave (one two-pole stage), 1 for 24 dB (two stages).
+pub const F_SLOPE: u16 = 4;
+/// Key tracking in percent (OPERATOR's Freq<Key; its default is +100).
+pub const F_KEY: u16 = 5;
+pub const FILT_PARAMS: u16 = 6;
+pub const P_COUNT: usize = FILT_BASE as usize + FILT_PARAMS as usize;
+const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
+
+/// Parameter id of operator `op` (0 to 3), field `E_*` of the second block.
+pub const fn ext_param(op: usize, field: u16) -> u16 {
+    EXT_BASE + op as u16 * EXT_PARAMS + field
+}
+/// The waveform names, in OPERATOR 0.7's order: Sine, the sine in 4 and 8 bits, a saw of N harmonics (3 4 6 8 16 32 64) and an ideal saw (D), a square of N odd
+/// harmonics and an ideal square. A table of 2048 points each, built once, peak 1 (measured: harmonics at 1/k, every wave the same peak level).
+pub const WAVES: [&str; 19] = [
+    "SINE", "SINE 4 BIT", "SINE 8 BIT", "SAW 3", "SAW 4", "SAW 6", "SAW 8", "SAW 16", "SAW 32", "SAW 64", "SAW D", "SQUARE 3", "SQUARE 4", "SQUARE 6", "SQUARE 8", "SQUARE 16",
+    "SQUARE 32", "SQUARE 64", "SQUARE D",
+];
+const TABLE: usize = 2048;
+
+/// One cycle of waveform `w`, `TABLE` points plus a repeated first for interpolation, scaled to peak 1.
+fn make_wave(w: usize) -> Vec<f32> {
+    let n_of = |i: usize| [3usize, 4, 6, 8, 16, 32, 64][i];
+    let mut t: Vec<f64> = (0..TABLE)
+        .map(|i| {
+            let th = TAU * i as f64 / TABLE as f64;
+            let ph = i as f64 / TABLE as f64;
+            match w {
+                0 => th.sin(),
+                1 | 2 => {
+                    let q = if w == 1 { 16.0 } else { 256.0 };
+                    ((th.sin() + 1.0) * 0.5 * (q - 1.0)).round() / (q - 1.0) * 2.0 - 1.0
+                }
+                3..=9 => (1..=n_of(w - 3)).map(|k| (th * k as f64).sin() / k as f64).sum(),
+                10 => 1.0 - 2.0 * ph,
+                11..=17 => (0..n_of(w - 11)).map(|j| (th * (2 * j + 1) as f64).sin() / (2 * j + 1) as f64).sum(),
+                _ => {
+                    if ph < 0.5 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                }
+            }
+        })
+        .collect();
+    let peak = t.iter().fold(0.0f64, |a, v| a.max(v.abs())).max(1e-9);
+    t.iter_mut().for_each(|v| *v /= peak);
+    let mut out: Vec<f32> = t.iter().map(|v| *v as f32).collect();
+    out.push(out[0]);
+    out
+}
 
 /// Parameter id of operator `op` (0 to 3), field `field` (`O_*`).
 pub const fn op_param(op: usize, field: u16) -> u16 {
@@ -44,7 +122,7 @@ pub const fn op_param(op: usize, field: u16) -> u16 {
 }
 
 /// name, min, max, default, unit
-const GLOBAL: [(&str, i32, i32, i32, &str); 6] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, ""), ("LEVEL LAW (0 DB STEPS 1 LINEAR)", 0, 1, 0, ""), ("RATIO LAW (0 PERCENT 1 THOUSANDTHS)", 0, 1, 0, "")];
+const GLOBAL: [(&str, i32, i32, i32, &str); 7] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, ""), ("LEVEL LAW (0 DB STEPS 1 LINEAR)", 0, 1, 0, ""), ("RATIO LAW (0 PERCENT 1 THOUSANDTHS)", 0, 1, 0, ""), ("SUSTAIN LAW (0 LINEAR 1 DB)", 0, 1, 0, "")];
 const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
     ("RATIO (0 = 0.5)", 0, 48, 1, ""),
     ("FINE RATIO", 0, 999, 0, ""),
@@ -63,6 +141,34 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
     if id < GLOBAL.len() {
         let d = GLOBAL[id];
         return Some((d.0.to_string(), d.1, d.2, d.3, d.4));
+    }
+    if id >= FILT_BASE as usize {
+        let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - FILT_BASE as usize) as u16 {
+            F_ON => ("FILTER (0 OFF 1 ON)", 0, 1, 0, ""),
+            F_TYPE => ("FILTER TYPE (0 LP 1 HP 2 BP 3 NOTCH)", 0, 3, 0, ""),
+            F_FREQ => ("FILTER FREQ", 30, 20000, 12000, "Hz"),
+            F_RES => ("FILTER RES (0.01)", 0, 125, 27, ""),
+            F_SLOPE => ("FILTER SLOPE (0 12 DB 1 24 DB)", 0, 1, 1, ""),
+            F_KEY => ("FILTER KEY TRACK", -100, 100, 100, "%"),
+            _ => return None,
+        };
+        return Some((name.to_string(), lo, hi, def, unit));
+    }
+    if id >= EXT_BASE as usize {
+        let i = id - EXT_BASE as usize;
+        if i >= OPS * EXT_PARAMS as usize {
+            return None;
+        }
+        let (op, f) = (i / EXT_PARAMS as usize, i % EXT_PARAMS as usize);
+        let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match f as u16 {
+            E_WAVE => ("WAVE (0 SINE ... 18 SQUARE D)", 0, WAVES.len() as i32 - 1, 0, ""),
+            E_PHASE => ("PHASE", 0, 100, 0, "%"),
+            E_KEYSCALE => ("KEY SCALE (ABOUT NOTE 60)", -100, 100, 0, "%"),
+            E_FIXED => ("FIXED (0 OFF 1 ON)", 0, 1, 0, ""),
+            E_FIXFREQ => ("FIXED FREQ", 10, 1024, 100, "Hz"),
+            _ => ("FIXED MULTI (0 X0.001 ... 4 X10)", 0, 4, 3, ""),
+        };
+        return Some((format!("OP{} {}", op + 1, name), lo, hi, def, unit));
     }
     let i = id.checked_sub(OP_BASE as usize)?;
     if i >= OPS * OP_PARAMS as usize {
@@ -134,10 +240,12 @@ struct Voice {
     vel: f64,
     ops: [Op; OPS],
     fb: [[f64; 2]; OPS],
+    /// the filter's two stages, transposed direct form II: (z1, z2) each
+    fz: [[f64; 2]; 2],
 }
 
 const IDLE_OP: Op = Op { stage: Stage::Idle, ph: 0.0, env: 0.0, out: 0.0 };
-const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS] };
+const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
 
 pub struct Fm4 {
     rate: f64,
@@ -147,6 +255,23 @@ pub struct Fm4 {
     bend: f64,
     bend_raw: i32,
     bend_semis: f64,
+    waves: Vec<Vec<f32>>,
+}
+
+/// A two-pole filter's coefficients `[b0, b1, b2, a1, a2]` (a0 = 1), the bilinear form of `1 / (s^2 + s / Q + 1)` and its high-pass, band-pass (peak gain 1) and
+/// notch relatives, for a corner of `fc` Hz.
+fn biquad(kind: i32, fc: f64, q: f64, rate: f64) -> [f64; 5] {
+    let w = TAU * fc / rate;
+    let (sn, cs) = (w.sin(), w.cos());
+    let al = sn / (2.0 * q);
+    let a0 = 1.0 + al;
+    let (b0, b1, b2) = match kind {
+        1 => ((1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0),
+        2 => (al, 0.0, -al),
+        3 => (1.0, -2.0 * cs, 1.0),
+        _ => ((1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0),
+    };
+    [b0 / a0, b1 / a0, b2 / a0, -2.0 * cs / a0, (1.0 - al) / a0]
 }
 
 /// The amplitude of a level 0 to 99: 0.75 dB a step down from 99 (a DX-like law), and silence at 0.
@@ -171,7 +296,7 @@ impl Fm4 {
                 *v = d.3;
             }
         }
-        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0 }
+        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, waves: (0..WAVES.len()).map(make_wave).collect() }
     }
 
     fn op(&self, op: usize, field: u16) -> i32 {
@@ -225,8 +350,9 @@ impl Engine for Fm4 {
         v.age = self.clock;
         v.f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
         v.vel = velocity.min(127) as f64 / 127.0;
-        for o in &mut v.ops {
+        for (k, o) in v.ops.iter_mut().enumerate() {
             o.stage = Stage::Attack;
+            o.ph = self.p[ext_param(k, E_PHASE) as usize] as f64 / 100.0;
         }
         self.voices[i] = v;
     }
@@ -269,6 +395,9 @@ impl Engine for Fm4 {
         let mut ratio = [0.0; OPS];
         let mut a = [[0.0; 3]; OPS];
         let mut sustain = [0.0; OPS];
+        let mut wave = [0usize; OPS];
+        let mut fixed = [0.0; OPS]; // a fixed operator's frequency in Hz, or 0
+        let mut kscale2 = [0.0; OPS];
         let mut level = [0.0; OPS];
         let mut vsens = [0.0; OPS];
         let mut kscale = [0.0; OPS];
@@ -278,7 +407,13 @@ impl Engine for Fm4 {
         for op in 0..OPS {
             ratio[op] = self.ratio(op);
             a[op] = [step(self.op(op, O_ATTACK).max(1)), fall(self.op(op, O_DECAY)), fall(self.op(op, O_RELEASE))];
-            sustain[op] = self.op(op, O_SUSTAIN) as f64 / 99.0;
+            let sv = self.op(op, O_SUSTAIN);
+            sustain[op] = if self.p[P_SUSTAIN_LAW as usize] == 1 { 10f64.powf((sv - 99) as f64 / 20.0) } else { sv as f64 / 99.0 };
+            wave[op] = self.p[ext_param(op, E_WAVE) as usize].clamp(0, WAVES.len() as i32 - 1) as usize;
+            if self.p[ext_param(op, E_FIXED) as usize] == 1 {
+                fixed[op] = self.p[ext_param(op, E_FIXFREQ) as usize] as f64 * MULTI[self.p[ext_param(op, E_FIXMULTI) as usize].clamp(0, 4) as usize];
+            }
+            kscale2[op] = self.p[ext_param(op, E_KEYSCALE) as usize] as f64 / 100.0;
             level[op] = amp_of(self.op(op, O_LEVEL), self.p[P_LEVEL_LAW as usize] == 1);
             vsens[op] = self.op(op, O_VELOCITY) as f64 / 100.0;
             kscale[op] = self.op(op, O_KEYSCALE) as f64 / 7.0;
@@ -294,10 +429,23 @@ impl Engine for Fm4 {
         let live = self.voices.iter().filter(|v| v.active).count().max(1);
         let poly = if live > 4 { (4.0 / live as f64).sqrt() } else { 1.0 };
         let bend = self.bend;
+        // the filter: per voice (the corner follows the note), computed once a block
+        let f_on = self.p[(FILT_BASE + F_ON) as usize] == 1;
+        let f_stages = if self.p[(FILT_BASE + F_SLOPE) as usize] == 1 { 2 } else { 1 };
+        let f_res = (self.p[(FILT_BASE + F_RES) as usize] as f64 / 100.0).min(0.93);
+        let f_q = 0.5 / (1.0 - 0.97 * f_res);
+        let mut fco = [[0.0f64; 5]; VOICES];
+        if f_on {
+            let kind = self.p[(FILT_BASE + F_TYPE) as usize];
+            for (i, v) in self.voices.iter().enumerate() {
+                let keyed = self.p[(FILT_BASE + F_FREQ) as usize] as f64 * 2f64.powf(self.p[(FILT_BASE + F_KEY) as usize] as f64 / 100.0 * (v.note as f64 - 60.0) / 12.0);
+                fco[i] = biquad(kind, keyed.clamp(5.0, rate * 0.45), f_q, rate);
+            }
+        }
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
         for o in out.iter_mut() {
             let mut acc = 0.0;
-            for v in self.voices.iter_mut().filter(|v| v.active) {
+            for (vi, v) in self.voices.iter_mut().enumerate().filter(|(_, v)| v.active) {
                 let mut heard = 0.0;
                 for op in (0..OPS).rev() {
                     let s = &mut v.ops[op];
@@ -321,14 +469,23 @@ impl Engine for Fm4 {
                     }
                     let s = &mut v.ops[op];
                     pm += fb[op] * 0.5 * (v.fb[op][0] + v.fb[op][1]);
-                    let inc = v.f0 * bend * ratio[op] / rate;
+                    let inc = if fixed[op] > 0.0 { fixed[op] / rate } else { v.f0 * bend * ratio[op] / rate };
                     s.ph += inc;
                     s.ph -= s.ph.floor();
                     // velocity: linear, from (1 - sensitivity) at velocity 0 to 1 at 127 (OPERATOR 0.7 at its default of 50%: half at 0, measured); key scaling: higher notes quieter
                     let vel = 1.0 - vsens[op] * (1.0 - v.vel);
                     let key = 1.0 - kscale[op] * ((v.note as f64 - 36.0) / 91.0).clamp(0.0, 1.0) * 0.75;
-                    let amp = level[op] * s.env * vel.max(0.05) * key;
-                    s.out = (TAU * (s.ph) + pm).sin() * amp;
+                    let key2 = 2f64.powf(kscale2[op] * (v.note as f64 - 60.0) / 12.0);
+                    let amp = level[op] * s.env * vel.max(0.05) * key * key2;
+                    s.out = if wave[op] == 0 {
+                        (TAU * (s.ph) + pm).sin() * amp
+                    } else {
+                        // a table lookup at the phase (cycles) plus the modulation, linearly interpolated
+                        let x = (s.ph + pm / TAU).rem_euclid(1.0) * TABLE as f64;
+                        let (i, f) = ((x as usize).min(TABLE - 1), x - (x as usize).min(TABLE - 1) as f64);
+                        let t = &self.waves[wave[op]];
+                        (t[i] as f64 + (t[i + 1] - t[i]) as f64 * f) * amp
+                    };
                     v.fb[op][1] = v.fb[op][0];
                     v.fb[op][0] = s.out;
                     if alg.carriers >> op & 1 == 1 {
@@ -338,6 +495,16 @@ impl Engine for Fm4 {
                 // a voice ends once every heard operator has released to silence
                 if !v.held && (0..OPS).all(|k| alg.carriers >> k & 1 == 0 || v.ops[k].env < 1e-4) {
                     v.active = false;
+                }
+                if f_on {
+                    let c = &fco[vi];
+                    for st in 0..f_stages {
+                        let z = &mut v.fz[st];
+                        let y = c[0] * heard + z[0];
+                        z[0] = c[1] * heard - c[3] * y + z[1];
+                        z[1] = c[2] * heard - c[4] * y;
+                        heard = y;
+                    }
                 }
                 acc += heard;
             }
@@ -531,10 +698,10 @@ mod tests {
         e.all_off();
         assert!(e.set(P_LEVEL, 9999) && e.get(P_LEVEL) == Some(100));
         assert!(e.set(op_param(3, O_DETUNE), -999) && e.get(op_param(3, O_DETUNE)) == Some(-50));
-        assert!(!e.set(P_COUNT as u16, 1) && e.get(6).is_none() && e.get(P_COUNT as u16).is_none());
+        assert!(!e.set(P_COUNT as u16, 1) && e.get(7).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 6 + OPS * OP_PARAMS as usize);
+        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
     }
@@ -569,6 +736,152 @@ mod tests {
         }
         e.set(op_param(0, O_LEVEL), 99);
         e
+    }
+
+    /// OPERATOR 0.7's waveforms, measured in the emulator (2026-11-19, `fm4fit`, A alone at 0 dB, note 57): a saw of N harmonics has them at 1/k and nothing above N,
+    /// a square of N has the first N odd ones at 1/k, and every wave peaks at the same level as the sine (0.0484), so the fundamental sits at 0.0335 (Saw 3), 0.0316
+    /// (Saw 4), 0.0298 (Saw 6), 0.0518 (Square 3) and 0.0520 (Square 4) of full scale.
+    #[test]
+    fn fitted_to_operator_the_waveforms() {
+        // (wave, [(harmonic, dB under the fundamental, or None for absent)], fundamental amplitude)
+        type Case<'a> = (i32, &'a [(usize, Option<f64>)], f64);
+        let cases: [Case; 5] = [
+            (3, &[(2, Some(-6.1)), (3, Some(-9.7)), (4, None)], 0.0335),
+            (4, &[(4, Some(-12.3)), (5, None)], 0.0316),
+            (5, &[(5, Some(-14.4)), (6, Some(-16.2)), (7, None)], 0.0298),
+            (11, &[(2, None), (3, Some(-9.7)), (5, Some(-14.4)), (7, None)], 0.0518),
+            (12, &[(7, Some(-17.7)), (9, None)], 0.0520),
+        ];
+        for (w, harmonics, fund) in cases {
+            let mut e = operator();
+            e.set(ext_param(0, E_WAVE), w);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let x = &b[10_000..10_000 + 22_050];
+            assert!((peak(&b[10_000..]) as f64 / 32768.0 - 0.0484).abs() < 0.0015, "wave {w} peak");
+            let f1 = tone(x, 220.0);
+            assert!((f1 - fund).abs() < 0.0015, "wave {w} fundamental {f1} against {fund}");
+            for (h, db) in harmonics {
+                let rel = 20.0 * (tone(x, 220.0 * *h as f64) / f1).max(1e-9).log10();
+                match db {
+                    Some(d) => assert!((rel - d).abs() < 0.8, "wave {w} harmonic {h}: {rel:.1} dB, measured {d}"),
+                    None => assert!(rel < -50.0, "wave {w} harmonic {h} should be absent, got {rel:.1}"),
+                }
+            }
+        }
+        // the ideal waves and the 4-bit sine are in the table and sound; an out-of-range wave is clamped
+        let mut e = operator();
+        assert!(e.set(ext_param(3, E_WAVE), 99) && e.get(ext_param(3, E_WAVE)) == Some(18) && e.get(P_COUNT as u16).is_none());
+        for w in [1, 2, 10, 18] {
+            let mut e = operator();
+            e.set(ext_param(0, E_WAVE), w);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 22_050];
+            e.render(&mut b);
+            assert!(peak(&b[5_000..]) > 1000, "wave {w} silent");
+        }
+    }
+
+    /// The numbers measured on OPERATOR 0.7 (2026-11-19, `fm4fit`): Key scaling pivots on note 60 and doubles the level an octave at +100 % (notes 24 to 96 at +100 %
+    /// peaked 0.0061 0.0122 0.0243 0.0484 0.0966 0.1929 0.3847; -100 % mirrored), +73 % gave 0.0292 at note 48 and 0.0802 at 72; Fixed plays Freq x Multi whatever
+    /// the note (100 Hz for notes 57 and 69); Phase 66 % starts a sine at -0.83 and falling.
+    #[test]
+    fn fitted_to_operator_key_scaling_fixed_and_phase() {
+        let peak_at = |note: u8, key: i32| {
+            let mut e = operator();
+            e.set(ext_param(0, E_KEYSCALE), key);
+            e.note_on(note, 127);
+            let mut b = vec![0i16; 22_050];
+            e.render(&mut b);
+            peak(&b[8_000..]) as f64 / 32768.0
+        };
+        for (note, want) in [(24, 0.0061), (48, 0.0243), (60, 0.0484), (84, 0.1929), (96, 0.3847)] {
+            assert!((peak_at(note, 100) - want).abs() < want * 0.03, "key +100 note {note}");
+            assert!((peak_at(120 - note, -100) - want).abs() < want * 0.03, "key -100 note {}", 120 - note);
+        }
+        assert!((peak_at(72, 73) - 0.0802).abs() < 0.0025 && (peak_at(48, 73) - 0.0292).abs() < 0.001);
+        for note in [57, 69] {
+            let mut e = operator();
+            e.set(ext_param(0, E_FIXED), 1);
+            e.note_on(note, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let x = &b[10_000..10_000 + 22_050];
+            assert!(tone(x, 100.0) > 0.04 && tone(x, 200.0) < 0.002, "fixed note {note}");
+        }
+        let mut e = operator();
+        e.set(ext_param(0, E_FIXED), 1);
+        e.set(ext_param(0, E_FIXMULTI), 4); // x10
+        e.set(ext_param(0, E_FIXFREQ), 127);
+        e.note_on(57, 127);
+        let mut b = vec![0i16; 44_100];
+        e.render(&mut b);
+        assert!(tone(&b[10_000..10_000 + 22_050], 1270.0) > 0.04);
+        let mut e = operator();
+        e.set(ext_param(0, E_PHASE), 66);
+        e.note_on(57, 127);
+        let mut b = vec![0i16; 2_000];
+        e.render(&mut b);
+        assert!(b[30] < b[10] && b[10] < 0, "phase 66 starts negative and falling: {} {}", b[10], b[30]);
+    }
+
+    /// OPERATOR 0.7's filter (2026-11-19, `fm4fit`; operator A on Saw D, note 45 or 57, Freq<Key at its default +100, Res 0.27): the harmonics' levels agree with two
+    /// cascaded two-pole stages (one for 12 dB) whose corner is the displayed Freq times `2^((note - 60) / 12)` and whose Q is 0.65 there, 0.5 at Res 0.
+    #[test]
+    fn fitted_to_operator_the_filter() {
+        let rel = |wave_filter: &dyn Fn(&mut Fm4), note: u8, f0: f64, ks: [usize; 3]| {
+            let mut e = operator();
+            e.set(ext_param(0, E_WAVE), 10);
+            e.set(FILT_BASE + F_ON, 1);
+            wave_filter(&mut e);
+            e.note_on(note, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let x = &b[8_000..8_000 + 22_050];
+            let a: Vec<f64> = ks.iter().map(|&k| 20.0 * (tone(x, f0 * k as f64) * k as f64).log10()).collect();
+            a // each harmonic's gain against the saw's own 1/k
+        };
+        // low-pass 24 dB, display 670 Hz, note 45 (measured gain differences, harmonic 2, 3, 4 against 1: -3.5, -9.9, -17.1)
+        let g = rel(&|e| { e.set(FILT_BASE + F_FREQ, 670); }, 45, 110.0, [1, 2, 4]);
+        assert!(((g[1] - g[0]) + 3.5).abs() < 1.5 && ((g[2] - g[0]) + 17.1).abs() < 2.0, "lp24 {g:?}");
+        // low-pass 12 dB (display about 1.22k at note 45): harmonic 2, 4, 8 against 1: -0.4, -4.6, -10.3 measured
+        let g = rel(&|e| { e.set(FILT_BASE + F_FREQ, 1220); e.set(FILT_BASE + F_SLOPE, 0); }, 45, 110.0, [1, 2, 8]);
+        assert!(((g[1] - g[0]) + 0.4).abs() < 1.5 && ((g[2] - g[0]) + 10.3).abs() < 2.0, "lp12 {g:?}");
+        // high-pass 24 dB, display 670, note 57: harmonic 4 and 6 against 2: +10.3 and +11.8 dB
+        let g = rel(&|e| { e.set(FILT_BASE + F_FREQ, 670); e.set(FILT_BASE + F_TYPE, 1); }, 57, 220.0, [2, 4, 6]);
+        assert!(((g[1] - g[0]) - 10.3).abs() < 2.0 && ((g[2] - g[0]) - 11.8).abs() < 2.0, "hp24 {g:?}");
+        // the notch cuts the harmonics near its corner: 2 and 3 are 20 dB and 35 dB under (note 57)
+        let g = rel(&|e| { e.set(FILT_BASE + F_FREQ, 670); e.set(FILT_BASE + F_TYPE, 3); }, 57, 220.0, [1, 2, 3]);
+        assert!(g[0] - g[1] > 8.0 && g[0] - g[2] > 12.0, "notch {g:?}");
+        // off by default: the first column of the saw is untouched
+        let mut e = operator();
+        e.set(ext_param(0, E_WAVE), 10);
+        e.note_on(45, 127);
+        let mut b = vec![0i16; 44_100];
+        e.render(&mut b);
+        let x = &b[8_000..8_000 + 22_050];
+        assert!((20.0 * (tone(x, 220.0) / tone(x, 110.0)).log10() + 6.0).abs() < 0.8);
+    }
+
+    /// OPERATOR shows its sustain in decibels: with the dB law 99 is 0 dB and each step is 1 dB down.
+    #[test]
+    fn sustain_in_decibels() {
+        let level = |v: i32| {
+            let mut e = operator();
+            e.set(P_SUSTAIN_LAW, 1);
+            e.set(op_param(0, O_SUSTAIN), v);
+            e.set(op_param(0, O_DECAY), 5);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            peak(&b[30_000..]) as f64 / 32768.0
+        };
+        let top = level(99);
+        for down in [6, 20, 40] {
+            let d = 20.0 * (level(99 - down) / top).log10();
+            assert!((d + down as f64).abs() < 0.5, "{down} steps gave {d:.2} dB");
+        }
     }
 
     #[test]

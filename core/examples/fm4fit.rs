@@ -117,6 +117,7 @@ fn main() -> ExitCode {
     let Ok(mut m) = Machine::from_package(&bytes) else { eprintln!("not a package"); return ExitCode::from(1) };
     m.set_jit(true);
     let mut rec: Vec<f64> = Vec::new();
+    let mut range: Option<(f64, f64)> = None;
     let mut narrow = false; // `narrow`: the fundamental is where the note says (a firmware in tune), not the strongest peak
     let mut win: Option<f64> = None; // `win:S`: analyse from S seconds after the first sound (a firmware that arpeggiates starts late and retriggers)
     let run = |m: &mut Machine, secs: f64, rec: Option<&mut Vec<f64>>| {
@@ -139,6 +140,8 @@ fn main() -> ExitCode {
             "wait" => run(&mut m, f[1].parse().unwrap_or(0.5), None),
             "win" => win = f[1].parse().ok(),
             "narrow" => narrow = true,
+            // `range:LO:HI`: look for the fundamental between these frequencies (Hz) instead of 0.5x to 2x of the note (a fixed-frequency operator ignores the note)
+            "range" => range = Some((f[1].parse().unwrap_or(20.0), f[2].parse().unwrap_or(2000.0))),
             "n" => WIN_N.store(f[1].parse().unwrap_or(32768usize).next_power_of_two().clamp(1024, 65536), Ordering::Relaxed),
             "enc" => {
                 let Some(e) = devices::ENCODER_NAMES.iter().position(|n| *n == f[1]) else { eprintln!("no encoder {}", f[1]); return ExitCode::from(2) };
@@ -205,13 +208,20 @@ fn main() -> ExitCode {
                     }
                     run(&mut m, 1.5, Some(&mut rec));
                 }
+                if let Ok(path) = std::env::var("FM4FIT_DUMP") {
+                    // the recording as text, one sample a line (for fits done outside)
+                    let _ = fs::write(path, rec.iter().map(|v| format!("{v:.6}\n")).collect::<String>());
+                }
+                if let Some(i) = rec.iter().position(|v| v.abs() > 3e-4) {
+                    println!("  onset at {i}: {}", rec[i..(i + 12).min(rec.len())].iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(" "));
+                }
                 let mut f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
                 let at = match win {
                     Some(w) => rec.iter().position(|v| v.abs() > 3e-4).unwrap_or(0) + (w * 44_100.0) as usize,
                     None => (0.6 * 44_100.0) as usize,
                 };
                 // the true fundamental: the strongest peak in 0.5x to 2x of nominal, so a firmware's tuning offset does not hide it
-                let wide = if narrow { partial_wide(&rec, at, f0 * 0.97, f0 * 1.03) } else { partial_wide(&rec, at, f0 * 0.5, f0 * 2.0) };
+                let wide = if let Some((lo, hi)) = range { partial_wide(&rec, at, lo, hi) } else if narrow { partial_wide(&rec, at, f0 * 0.97, f0 * 1.03) } else { partial_wide(&rec, at, f0 * 0.5, f0 * 2.0) };
                 println!("  strongest peak {:.3} Hz amp {:.4}", wide.1, wide.0);
                 f0 = wide.1;
                 {
