@@ -20,6 +20,8 @@ pub const P_LEVEL: u16 = 2;
 pub const P_INDEX: u16 = 3;
 /// How an operator's level maps to amplitude: 0 a DX-style law (0.75 dB a step down from 99, OPERATOR 0.7), 1 linear (level / 100, Mighty Arp 1.5).
 pub const P_LEVEL_LAW: u16 = 4;
+/// How FINE RATIO acts: 0 a percentage of the coarse ratio (generic; 0 to 99), 1 thousandths added to it (OPERATOR 0.7: coarse 1 and fine 26 is 1.026; 0 to 999).
+pub const P_RATIO_LAW: u16 = 5;
 /// Operator `n` (0 to 3, shown as OP1 to OP4) has `OP_PARAMS` parameters from `OP_BASE + n * OP_PARAMS`.
 pub const OP_BASE: u16 = 10;
 pub const OP_PARAMS: u16 = 11;
@@ -42,10 +44,10 @@ pub const fn op_param(op: usize, field: u16) -> u16 {
 }
 
 /// name, min, max, default, unit
-const GLOBAL: [(&str, i32, i32, i32, &str); 5] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, ""), ("LEVEL LAW (0 DB STEPS 1 LINEAR)", 0, 1, 0, "")];
+const GLOBAL: [(&str, i32, i32, i32, &str); 6] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, ""), ("LEVEL LAW (0 DB STEPS 1 LINEAR)", 0, 1, 0, ""), ("RATIO LAW (0 PERCENT 1 THOUSANDTHS)", 0, 1, 0, "")];
 const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
-    ("RATIO (0 = 0.5)", 0, 31, 1, ""),
-    ("FINE RATIO", 0, 99, 0, "%"),
+    ("RATIO (0 = 0.5)", 0, 48, 1, ""),
+    ("FINE RATIO", 0, 999, 0, ""),
     ("DETUNE", -50, 50, 0, "cents"),
     ("LEVEL", 0, 100, 99, ""),
     ("ATTACK", 0, 5000, 2, "ms"),
@@ -177,7 +179,9 @@ impl Fm4 {
     fn ratio(&self, op: usize) -> f64 {
         let c = self.op(op, O_RATIO);
         let base = if c == 0 { 0.5 } else { c as f64 };
-        base * (1.0 + self.op(op, O_FINE) as f64 / 100.0) * 2f64.powf(self.op(op, O_DETUNE) as f64 / 1200.0)
+        let fine = self.op(op, O_FINE) as f64;
+        let ratio = if self.p[P_RATIO_LAW as usize] == 1 { base + fine / 1000.0 } else { base * (1.0 + fine.min(99.0) / 100.0) };
+        ratio * 2f64.powf(self.op(op, O_DETUNE) as f64 / 1200.0)
     }
 }
 
@@ -519,10 +523,10 @@ mod tests {
         e.all_off();
         assert!(e.set(P_LEVEL, 9999) && e.get(P_LEVEL) == Some(100));
         assert!(e.set(op_param(3, O_DETUNE), -999) && e.get(op_param(3, O_DETUNE)) == Some(-50));
-        assert!(!e.set(P_COUNT as u16, 1) && e.get(5).is_none() && e.get(P_COUNT as u16).is_none());
+        assert!(!e.set(P_COUNT as u16, 1) && e.get(6).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 5 + OPS * OP_PARAMS as usize);
+        assert_eq!(ps.len(), 6 + OPS * OP_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
     }
@@ -734,5 +738,37 @@ mod tests {
         let full = carrier(100);
         assert!((full / 0.0708 - 1.0).abs() < 0.06, "one carrier at 100 % peaks at {full}, Mighty Arp 0.0708");
         assert!((carrier(50) / full - 0.5).abs() < 0.03, "50 % is half");
+    }
+
+    /// OPERATOR 0.7's ratio (measured by the zero crossings of operator A alone, note 57): the coarse knob steps 0.5, 1, 2, 3, 4, 5, 6, 7 ... to 48 (a click each), and the
+    /// fine value adds thousandths (coarse 1 and fine 26 played 1.026 times the pitch, fine 146 played 1.146; the screen read "1.026" and "1.146").
+    #[test]
+    fn fitted_to_operator_the_ratio_table() {
+        let freq = |coarse: i32, fine: i32| {
+            let mut e = sine();
+            e.set(P_RATIO_LAW, 1);
+            e.set(op_param(0, O_RATIO), coarse);
+            e.set(op_param(0, O_FINE), fine);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let z = &b[8000..];
+            z.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as f64 * 44_100.0 / z.len() as f64 / 220.0
+        };
+        for (coarse, ratio) in [(0, 0.5), (1, 1.0), (2, 2.0), (3, 3.0), (7, 7.0), (20, 20.0)] {
+            assert!((freq(coarse, 0) / ratio - 1.0).abs() < 0.02, "coarse {coarse}: {:.3}", freq(coarse, 0));
+        }
+        assert!((freq(1, 26) - 1.026).abs() < 0.006 && (freq(1, 146) - 1.146).abs() < 0.006 && (freq(18, 248) - 18.248).abs() < 0.12, "fine adds thousandths");
+        // the generic law is still a percentage of the ratio
+        let mut g = sine();
+        g.set(op_param(0, O_RATIO), 2);
+        g.set(op_param(0, O_FINE), 50);
+        g.note_on(57, 127);
+        let mut b = vec![0i16; 44_100];
+        g.render(&mut b);
+        let z = &b[8000..];
+        let f = z.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as f64 * 44_100.0 / z.len() as f64 / 220.0;
+        assert!((f - 3.0).abs() < 0.04, "coarse 2 fine 50 % is 3x: {f}");
     }
 }

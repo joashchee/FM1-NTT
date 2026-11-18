@@ -214,6 +214,13 @@ fn main() -> ExitCode {
                 let wide = if narrow { partial_wide(&rec, at, f0 * 0.97, f0 * 1.03) } else { partial_wide(&rec, at, f0 * 0.5, f0 * 2.0) };
                 println!("  strongest peak {:.3} Hz amp {:.4}", wide.1, wide.0);
                 f0 = wide.1;
+                {
+                    // a sine's frequency from its rising zero crossings over 1.5 s (right to a fraction of a percent for a single clean tone, whatever its ratio to the note)
+                    let from = at.min(rec.len());
+                    let z = &rec[from..(from + 66_150).min(rec.len())];
+                    let n = z.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+                    println!("  zero-crossing frequency {:.2} Hz", n as f64 * 44_100.0 / z.len().max(1) as f64);
+                }
                 let seg = &rec[at.min(rec.len())..(at + WIN_N.load(Ordering::Relaxed)).min(rec.len())];
                 let peak = seg.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
                 let (a1, fr) = partial(&rec, at, f0);
