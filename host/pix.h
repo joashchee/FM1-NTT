@@ -192,6 +192,7 @@ typedef struct {
     int level_l, level_r, peak_l, peak_r;
     int16_t scope[PX_SCOPE];
     int rec_on;
+    int pv_solo;                       /* the machine is stopped, only the engine plays */
     int pv_on, pv_n, pv_sel, pv_oct;   /* the preview: on, voices found, the chosen one, the octave */
     char pv_name[PX_NAME];
     uint64_t rec_frames;
@@ -551,7 +552,7 @@ static inline void px_panel_sound(uint32_t *c, PxRect r, const UiState *u, int n
     if (!u->pv_n) {
         px_wrap(c, x, r.y + 326, "NO VOICES FOUND IN THIS FIRMWARE", C_DIM, w, 2);
     } else {
-        px_text(c, x, r.y + 326, u->pv_on ? "ON" : "OFF  L2 TURNS IT ON", u->pv_on ? C_OK : C_DIM, 1, w);
+        px_text(c, x, r.y + 326, u->pv_on ? (u->pv_solo ? "ON  SOLO (R2 ENDS)" : "ON  R2: SOLO") : "OFF  L2 TURNS IT ON", u->pv_on ? C_OK : C_DIM, 1, w);
         snprintf(line, sizeof line, "%d/%d %s", u->pv_sel + 1, u->pv_n, u->pv_name);
         px_text(c, x, r.y + 338, line, C_TEXT, 1, w);
         snprintf(line, sizeof line, "OCTAVE %+d", u->pv_oct);

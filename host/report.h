@@ -235,6 +235,30 @@ static void pin_ab_text(const PinAB *r, char *out, size_t n) {
 /* ---- the benchmark report ---------------------------------------------------------------------------------------------------- */
 typedef struct { FILE *f; char path[512], tmp[524]; int n; } Bench;
 
+/* The sound engine's load, for "can this unit play live without the firmware": `voices` held notes of a plain 6-operator voice rendered in the audio
+ * callback's own 512-frame buffers for `seconds`, as a percentage of the real time those buffers last (100 is exactly real time; the goal is well under).
+ * 0 when the engine could not be made. Not the firmware's sound, and not the sound system: only fm6's arithmetic on this CPU. */
+static double sound_fm6_load(int voices, double seconds) {
+    uint8_t v[128] = {0};
+    for (int op = 0; op < 6; op++) {
+        uint8_t *o = v + op * 17;
+        o[0] = 90; o[1] = 80; o[2] = 60; o[3] = 50; o[4] = 99; o[5] = 90; o[6] = 80; o[7] = 0;
+        o[8] = 39; o[12] = 7 << 3; o[14] = 99; o[15] = 2;
+    }
+    v[102] = v[103] = v[104] = v[105] = 99; v[106] = v[107] = v[108] = v[109] = 50; v[110] = 0; v[111] = 7; v[117] = 24;
+    fm1ntt_fm6 *e = fm1ntt_fm6_new(FM1_SAMPLE_RATE, v);
+    if (!e) return 0;
+    fm1ntt_fm6_set_model(e, 2, 900, 2, 0);
+    for (int i = 0; i < voices; i++) fm1ntt_fm6_note_on(e, 48 + 3 * i, 100);
+    int16_t buf[AUDIO_FRAMES];
+    for (int i = 0; i < 40; i++) fm1ntt_fm6_render(e, buf, AUDIO_FRAMES);       /* past the attacks */
+    double t0 = r3_report_ms(), frames = 0;
+    while (r3_report_ms() - t0 < seconds * 1000.0) { for (int k = 0; k < 20; k++) frames += (double)fm1ntt_fm6_render(e, buf, AUDIO_FRAMES); }
+    double wall = r3_report_ms() - t0;
+    fm1ntt_fm6_free(e);
+    return frames > 0 ? 100.0 * wall / (frames / (double)FM1_SAMPLE_RATE * 1000.0) : 0;
+}
+
 static void bench_line(Bench *b, const char *id, const double v[BENCH_RUNS], const char *unit, int higher_better) {
     char line[320];
     snprintf(line, sizeof line, "BENCH %s: %.4g %s better=%s min=%.4g max=%.4g n=%d\n", id, median3((double *)v), unit, higher_better ? "higher" : "lower", min3(v), max3(v), BENCH_RUNS);
@@ -298,7 +322,7 @@ static unsigned long long fnv64_file(const char *path, size_t *size) {
 /* The whole benchmark. `seconds` is per workload per run (default 1.0 so the three runs of the speed tests take about 3 s each);
  * `fw` (may be NULL) is a firmware to time too. Writes $BASE/bench/bench-<platform>-<stamp>.txt (and latest.txt); returns 0 when written. */
 static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *result, size_t rn) {
-    const int steps = 14;
+    const int steps = 15;
     char dir[300], plat[64], st[32], name[160];
     sub_path(dir, sizeof dir, "bench", NULL);
     if (mkdir_p(dir) != 0) { snprintf(result, rn, "Cannot make the bench folder"); return -1; }
@@ -418,6 +442,19 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
     }
     fm1ntt_free(m);
 
+    /* the sound engine alone (the SOUND preview's Solo mode): 1, 6 and 12 held voices, as a share of real time */
+    report_progress("sound: the fm6 engine", 7, steps, b.path);
+    {
+        static const int nv[3] = {1, 6, 12};
+        for (int k = 0; k < 3; k++) {
+            double l[BENCH_RUNS];
+            for (int i = 0; i < BENCH_RUNS; i++) l[i] = sound_fm6_load(nv[k], seconds * 0.25);
+            char id[48];
+            snprintf(id, sizeof id, "sound.fm6.voices%d.load", nv[k]);
+            bench_line(&b, id, l, "pct-of-real-time", 0);
+        }
+    }
+
     /* a firmware the caller supplied, if any */
     if (fw && *fw) {
         size_t sz = 0;
@@ -436,7 +473,7 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
         for (int v = 0; v < 5; v++) {
             int jit = var[v][0], pace = var[v][1];
             if (jit && !fm1ntt_jit_available()) break;
-            report_progress(!jit ? "the firmware, interpreter" : pace ? "the firmware, native JIT, paced" : "the firmware, native JIT", 7 + v, steps, b.path);
+            report_progress(!jit ? "the firmware, interpreter" : pace ? "the firmware, native JIT, paced" : "the firmware, native JIT", 8 + v, steps, b.path);
             double xs[BENCH_RUNS], emu = 0, warm_ms = 0, warm_s = 0;
             int halted = 0, ok = speed_firmware_windows(fw, fw_raw, jit, pace, seconds, xs, &emu, &halted, &warm_ms, &warm_s);
             if (ok) { char wl[160]; snprintf(wl, sizeof wl, "# fw warm-up: %.0f emulated ms in %.1f s, then %d windows of %.2f s\n", warm_ms, warm_s, BENCH_RUNS, seconds); bench_note(&b, "%s", wl); }
@@ -446,14 +483,14 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
             if (ok && !halted) bench_line(&b, key, xs, "x-real-time", 1);
             else bench_note(&b, ok ? "SKIP fw: the firmware halted before the run ended%s\n" : "SKIP fw: it did not boot (see the app's log)%s\n", "");
         }
-        if (fm1ntt_jit_available()) { report_progress("the firmware, where the JIT's time goes", 12, steps, b.path); fw_jit_diag(&b, fw, fw_raw, 3, seconds); }
+        if (fm1ntt_jit_available()) { report_progress("the firmware, where the JIT's time goes", 13, steps, b.path); fw_jit_diag(&b, fw, fw_raw, 3, seconds); }
         {   /* the CPU time by thread over the firmware runs (comment lines: no result, so the comparison script is unchanged) and the placement test */
             char tx[500], line2[700];
             thr_snapshot(&th1, r3_report_ms());
             thr_describe(&th0, &th1, (int)getpid(), thr_ncpu(), tx, sizeof tx);
             snprintf(line2, sizeof line2, "# threads during the firmware runs, %s\n# thread pin: %s\n", tx, a && a->pin ? "on (--pin)" : "off");
             bench_note(&b, "%s", line2);
-            report_progress("the firmware, thread placement", 13, steps, b.path);
+            report_progress("the firmware, thread placement", 14, steps, b.path);
             PinAB ab;
             int g = speed_firmware_pin_ab(fw, fw_raw, fm1ntt_jit_available(), fm1ntt_jit_available() ? 3 : 0, seconds, &ab);
             if (g == 1) { char pt[500]; pin_ab_text(&ab, pt, sizeof pt); snprintf(line2, sizeof line2, "# thread placement (%s): %s\n", fm1ntt_jit_available() ? "native JIT, pace 3" : "interpreter", pt); }
@@ -494,7 +531,7 @@ static int report_sound_check(App *a, R3Report *r) {
 
 /* One report. `fw` (may be NULL) is a firmware for the working window; the app's own loaded one is used when it has one. */
 static int device_report(App *a, const char *how, const char *fw, int fw_raw, char *result, size_t rn) {
-    const int steps = 10;
+    const int steps = 11;
     char base[300];
     base_dir(base, sizeof base);
     R3Report r;
@@ -625,6 +662,10 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     if (a) a->paused = paused;                             /* the callback has to be running to be counted */
     report_sound_check(a, &r);
     if (a) a->paused = 1;
+    {   /* live play without the firmware: the engine alone, 12 held voices, against the real time its buffers last */
+        double l12 = sound_fm6_load(12, 1.0);
+        r3_report_line(&r, l12 > 0 && l12 < 50 ? R3_PASS : R3_FAIL, "sound engine alone, 12 voices", "%.1f%% of real time (goal under 50%%: the rest is for the sound system and the screen); this is the SOUND preview's Solo mode, not the firmware", l12);
+    }
     r3_report_section(&r, "files");
     report_progress("files", 7, steps, r.path);
     {
@@ -695,7 +736,7 @@ static void job_start(App *a, int kind) {
     a->job_result[0] = 0;
     SDL_AtomicSet(&a->job_done, 0);
     prog_reset();
-    report_progress("starting", 0, kind == JOB_REPORT ? 10 : 14, NULL);
+    report_progress("starting", 0, kind == JOB_REPORT ? 11 : 15, NULL);
     a->job = SDL_CreateThread(job_thread, "fm1ntt-job", a);
     if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); a->job_kind = JOB_NONE; say(a, a->job_style, "%s", a->job_result); return; }
     say(a, 0, kind == JOB_REPORT ? "Device report running (about two minutes): the emulation is paused while it measures" : "Benchmark running (about two minutes)", NULL);

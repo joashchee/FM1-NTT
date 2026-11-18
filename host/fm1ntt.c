@@ -124,6 +124,7 @@ typedef struct {
     /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
     fm1ntt_fm6 *pv;
     uint8_t pv_voices[PV_MAX][128];
+    int pv_solo;                        /* the machine is not run, only the engine (R2): the live-play mode for a unit too slow to emulate the firmware */
     int pv_n, pv_sel, pv_on, pv_oct;    /* voices found, the chosen one, preview on, octave -2..2 */
     int pv_key[27], pv_pad[4];          /* the MIDI note each held key or pad button started (+1; 0 none), so its release matches */
     uint32_t budget;                    /* instructions a buffer may spend (0: MAX_INSNS_PER_BUFFER); Rec demo's self-test lowers it */
@@ -186,11 +187,20 @@ static int pv_midi(const App *a, int key) { int n = 53 + key + 12 * a->pv_oct; r
 static void pv_toggle(App *a) {
     if (!a->pv_n) { say(a, 2, "No voices found in this firmware", NULL); return; }
     a->pv_on = !a->pv_on;
+    if (!a->pv_on) a->pv_solo = 0;
     pv_notes_off(a);
     say(a, 0, a->pv_on ? "Preview on: the keys play the voice" : "Preview off", NULL);
 }
 /* Leaving SOUND turns the preview off and lets its notes go. */
-static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv)) { a->pv_on = 0; pv_notes_off(a); } }
+static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv)) { a->pv_on = 0; a->pv_solo = 0; pv_notes_off(a); } }
+/* Solo: the machine stops (its audio and screen freeze) and the engine has the whole processor; only with the preview on. */
+static void pv_solo_toggle(App *a) {
+    if (!a->pv_on) { say(a, 2, "Turn the preview on first (L2)", NULL); return; }
+    lock(a);
+    a->pv_solo = !a->pv_solo;
+    unlock(a);
+    say(a, 0, a->pv_solo ? "Solo: the machine is stopped, only the engine plays" : "Solo off: the machine runs again", NULL);
+}
 static void pv_free(App *a) { if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } }
 
 static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
@@ -478,8 +488,10 @@ static void rec_stop(App *a) {
 /* One buffer of the emulated machine's sound, and the meters, the scope and the recorder's ring that go with it. The callback's whole body,
  * so Rec demo steps the app with the same code. */
 static void audio_step(App *a, int16_t *out, size_t frames) {
-    if (a->paused || !fm1ntt_loaded(a->m)) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
-    fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
+    int solo = a->pv_on && a->pv_solo && a->pv;      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
+    if (a->paused || (!solo && !fm1ntt_loaded(a->m))) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
+    if (solo) memset(out, 0, frames * 4);
+    else fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
     if (a->pv_on && a->pv) {   /* the preview's voice on both channels (the caller holds the audio lock, as the machine's keys do) */
         int16_t mono[4096];
         for (size_t at = 0; at < frames; ) {
@@ -704,6 +716,7 @@ static void act(App *a, int act) {
         break;
     case PANEL_SOUND:
         if (act == A_L2) pv_toggle(a);
+        else if (act == A_R2) pv_solo_toggle(a);
         else if (a->pv_on && act == A_UP) pv_select(a, a->pv_sel - 1);
         else if (a->pv_on && act == A_DOWN) pv_select(a, a->pv_sel + 1);
         else if (a->pv_on && act == A_LEFT) { if (a->pv_oct > -2) a->pv_oct--; }
@@ -769,7 +782,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     memcpy(u->enc_turns, a->enc_turns, sizeof u->enc_turns);
     u->pot = a->pot;
     u->level_l = a->level_l; u->level_r = a->level_r; u->peak_l = a->peak_l; u->peak_r = a->peak_r;
-    u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
+    u->pv_solo = a->pv_solo; u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
     pv_name(a, u->pv_name, sizeof u->pv_name);
     u->msg = a->msg;
     u->msg_style = a->msg_style;
@@ -1443,8 +1456,23 @@ static int selftest(void) {
         ev.type = SDL_KEYUP; handle(&a, &ev); CHECK(a.pv_key[12] == 0);
         memset(&ev, 0, sizeof ev); ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = 3; handle(&a, &ev);   /* the pad's Y: the root */
         CHECK(a.pv_pad[3] == 60 + 1);
+        /* Solo (R2): the machine is not run, the engine still sounds, and leaving the preview ends it */
+        {
+            Fm1Cpu c0, c1;
+            fm1ntt_cpu(a.m, 0, &c0);
+            act(&a, A_R2); CHECK(a.pv_solo == 1);
+            int16_t solo_out[2 * 2048];
+            audio_step(&a, solo_out, 2048);
+            fm1ntt_cpu(a.m, 0, &c1);
+            long es = 0; for (int i = 0; i < 2 * 2048; i++) es += abs(solo_out[i]);
+            CHECK(c1.insns == c0.insns && es > 2048 * 20);                       /* no instruction ran, and the held chord sounds */
+            act(&a, A_R2); CHECK(a.pv_solo == 0);
+            act(&a, A_R2); act(&a, A_L2); CHECK(!a.pv_on && !a.pv_solo);          /* turning the preview off turns solo off */
+            act(&a, A_R2); CHECK(!a.pv_solo && a.msg_style == 2);                 /* solo with the preview off says why not */
+            act(&a, A_L2); act(&a, A_R2); CHECK(a.pv_solo == 1);
+        }
         a.panel = PANEL_MIDI; pv_leave(&a);                                      /* leaving SOUND: off, every note released */
-        CHECK(!a.pv_on && a.pv_pad[3] == 0);
+        CHECK(!a.pv_on && !a.pv_solo && a.pv_pad[3] == 0);
         pv_set(&a, two, 0); CHECK(a.pv_n == 0 && a.pv == NULL && !a.pv_on);
     }
     /* the recorder: the ring to a real WAV, header sizes right, renamed from .part, a quit while recording asks first */
@@ -1486,9 +1514,10 @@ static int selftest(void) {
         if (bt) {
             char *txt = malloc(bn + 1);
             memcpy(txt, bt, bn); txt[bn] = 0;
-            CHECK(strstr(txt, "# fm1ntt benchmark\nformat: 1\n") == txt && strstr(txt, "\nworkload: 2\n") && strstr(txt, "\nplatform: ") && strstr(txt, "\ncpu: ") && strstr(txt, "\n== results ==\n"));
+            CHECK(strstr(txt, "# fm1ntt benchmark\nformat: 1\n") == txt && strstr(txt, "\nworkload: 3\n") && strstr(txt, "\nplatform: ") && strstr(txt, "\ncpu: ") && strstr(txt, "\n== results ==\n"));
             CHECK(strstr(txt, "\nBENCH core.nop.interp: ") && strstr(txt, "\nBENCH core.boot: ") && strstr(txt, "\nBENCH core.reset: ") && strstr(txt, "\nBENCH mem.read: ") &&
                   strstr(txt, "\nBENCH screen.draw.standard: ") && strstr(txt, "\nBENCH screen.draw.zoomed: ") && strstr(txt, "\nBENCH io.flash.write: ") && strstr(txt, "\nBENCH io.flash.read: "));
+            CHECK(strstr(txt, "\nBENCH sound.fm6.voices1.load: ") && strstr(txt, "\nBENCH sound.fm6.voices6.load: ") && strstr(txt, "\nBENCH sound.fm6.voices12.load: "));
             CHECK(strstr(txt, "\nend\n") && !strcmp(strstr(txt, "\nend\n"), "\nend\n"));
             int benches = 0;
             for (char *p = txt; (p = strstr(p, "\nBENCH ")); p++) benches++;

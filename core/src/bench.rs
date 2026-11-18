@@ -9,7 +9,8 @@
 
 /// Version of the workload below; a benchmark report records it.
 /// 2: the firmware lines run after a warm-up past the firmware's boot (version 1 timed its cheap first seconds).
-pub const WORKLOAD_VERSION: u32 = 2;
+/// 3: adds the sound engine's load (`sound.fm6.voices*.load`); the core and firmware lines are unchanged, so a version 2 file's numbers still compare by hand.
+pub const WORKLOAD_VERSION: u32 = 3;
 /// Where a raw image is entered (Felucca's entry; the same as `fm1ntt_load_raw`'s FM1_ENTRY_FELUCCA).
 pub const ENTRY: u32 = 0x0200_0120;
 

@@ -79,3 +79,5 @@ per block); that is noted in the file and tracked in ROADMAP section 5.
 `--report` (the Device report, r3i6nos rule 9) answers **what is wrong on this unit** (PASS/FAIL against goals, power, the card).
 `--bench` answers **how fast, compared with the others**. They share the platform facts and are separate files on purpose: the report is
 read by Claude after a run on the unit, the benchmark is collected from many machines and compared by a script.
+
+**Sound engine lines (workload 3).** `sound.fm6.voices1.load`, `voices6` and `voices12`: the fm6 engine rendering that many held notes of a plain voice in 512-frame buffers, as a percentage of the real time those buffers last (lower is better; 100 is exactly real time). It is the cost of the SOUND preview's Solo mode (the machine not run), not of the firmware or the sound system. On an M1: 0.07%, 0.35%, 0.68%. The core and firmware lines did not change in workload 3, so a workload 2 file's numbers compare by hand; `bench-compare.py` refuses the mix unless `--force`.

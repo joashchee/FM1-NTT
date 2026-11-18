@@ -7,7 +7,7 @@ boot and idle cost little and it gets heavier after that (on the Mac the interpr
 now warms up first (workload 2); **the Device report still runs 3 s from a cold start and overstates (0.64x): to change.** Pacing, which looked worth 1.4x on the
 Mac and in those early figures, is worth only 1.35x over the unpaced JIT in steady state, and levels 1 to 3 are the same, so **pacing alone does not get near 1x.**
 
-**The gap is about 4x at the best setting.** The projections further down (0.34x, 0.47x with pace 3) were made from the early figures and are superseded.
+**The gap is about 4x at the best setting** (repeated 2026-11-18: JIT 0.185x, pace 3 0.246x; see the section on the counters). The projections further down (0.34x, 0.47x with pace 3) were made from the early figures and are superseded.
 
 **Tried and dropped (2026-11-17, Mac): `lto = "fat"` with `codegen-units = 1` for the core**: no gain (nop loop 32.1 / 31.7 Minsn/s, UNTRUE STEP JIT 4.80x / 4.66x, interpreter 0.700x / 0.699x; within noise). Not adopted, and not worth measuring on the unit.
 
@@ -195,6 +195,26 @@ bundled firmware (Debian 12 arm64 in Docker, on an Apple chip: free 6.887x again
 
 **Next:** run the Device report and the benchmark on the unit and read `threads` and `thread placement`; if pinning is faster in every window, make it the default; if the main thread is already apart, the cores are not the limit and the
 remaining levers are the JIT's, above.
+
+## First benchmark with the counters and thread lines, on the unit (2026-11-18, build 53d4504)
+
+R36S, Linux 4.4.189, four cores, governor `performance` at 1512 MHz (the maximum, so no throttling), UNTRUE STEP, workload 2, 3 windows of 1 s:
+
+| Setting | x real time | vs 2026-11-17 |
+|---|---|---|
+| interpreter | 0.0362 | 0.036 |
+| JIT | 0.1848 (0.184-0.187) | 0.1859 |
+| JIT pace 1 / 2 / 3 | 0.2486 / 0.2367 / 0.2456 | 0.2485 / 0.2388 / 0.2478 |
+
+Nothing moved: the figures repeat to within 1%, so they are the unit's, not noise. Still about 4x short of 1x. The nop loop is 1.6 Minsn/s either way (the JIT does not engage on it).
+
+**What the new lines say:**
+
+- **The JIT is not short of compiled code.** After the warm-up 379.2M of 379.7M guest instructions (99.9%) ran compiled, from 942 blocks (565 KB of cache); the following window compiled about 240 more blocks. Compile time is therefore small (the "5% at most" figure above stands) and the cost is in running the compiled code: 41.7M guest instructions a second at 1.512 GHz is about 36 host cycles per guest instruction, with the A35 at an IPC near 0.3 as estimated before. Whether that is block entry and exit (1.32M entries by the end of the warm-up, about 290 instructions a block on average) or memory stalls, these counters cannot say.
+- **The cores are not the limit.** The emulating thread (`fm1ntt-job`) uses 100.0% of cpu 1; the main thread 3.7%, audio 1.5%; all 17 threads 106.2% of four cores. Placement: pinned 0.246x, free 0.249x, ranges overlap (3 windows of 255 emulated ms): **no clear difference, so `--pin` stays off.** The scheduler already keeps the main thread apart.
+- **The warm-up is the same cost as before**: 2017 emulated ms took 9.1 s (10.2 s for the interpreter), 0.22x.
+
+**Consequence.** No setting or thread placement helps; the remaining levers are the JIT's (about 1.3x together, above), the two-thread split (non-deterministic, spike only), or a lighter firmware. The question to answer before more JIT work is entry/exit against memory stalls (`perf` on the unit if it has it, otherwise change one and measure). Device report and Rec demo not run in this session.
 
 ## What would
 
