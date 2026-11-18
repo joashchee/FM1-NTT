@@ -1,4 +1,4 @@
-//! The shared effects of an instrument package (docs/PORTING.md): a limiter, a delay, a low-pass, a chorus and a reverb, in place on a mono block.
+//! The shared effects of an instrument package (docs/PORTING.md): a limiter, a delay, a low-pass, a chorus, a reverb, a filter (low, band, high), a distortion and a phaser, in place on a mono block.
 //! Written for FM1-NTT, fitted to no firmware. Parameters are described like an engine's (`ParamDesc`) so the same editor and MIDI map reach them.
 //! No allocation after `new`.
 
@@ -21,6 +21,9 @@ pub fn make(name: &str, rate: f64) -> Option<Box<dyn Effect>> {
         "lowpass" => Some(Box::new(Lowpass::new(rate))),
         "chorus" => Some(Box::new(Chorus::new(rate))),
         "reverb" => Some(Box::new(Reverb::new(rate))),
+        "filter" => Some(Box::new(Filter::new(rate))),
+        "distortion" => Some(Box::new(Distortion::new(rate))),
+        "phaser" => Some(Box::new(Phaser::new(rate))),
         _ => None,
     }
 }
@@ -356,6 +359,204 @@ impl Effect for Reverb {
     }
 }
 
+/// A state-variable filter with three modes (the stock firmware's filter slot: LPF, BPF, HPF; docs/FM-1-MIDI.md). A TPT (zero-delay) topology, stable at any cutoff.
+pub struct Filter {
+    rate: f64,
+    kind: i32,
+    cutoff: i32,
+    q: i32,
+    ic1: f64,
+    ic2: f64,
+}
+
+impl Filter {
+    pub fn new(rate: f64) -> Filter {
+        Filter { rate, kind: 0, cutoff: 8000, q: 10, ic1: 0.0, ic2: 0.0 }
+    }
+}
+
+impl Effect for Filter {
+    fn name(&self) -> &'static str {
+        "filter"
+    }
+
+    fn params(&self) -> Vec<ParamDesc> {
+        vec![pd(0, "TYPE (0 LP 1 BP 2 HP)", 0, 2, 0, ""), pd(1, "CUTOFF", 20, 20000, 8000, "Hz"), pd(2, "Q", 0, 100, 10, "")]
+    }
+
+    fn get(&self, id: u16) -> Option<i32> {
+        match id {
+            0 => Some(self.kind),
+            1 => Some(self.cutoff),
+            2 => Some(self.q),
+            _ => None,
+        }
+    }
+
+    fn set(&mut self, id: u16, v: i32) -> bool {
+        match id {
+            0 => self.kind = v.clamp(0, 2),
+            1 => self.cutoff = v.clamp(20, 20000),
+            2 => self.q = v.clamp(0, 100),
+            _ => return false,
+        }
+        true
+    }
+
+    fn process(&mut self, buf: &mut [i16]) {
+        let g = (std::f64::consts::PI * (self.cutoff as f64).min(self.rate * 0.45) / self.rate).tan();
+        // Q 0..100 maps to a damping of 1.4 (flat) down to 0.05 (a sharp peak); the loop stays stable for any value of it
+        let k = 1.4 - 1.35 * self.q as f64 / 100.0;
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let (a2, a3) = (g * a1, g * g * a1);
+        for s in buf.iter_mut() {
+            let v0 = *s as f64;
+            let v3 = v0 - self.ic2;
+            let v1 = a1 * self.ic1 + a2 * v3;
+            let v2 = self.ic2 + a2 * self.ic1 + a3 * v3;
+            self.ic1 = 2.0 * v1 - self.ic1;
+            self.ic2 = 2.0 * v2 - self.ic2;
+            let y = match self.kind {
+                0 => v2,
+                1 => v1 * k, // the band-pass at unit gain on its centre
+                _ => v0 - k * v1 - v2,
+            };
+            *s = y.round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
+/// A distortion: gain into a soft clip (tanh), a tone low-pass, an output level.
+pub struct Distortion {
+    rate: f64,
+    gain: i32,
+    tone: i32,
+    level: i32,
+    mix: i32,
+    lp: f64,
+}
+
+impl Distortion {
+    pub fn new(rate: f64) -> Distortion {
+        Distortion { rate, gain: 40, tone: 60, level: 70, mix: 100, lp: 0.0 }
+    }
+}
+
+impl Effect for Distortion {
+    fn name(&self) -> &'static str {
+        "distortion"
+    }
+
+    fn params(&self) -> Vec<ParamDesc> {
+        vec![pd(0, "GAIN", 0, 100, 40, ""), pd(1, "TONE", 0, 100, 60, ""), pd(2, "LEVEL", 0, 100, 70, ""), pd(3, "MIX", 0, 100, 100, "%")]
+    }
+
+    fn get(&self, id: u16) -> Option<i32> {
+        match id {
+            0 => Some(self.gain),
+            1 => Some(self.tone),
+            2 => Some(self.level),
+            3 => Some(self.mix),
+            _ => None,
+        }
+    }
+
+    fn set(&mut self, id: u16, v: i32) -> bool {
+        match id {
+            0 => self.gain = v.clamp(0, 100),
+            1 => self.tone = v.clamp(0, 100),
+            2 => self.level = v.clamp(0, 100),
+            3 => self.mix = v.clamp(0, 100),
+            _ => return false,
+        }
+        true
+    }
+
+    fn process(&mut self, buf: &mut [i16]) {
+        let drive = 1.0 + self.gain as f64 * 0.3; // 1x to 31x
+        // tone: the low-pass after the clip, 1 kHz (0) to 12 kHz (100), on a log scale
+        let fc = 1000.0 * (12.0f64).powf(self.tone as f64 / 100.0);
+        let a = 1.0 - (-2.0 * std::f64::consts::PI * fc.min(self.rate * 0.45) / self.rate).exp();
+        let out = self.level as f64 / 100.0;
+        let norm = 1.0 / drive.tanh(); // a full-scale input comes out at full scale before the level
+        let mix = self.mix as f64 / 100.0;
+        for s in buf.iter_mut() {
+            let x = *s as f64 / 32768.0;
+            let clipped = (x * drive).tanh() * norm;
+            self.lp += (clipped - self.lp) * a;
+            let y = (x * (1.0 - mix) + self.lp * out * mix) * 32768.0;
+            *s = y.round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
+/// A phaser: four first-order all-pass stages swept by a sine LFO, summed with the dry signal.
+pub struct Phaser {
+    rate: f64,
+    phase: f64,
+    freq: i32,
+    depth: i32,
+    mix: i32,
+    z: [f64; 4],
+}
+
+impl Phaser {
+    pub fn new(rate: f64) -> Phaser {
+        Phaser { rate, phase: 0.0, freq: 5, depth: 60, mix: 50, z: [0.0; 4] }
+    }
+}
+
+impl Effect for Phaser {
+    fn name(&self) -> &'static str {
+        "phaser"
+    }
+
+    fn params(&self) -> Vec<ParamDesc> {
+        vec![pd(0, "RATE (0.1 HZ)", 1, 100, 5, ""), pd(1, "DEPTH", 0, 100, 60, ""), pd(2, "MIX", 0, 100, 50, "%")]
+    }
+
+    fn get(&self, id: u16) -> Option<i32> {
+        match id {
+            0 => Some(self.freq),
+            1 => Some(self.depth),
+            2 => Some(self.mix),
+            _ => None,
+        }
+    }
+
+    fn set(&mut self, id: u16, v: i32) -> bool {
+        match id {
+            0 => self.freq = v.clamp(1, 100),
+            1 => self.depth = v.clamp(0, 100),
+            2 => self.mix = v.clamp(0, 100),
+            _ => return false,
+        }
+        true
+    }
+
+    fn process(&mut self, buf: &mut [i16]) {
+        let step = self.freq as f64 * 0.1 / self.rate;
+        let depth = self.depth as f64 / 100.0;
+        let mix = self.mix as f64 / 100.0;
+        for s in buf.iter_mut() {
+            // the all-pass corner sweeps 300 Hz to 3 kHz (a log sweep, wider with depth)
+            let lfo = 0.5 + 0.5 * (self.phase * std::f64::consts::TAU).sin();
+            self.phase = (self.phase + step).fract();
+            let fc = 300.0 * (10.0f64).powf(lfo * depth);
+            let t = (std::f64::consts::PI * fc.min(self.rate * 0.45) / self.rate).tan();
+            let c = (t - 1.0) / (t + 1.0);
+            let x = *s as f64;
+            let mut y = x;
+            for z in &mut self.z {
+                let o = c * y + *z;
+                *z = y - c * o;
+                y = o;
+            }
+            *s = (x * (1.0 - mix * 0.5) + y * mix * 0.5).round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +633,100 @@ mod tests {
         assert_eq!(make("reverb", 44_100.0).unwrap().name(), "reverb");
         c.set(1, 999);
         assert_eq!(c.get(1), Some(100));
+    }
+
+    fn sine(f: f64, n: usize, amp: f64) -> Vec<i16> {
+        (0..n).map(|i| ((i as f64 * f * std::f64::consts::TAU / 44_100.0).sin() * amp) as i16).collect()
+    }
+    fn rms(v: &[i16]) -> f64 {
+        (v.iter().map(|&a| (a as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn the_filter_modes_pass_and_stop_the_right_bands() {
+        let through = |kind: i32, f: f64| {
+            let mut e = Filter::new(44_100.0);
+            e.set(0, kind);
+            e.set(1, 1000);
+            let mut b = sine(f, 20_000, 10_000.0);
+            e.process(&mut b);
+            rms(&b[10_000..]) / rms(&sine(f, 10_000, 10_000.0))
+        };
+        assert!(through(0, 100.0) > 0.9 && through(0, 10_000.0) < 0.05, "low-pass");
+        assert!(through(2, 100.0) < 0.05 && through(2, 10_000.0) > 0.9, "high-pass");
+        assert!(through(1, 1000.0) > 0.7 && through(1, 100.0) < 0.25 && through(1, 10_000.0) < 0.25, "band-pass");
+    }
+
+    #[test]
+    fn the_filter_is_stable_at_every_setting_and_q_peaks_the_cutoff() {
+        for kind in 0..3 {
+            for q in [0, 50, 100] {
+                for fc in [100, 1000, 20_000] {
+                    let mut e = Filter::new(44_100.0);
+                    e.set(0, kind);
+                    e.set(1, fc);
+                    e.set(2, q);
+                    let mut b: Vec<i16> = (0..20_000).map(|i| if (i / 50) % 2 == 0 { 30_000 } else { -30_000 }).collect();
+                    e.process(&mut b);
+                    let mut tail = vec![0i16; 60_000];
+                    e.process(&mut tail);
+                    assert!(rms(&tail[50_000..]) < 50.0, "kind {kind} q {q} fc {fc} rings forever");
+                }
+            }
+        }
+        let at = |q: i32| {
+            let mut e = Filter::new(44_100.0);
+            e.set(1, 1000);
+            e.set(2, q);
+            let mut b = sine(1000.0, 20_000, 3000.0);
+            e.process(&mut b);
+            rms(&b[10_000..])
+        };
+        assert!(at(90) > at(10) * 1.5);
+    }
+
+    #[test]
+    fn distortion_adds_harmonics_stays_bounded_and_is_silent_on_silence() {
+        let mut d = Distortion::new(44_100.0);
+        d.set(0, 100);
+        let mut b = sine(300.0, 20_000, 20_000.0);
+        d.process(&mut b);
+        // a clipped sine is closer to a square: more energy for the same peak than the sine's
+        assert!(rms(&b[5000..]) > rms(&sine(300.0, 10_000, 20_000.0)) * 0.5);
+        let mut z = vec![0i16; 2048];
+        Distortion::new(44_100.0).process(&mut z);
+        assert!(z.iter().all(|&x| x == 0));
+        let mut low = Distortion::new(44_100.0);
+        low.set(0, 0);
+        low.set(1, 100);
+        low.set(2, 100);
+        let mut q = sine(300.0, 8000, 2000.0);
+        let before = q.clone();
+        low.process(&mut q);
+        assert!(rms(&q[4000..]) > rms(&before[4000..]) * 0.5 && rms(&q[4000..]) < rms(&before[4000..]) * 1.5, "no gain, a clean pass");
+        low.set(3, 0);
+        let mut dry = before.clone();
+        low.process(&mut dry);
+        assert_eq!(dry, before, "mix 0 is the dry signal");
+    }
+
+    #[test]
+    fn phaser_notches_move_and_it_stays_bounded() {
+        let mut p = Phaser::new(44_100.0);
+        let x = sine(1000.0, 44_100, 10_000.0);
+        let mut y = x.clone();
+        p.process(&mut y);
+        assert!(y.iter().all(|&s| s.abs() <= 12_000));
+        let blocks: Vec<f64> = y.chunks(4410).map(rms).collect();
+        let (lo, hi) = blocks.iter().fold((f64::MAX, 0.0f64), |(l, h), &v| (l.min(v), h.max(v)));
+        assert!(hi > lo * 1.15, "the sweep changes the level at 1 kHz: {lo} .. {hi}");
+        p.set(2, 0);
+        let mut dry = x.clone();
+        p.process(&mut dry);
+        assert_eq!(dry, x);
+        for n in ["filter", "distortion", "phaser"] {
+            assert_eq!(make(n, 44_100.0).unwrap().name(), n);
+        }
+        assert!(!p.set(3, 1) && !Filter::new(44_100.0).set(3, 1) && !Distortion::new(44_100.0).set(4, 1));
     }
 }

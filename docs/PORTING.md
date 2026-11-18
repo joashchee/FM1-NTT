@@ -81,7 +81,7 @@ and the modulation matrix are generic over them, so a new engine gets an editor 
 | `analog` | subtractive: polyBLEP saw/pulse/triangle/sine, a state-variable filter, ADSR, 8 voices; **written fresh, not fitted to any firmware** |
 | `fm4` | 4-operator FM for the OPERATOR / Mighty Arp family; **not built, not fitted** |
 
-The shared effects (`core/src/fx.rs`): limiter, delay, low-pass, chorus, reverb.
+The shared effects (`core/src/fx.rs`): limiter, delay, low-pass, chorus, reverb, **filter** (low, band, high), **distortion** and **phaser** (2026-11-18: written fresh, fitted to nothing, tested for pass bands, stability, bounds and silence).
 
 In the app, `fm1ntt --instrument FILE.fm1i` loads a package into the SOUND preview (Solo when no firmware is given); the C API is `fm1ntt_inst_*`.
 
@@ -101,7 +101,7 @@ Stock is the one firmware with a manual, a MIDI table and a known engine (DX747,
 
 - **EXTRACT has two routes.** The file (`fwx`) finds no packed bank in the stock `.fwsc`; the manual puts voices in flash (4 banks x 32). The second route reads them from the running machine: the emulated flash after boot, or a bank dump over MIDI (precedent: Felucca's `FM6_PUT`). Whether stock's flash can be read this way is unchecked.
 - **OBSERVE can be driven by MIDI, for presets.** On stock in the emulator, Program Change reached voices 001, 006, 032, 033 and 128, so a preset needs no panel recipe like `port::felucca_steps` (other families untested). **The effect CCs did not do the same:** only filter type and the reverb and delay mixes changed the sound, while the panel's effects work, so effects are fitted from the panel; **a scan of SysEx parameter numbers 156 to 1023 found no effect parameter either**. **The SysEx parameter write does work on stock** (the DX7's numbers, jack and USB alike): a port can write test voices into the firmware and compare, as the Felucca work did with `FM6_PUT`, with no panel clicks (`docs/FM-1-MIDI.md`).
-- **FIT has an effects target.** Six slots in a reorderable chain: filter (LP/BP/HP, log cutoff, Q), reverb (room/hall/plate), delay, distortion, chorus, phaser. `fx.rs` lacks distortion, phaser, the BP/HP modes and reordering.
+- **FIT has an effects target.** Six slots in a reorderable chain: filter (LP/BP/HP, log cutoff, Q), reverb (room/hall/plate), delay, distortion, chorus, phaser. `fx.rs` now has distortion, phaser and the BP/HP modes (written, **not yet fitted** against stock's panel reads); it lacks reordering.
 - **A fourth level, between B and C: ARP and SEQ.** Their behaviour is documented well enough to write from the manual and verify against stock, so they are a declarative host feature, not emulator-only level C.
 - **The package is too thin for a complete port.** It must also carry four banks, global settings (MIDI channel, effect channel, bend range, velocity, glide), the effect-chain order, mono/poly and ARP/SEQ patterns.
 
