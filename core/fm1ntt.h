@@ -88,3 +88,28 @@ void fm1ntt_kit_note_on(fm1ntt_kit *h, int note, int velocity);
 void fm1ntt_kit_all_off(fm1ntt_kit *h);
 size_t fm1ntt_kit_render(fm1ntt_kit *h, int16_t *out, size_t frames);
 #endif
+
+/* The instrument host (core/src/capi_inst.rs, docs/PORTING.md): a package (.ntt text) played, edited and written back. Null-safe; failures say why in fm1ntt_error. */
+typedef struct InstHandle fm1ntt_inst;
+typedef int64_t (*fm1ntt_read_fn)(void *user, const char *name, uint8_t *buf, size_t cap);   /* a sample file for the loader: cap 0 asks the size; -1 when unreadable */
+fm1ntt_inst *fm1ntt_inst_load(const uint8_t *text, size_t len, double rate, fm1ntt_read_fn read, void *user);   /* NULL when not a package, the licence is off the allowlist, or the engine cannot be built */
+fm1ntt_inst *fm1ntt_inst_factory(double rate);                                              /* the built-in voices */
+void fm1ntt_inst_free(fm1ntt_inst *h);
+int fm1ntt_package_tier(const uint8_t *text, size_t len);                                   /* 0 permissive (MIT app ok), 1 copyleft (the Pack only; never the MIT app or a Mac App Store build), -1 not a package */
+size_t fm1ntt_inst_text(const fm1ntt_inst *h, int which, char *out, size_t cap);            /* 0 name, 1 kind, 2 licence, 3 verification note ("" = unverified), 4 voice name (fm6); the full length */
+void fm1ntt_inst_midi(fm1ntt_inst *h, const uint8_t *bytes, size_t len);                    /* raw MIDI bytes: notes, controllers through the package's map, bend, program change */
+void fm1ntt_inst_note_on(fm1ntt_inst *h, int note, int velocity);
+void fm1ntt_inst_note_off(fm1ntt_inst *h, int note);
+void fm1ntt_inst_all_off(fm1ntt_inst *h);
+size_t fm1ntt_inst_sounding(const fm1ntt_inst *h);
+size_t fm1ntt_inst_render_stereo(fm1ntt_inst *h, int16_t *out, size_t frames);              /* interleaved; frames written, 0 for more than 1 << 20 */
+size_t fm1ntt_inst_render(fm1ntt_inst *h, int16_t *out, size_t frames);                     /* mono */
+size_t fm1ntt_inst_voice_count(const fm1ntt_inst *h);
+size_t fm1ntt_inst_program(const fm1ntt_inst *h);
+void fm1ntt_inst_set_program(fm1ntt_inst *h, size_t program);
+size_t fm1ntt_inst_param_count(const fm1ntt_inst *h);
+int fm1ntt_inst_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);   /* info = { id, min, max, default }; 0 ok, -1 out of range */
+int32_t fm1ntt_inst_get(const fm1ntt_inst *h, int id);                                      /* INT32_MIN when there is no such parameter */
+int fm1ntt_inst_set(fm1ntt_inst *h, int id, int value);                                     /* clamped to the range; 0 ok, -1 */
+size_t fm1ntt_inst_to_package(const fm1ntt_inst *h, const char *source, uint8_t *out, size_t cap);   /* the instrument, edits included, as package text; the full length */
+void fm1ntt_sha256_hex(const uint8_t *data, size_t len, char out[65]);

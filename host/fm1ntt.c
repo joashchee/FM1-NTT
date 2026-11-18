@@ -123,6 +123,7 @@ typedef struct {
     int pin, pinned;                    /* --pin: the audio (emulating) thread on the last core, the main thread on the first; pinned: the audio thread has done it */
     /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
     fm1ntt_fm6 *pv;
+    fm1ntt_inst *inst;                  /* an instrument package (docs/PORTING.md) played instead of the fm6 preview: its notes, its program for the voice, its effects */
     uint8_t pv_voices[PV_MAX][128];
     int pv_factory;                     /* the voices are the built-in set (the firmware has none of its own, or none is loaded) */
     int pv_solo;                        /* the machine is not run, only the engine (R2): the live-play mode for a unit too slow to emulate the firmware */
@@ -146,6 +147,7 @@ static void unlock(App *a) { if (a->dev) SDL_UnlockAudioDevice(a->dev); }
 static void pv_notes_off(App *a) {
     lock(a);
     if (a->pv) fm1ntt_fm6_all_off(a->pv);
+    if (a->inst) fm1ntt_inst_all_off(a->inst);
     unlock(a);
     memset(a->pv_key, 0, sizeof a->pv_key);
     memset(a->pv_pad, 0, sizeof a->pv_pad);
@@ -153,6 +155,7 @@ static void pv_notes_off(App *a) {
 static void pv_select(App *a, int sel) {
     if (a->pv_n <= 0) return;
     a->pv_sel = (sel % a->pv_n + a->pv_n) % a->pv_n;
+    if (a->inst) { lock(a); fm1ntt_inst_set_program(a->inst, (size_t)a->pv_sel); unlock(a); return; }
     lock(a);
     if (a->pv) { fm1ntt_fm6_all_off(a->pv); fm1ntt_fm6_free(a->pv); a->pv = NULL; }
     /* the stock engine as measured on DX747 (docs/FM6.md): its tuning and output stage at the emulator's default pot */
@@ -163,6 +166,7 @@ static void pv_select(App *a, int sel) {
 /* Takes the voices (n of 128 bytes) as the preview's, replacing the last firmware's. */
 static void pv_set(App *a, const uint8_t *voices, int n) {
     pv_notes_off(a);
+    if (a->inst) { lock(a); fm1ntt_inst_free(a->inst); a->inst = NULL; unlock(a); }   /* a firmware's voices replace an instrument */
     a->pv_n = n < 0 ? 0 : n > PV_MAX ? PV_MAX : n;
     a->pv_factory = 0;
     if (a->pv_n) memcpy(a->pv_voices, voices, (size_t)a->pv_n * 128);
@@ -176,6 +180,7 @@ static void pv_set(App *a, const uint8_t *voices, int n) {
 }
 static void pv_name(const App *a, char *out, size_t cap) {
     out[0] = 0;
+    if (a->inst) { fm1ntt_inst_text(a->inst, a->pv_n > 1 ? 4 : 0, out, cap); return; }
     if (a->pv_sel < 0 || a->pv_sel >= a->pv_n) return;
     size_t k = 0;
     for (int i = 118; i < 128 && k + 1 < cap; i++) { int ch = a->pv_voices[a->pv_sel][i]; out[k++] = ch >= 32 && ch < 127 ? (char)ch : ' '; }
@@ -183,8 +188,14 @@ static void pv_name(const App *a, char *out, size_t cap) {
     out[k] = 0;
 }
 static void pv_note(App *a, int *slot, int note, int down) {
-    if (!a->pv) return;
+    if (!a->pv && !a->inst) return;
     lock(a);
+    if (a->inst) {
+        if (down) { if (*slot) fm1ntt_inst_note_off(a->inst, *slot - 1); *slot = note + 1; fm1ntt_inst_note_on(a->inst, note, 100); }
+        else if (*slot) { fm1ntt_inst_note_off(a->inst, *slot - 1); *slot = 0; }
+        unlock(a);
+        return;
+    }
     if (down) { if (*slot) fm1ntt_fm6_note_off(a->pv, *slot - 1); *slot = note + 1; fm1ntt_fm6_note_on(a->pv, note, 100); }
     else if (*slot) { fm1ntt_fm6_note_off(a->pv, *slot - 1); *slot = 0; }
     unlock(a);
@@ -200,7 +211,7 @@ static void pv_toggle(App *a) {
     say(a, 0, !a->pv_on ? "Preview off" : a->pv_solo ? "Preview on, no firmware: the engine plays alone" : a->pv_factory ? "Preview on: built-in voices (the firmware has none)" : "Preview on: the keys play the voice", NULL);
 }
 /* Leaving SOUND turns the preview off and lets its notes go. */
-static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv)) { a->pv_on = 0; a->pv_solo = 0; pv_notes_off(a); } }
+static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv || a->inst)) { a->pv_on = 0; a->pv_solo = 0; pv_notes_off(a); } }
 /* Solo: the machine stops (its audio and screen freeze) and the engine has the whole processor; only with the preview on. */
 static void pv_solo_toggle(App *a) {
     if (!a->pv_on) { say(a, 2, "Turn the preview on first (L2)", NULL); return; }
@@ -209,7 +220,7 @@ static void pv_solo_toggle(App *a) {
     unlock(a);
     say(a, 0, a->pv_solo ? "Solo: the machine is stopped, only the engine plays" : "Solo off: the machine runs again", NULL);
 }
-static void pv_free(App *a) { if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } }
+static void pv_free(App *a) { if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } if (a->inst) { fm1ntt_inst_free(a->inst); a->inst = NULL; } }
 
 static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
 static int is_file(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISREG(st.st_mode); }
@@ -257,6 +268,54 @@ static uint8_t *read_file(const char *path, size_t *len, char *why, size_t whyle
     else *len = (size_t)n;
     fclose(f);
     return buf;
+}
+/* ---- instrument packages (docs/PORTING.md) ----------------------------------------------------------------------------- */
+static char g_inst_dir[1024];   /* where the package was read from: the sample files it names are beside it */
+static int64_t inst_read(void *user, const char *name, uint8_t *buf, size_t cap) {
+    (void)user;
+    char path[1400];
+    if (!name || strchr(name, '/') || strstr(name, "..") || snprintf(path, sizeof path, "%s/%s", g_inst_dir, name) >= (int)sizeof path) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    int64_t r = -1;
+    if (n >= 0 && n <= 64L * 1024 * 1024) {
+        if (cap == 0) r = n;
+        else if ((size_t)n == cap) { fseek(f, 0, SEEK_SET); if (fread(buf, 1, cap, f) == cap) r = n; }
+    }
+    fclose(f);
+    return r;
+}
+/* Loads the package at `path` as the preview's engine (the SOUND panel's keys and Solo play it). 0 ok; otherwise the reason is on the status line. The package's licence
+ * tier is shown: a copyleft package is the user's own file, played, never shipped from here. */
+static int inst_load(App *a, const char *path) {
+    char why[160];
+    size_t len = 0;
+    uint8_t *text = read_file(path, &len, why, sizeof why);
+    if (!text) { say(a, 2, "Instrument: %s", why); return -1; }
+    const char *slash = strrchr(path, '/');
+    size_t dl = slash ? (size_t)(slash - path) : 0;
+    if (dl >= sizeof g_inst_dir) dl = sizeof g_inst_dir - 1;
+    if (slash) memcpy(g_inst_dir, path, dl);
+    else dl = 0, g_inst_dir[0] = '.', dl = 1;
+    g_inst_dir[dl] = 0;
+    fm1ntt_inst *i = fm1ntt_inst_load(text, len, FM1_SAMPLE_RATE, inst_read, NULL);
+    free(text);
+    if (!i) { say(a, 2, "Instrument: %s", fm1ntt_error()); return -1; }
+    pv_notes_off(a);
+    lock(a);
+    if (a->inst) fm1ntt_inst_free(a->inst);
+    a->inst = i;
+    unlock(a);
+    a->pv_factory = 0;
+    a->pv_n = (int)fm1ntt_inst_voice_count(i);
+    if (a->pv_n < 1) a->pv_n = 1;
+    a->pv_sel = (int)fm1ntt_inst_program(i);
+    char nm[64];
+    fm1ntt_inst_text(i, 0, nm, sizeof nm);
+    say(a, 0, "Instrument loaded: %s", nm);
+    return 0;
 }
 static const char *g_stamp_override;   /* Rec demo fixes the stamp in what the tour writes, so two recordings are the same */
 static void stamp(char *out, size_t n) {
@@ -496,15 +555,15 @@ static void rec_stop(App *a) {
 /* One buffer of the emulated machine's sound, and the meters, the scope and the recorder's ring that go with it. The callback's whole body,
  * so Rec demo steps the app with the same code. */
 static void audio_step(App *a, int16_t *out, size_t frames) {
-    int solo = a->pv_on && a->pv_solo && a->pv;      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
+    int solo = a->pv_on && a->pv_solo && (a->pv || a->inst);      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
     if (a->paused || (!solo && !fm1ntt_loaded(a->m))) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
     if (solo) memset(out, 0, frames * 4);
     else fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
-    if (a->pv_on && a->pv) {   /* the preview's voice on both channels (the caller holds the audio lock, as the machine's keys do) */
+    if (a->pv_on && (a->pv || a->inst)) {   /* the preview's voice on both channels (the caller holds the audio lock, as the machine's keys do) */
         int16_t mono[4096];
         for (size_t at = 0; at < frames; ) {
             size_t n = frames - at < 4096 ? frames - at : 4096;
-            fm1ntt_fm6_render(a->pv, mono, n);
+            if (a->inst) fm1ntt_inst_render(a->inst, mono, n); else fm1ntt_fm6_render(a->pv, mono, n);
             for (size_t i = 0; i < n; i++) for (int ch = 0; ch < 2; ch++) {
                 int v = out[2 * (at + i) + ch] + mono[i];
                 out[2 * (at + i) + ch] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
@@ -790,7 +849,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     memcpy(u->enc_turns, a->enc_turns, sizeof u->enc_turns);
     u->pot = a->pot;
     u->level_l = a->level_l; u->level_r = a->level_r; u->peak_l = a->peak_l; u->peak_r = a->peak_r;
-    u->pv_factory = a->pv_factory; u->pv_solo = a->pv_solo; u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
+    u->pv_factory = a->inst ? 2 : a->pv_factory; u->pv_solo = a->pv_solo; u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
     pv_name(a, u->pv_name, sizeof u->pv_name);
     u->msg = a->msg;
     u->msg_style = a->msg_style;
@@ -1484,6 +1543,31 @@ static int selftest(void) {
         }
         a.panel = PANEL_MIDI; pv_leave(&a);                                      /* leaving SOUND: off, every note released */
         CHECK(!a.pv_on && !a.pv_solo && a.pv_pad[3] == 0);
+        /* an instrument package (docs/PORTING.md): loaded from a file, its notes reach the mix, Solo plays it alone, and a firmware's voices replace it */
+        {
+            const char *pk = "ntt = 1\nname = Selftest\nengine = analog\nlicence = MIT\n";
+            char ip[256];
+            snprintf(ip, sizeof ip, "%s/selftest-instrument.ntt", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+            FILE *tf = fopen(ip, "wb");
+            CHECK(tf != NULL);
+            if (tf) {
+                fputs(pk, tf);
+                fclose(tf);
+                CHECK(inst_load(&a, ip) == 0 && a.inst != NULL && a.pv_n == 1);
+                { char fn[32]; pv_name(&a, fn, sizeof fn); CHECK(!strcmp(fn, "Selftest")); }
+                a.pv_on = 1; lock(&a); a.pv_solo = 1; unlock(&a);
+                pv_note(&a, &a.pv_key[0], 60, 1);
+                int16_t io[2 * 2048];
+                audio_step(&a, io, 2048);
+                long ie = 0; for (int i = 0; i < 2 * 2048; i++) ie += abs(io[i]);
+                CHECK(ie > 2048L * 50);
+                pv_note(&a, &a.pv_key[0], 60, 0);
+                CHECK(inst_load(&a, "/nonexistent/none.ntt") != 0 && a.inst != NULL && a.msg_style == 2);   /* a bad load keeps the instrument and says why */
+                pv_set(&a, two, 2); CHECK(a.inst == NULL && a.pv != NULL);
+                remove(ip);
+            }
+            a.pv_on = 0; lock(&a); a.pv_solo = 0; unlock(&a);
+        }
         pv_set(&a, two, 0); CHECK(a.pv_n == 8 && a.pv_factory && a.pv != NULL && !a.pv_on);
     }
     /* the recorder: the ring to a real WAV, header sizes right, renamed from .part, a quit while recording asks first */
@@ -1859,6 +1943,7 @@ static int wait_event(SDL_Event *e, int ms) {
 int main(int argc, char **argv) {
     const char *path = NULL, *shot = NULL, *fwopt = NULL, *features = NULL;
     int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, pace_opt = PACE_AUTO;
+    const char *inst_opt = NULL;
     double seconds = 1.0;
     uint32_t entry = FM1_ENTRY_FELUCCA;
     for (int i = 1; i < argc; i++) {
@@ -1868,6 +1953,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!strcmp(argv[i], "--panel") && i + 1 < argc) panel = atoi(argv[++i]) % PANEL_COUNT;
         else if (!strcmp(argv[i], "--zoomed")) zoomed = 1;
+        else if (!strcmp(argv[i], "--instrument") && i + 1 < argc) inst_opt = argv[++i];   /* an instrument package (.ntt) for the SOUND preview, with Solo's engine-alone play when no firmware is given */
         else if (!strcmp(argv[i], "--preview")) preview_opt = 1;   /* the SOUND preview on from the start (a screenshot shows it playing) */
         else if (!strcmp(argv[i], "--report")) do_report = 1;
         else if (!strcmp(argv[i], "--bench")) do_bench = 1;
@@ -1943,6 +2029,7 @@ int main(int argc, char **argv) {
             int16_t pcm[2048];
             for (int i = 0; i < 60; i++) fm1ntt_render(a.m, pcm, 1024, MAX_INSNS_PER_BUFFER);
         }
+        if (inst_opt && inst_load(&a, inst_opt) == 0) { a.panel = PANEL_SOUND; preview_opt = 1; }
         if (preview_opt && a.pv_n) a.pv_on = 1;
         fill_ui(&a, &u, 0);
         px_draw(canvas, a.mode, &u);
@@ -1979,6 +2066,7 @@ int main(int argc, char **argv) {
         present(ren, tex, canvas);
         if (load_firmware(&a, path, raw, entry) != 0) a.panel = PANEL_FILES;
     }
+    if (inst_opt && inst_load(&a, inst_opt) == 0) { a.panel = PANEL_SOUND; a.pv_on = 1; a.pv_solo = !fm1ntt_loaded(a.m); }   /* an instrument: play it now, alone when no firmware is given */
     trace_open();
     toast_init(&a.toast, "/run/r3i6nos-hotplug/events", SDL_GetTicks());
     if (a.dev) SDL_PauseAudioDevice(a.dev, 0);

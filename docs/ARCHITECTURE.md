@@ -8,6 +8,8 @@ A sandbox for FM-1 firmware: load an image, run it on an emulated FM-1, hear it,
 (through r3i6nos), then macOS, Windows, Linux and the web. It previews community firmware before it is flashed; it does not replace the
 unit (docs/fm-1_reference-kit.md, section 4.3).
 
+**Update 2026-11-18:** the product is also an *instrument*: firmware is ported to data packages that native engines play on the R36S, and the emulator is the extractor and oracle (`docs/PORTING.md`).
+
 ## 2. The machine (what is being emulated)
 
 From the reference kit and the vendored emulator (docs/HARDWARE.md): a **JieLi AC791N** with two **pi32v2** cores; a 240 x 240 LCD; 14

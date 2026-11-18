@@ -1,7 +1,7 @@
 //! `soundbench [--blocks N] [--rate HZ]`: what fm6, the sampler and the kit cost per 64-sample block (fm6's block, `fm6::N`) on this machine,
 //! against the block's own time (64 / rate). Every figure is the median of five runs of N blocks with the voices held; nothing is written.
 //! Not a firmware benchmark: `fm1ntt --bench` is that (docs/BENCHMARKS.md). Run it with `--release`.
-use fm1ntt::{fm6, sampler};
+use fm1ntt::{engine::Engine, fm6, fx, sampler};
 use std::time::Instant;
 
 /// A held, sustaining 6-operator voice in the DX7 packed layout, with the given algorithm (0 to 31).
@@ -136,5 +136,31 @@ fn main() {
         });
         let still = k.sounding();
         row(&format!("kit, {n} drums (sounding {live} -> {still} after)"), ns, live);
+    }
+    // analog: eight held notes, and with the effect chain (chorus, delay, reverb, limiter) over twelve fm6-sized blocks of work
+    for n in [1usize, 4, 8] {
+        let mut e = fm1ntt::analog::Analog::new(rate);
+        for k in 0..n {
+            e.note_on(40 + 3 * k as u8, 100);
+        }
+        let mut out = [0i16; fm6::N];
+        let live = e.sounding();
+        let ns = time(blocks, || {
+            e.render(&mut out);
+            std::hint::black_box(&out);
+        });
+        row(&format!("analog, {n} held (sounding {live})"), ns, live);
+    }
+    for name in ["limiter", "delay", "lowpass", "chorus", "reverb"] {
+        let mut f = fx::make(name, rate).expect("fx");
+        let mut out = [0i16; fm6::N];
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = ((i as f64 * 0.2).sin() * 8000.0) as i16;
+        }
+        let ns = time(blocks, || {
+            f.process(&mut out);
+            std::hint::black_box(&out);
+        });
+        row(&format!("effect: {name}"), ns, 1);
     }
 }

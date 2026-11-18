@@ -148,6 +148,29 @@ The CPU emulation reaches 0.25x real time on the unit, so it cannot play live; t
 - [ ] **Polyphony and the limiter**: one voice's engine today; decide the voice count (the engine's limit, the unit's load) and the soft limiter's place (`docs/FM6.md`).
 - [ ] **Latency on the unit**: the buffer is 512 frames (11.6 ms at 44.1 kHz); measure the key-to-sound time and try 256.
 
+## 5c. Port flow: FM-1 firmware to an R36S instrument (maintainer, 2026-11-18: "FM1-NTT doesn't have to be a 1:1 emulation, but rather an R36S music instrument that is infinitely modifiable by FM-1 firmware through this flow"; `docs/PORTING.md`)
+
+The firmware is not run on the R36S (0.25x real time); it is **ported**: identified, its data extracted, an engine fitted and verified against the emulator (Mac/CI), and written as a data package the native engines play. **All of it is untested on a real R36S and unheard by a person.**
+
+- [x] **Decided and written** (2026-11-18, `docs/PORTING.md`): the six-step flow, three levels of port (A data, B declarative, C behavioural), the `.ntt` package, the engine interface, Rust engines by name and **no scripting** (a bounded expression VM of our own only if logic is ever needed), a port inherits its firmware's licence (GPL ports in the Pack), the emulator as extractor and oracle.
+- [x] **Engine interface** (`core/src/engine.rs`): `Engine` with `ParamDesc` descriptors, so an editor, a MIDI map and a mod matrix are generic; adapters `Fm6Engine` (params 0 to 154 the patch bytes, 200 up the model), `SamplerEngine`, `KitEngine`.
+- [x] **`analog` engine** (`core/src/analog.rs`): polyBLEP saw/pulse/triangle/sine x2, a TPT state-variable low-pass, ADSR, 8 voices. Written fresh, **fitted to no firmware**; pitch tested for all four waves.
+- [x] **Effects** (`core/src/fx.rs`): limiter, delay, low-pass, chorus (a swept short delay) and a Schroeder reverb (4 combs, 2 all-passes). Written fresh, fitted to nothing. **Cost on an M1** (`soundbench`): `analog` 1/4/8 notes 0.09/0.22/0.42% of real time, each effect 0.01 to 0.04% a block; on the unit (15 to 25 times slower) this is untested.
+- [x] **The package** (`core/src/package.rs`): bounded, strict text format with provenance (source, SHA-256, verification note), an AND-only licence on the allowlist (`package::tier`), a hand-written SHA-256 (known vectors) and a round-trip test.
+- [x] **The instrument host** (`core/src/instrument.rs`): builds engine and effects from a package, parses MIDI bytes (running status, sysex skipped, real-time ignored), CC map, program change across the bank, a safety limiter, and **writes the edited instrument back as a package** (an edited voice marks its verification "edited since").
+- [x] **C API** (`fm1ntt_inst_*`, `fm1ntt_package_tier`, `fm1ntt_sha256_hex`; `core/src/capi_inst.rs`, tested through the C face) **and the host**: `fm1ntt --instrument FILE.ntt` loads a package into the SOUND preview (Solo when no firmware is given); the self-test loads one from a file, plays it and checks a bad load keeps the old one. Built and self-tested in Debian 12 arm64 under Docker (`r36s/build-deb.sh`, 2026-11-18); not installed on a unit.
+- [x] **Port tool** (`core/examples/port.rs`, `core/src/port.rs`): `port FW --licence EXPR [--model] [--verify]` identifies, makes a level-A port, prints its tier, optionally verifies; `port --check PKG.ntt`. Run on Felucca 1.8.2 (from the Pack): 8 voices, `fm6`, Copyleft tier. A firmware with no bank (every bundled one) is **not ported** and says why.
+- [x] **Licence gate** (`scripts/check-bundled.py`, copied to the Pack): a `*.ntt` with a non-permissive licence term fails in this repository and in a `--no-pack` build.
+- [ ] **Verification pairing**: `port --verify` plays a note on the firmware (MIDI program change) and on `fm6` and compares level and pitch. **First run on Felucca: pitch within 5 cents on most voices, level not within 1 dB** (the best pairing, the boot preset PAD with DTUN 30, -1.8 dB; `docs/FM6.md`'s own harness gets 0.8 dB mean). The firmware's preset list is reached by encoder clicks, not a program change, so the tool cannot yet pair a voice with its preset by itself. Needs the `scripts/fm6-compare.sh` key sequence folded into `verify::emulator_note`.
+- [ ] **A package editor screen on the unit**, generic over `ParamDesc` (a list of parameters, a value, a name; save to `instruments/`): the point of "infinitely modifiable". Also a FILES-style picker for `instruments/` (today only `--instrument FILE`).
+- [ ] **`fm4`** (4-operator FM for OPERATOR and Mighty Arp): not built; to be fitted against those firmwares in the emulator (both boot; sound untested, section 5a).
+- [ ] **Level B for the drums and samplers** (X0X, PIGEON): a `kit` package from X0X's measured law (`docs/SAMPLER.md`) with no samples bundled (the samples are the firmware's own).
+- [ ] **Level C**: the five Haunted FM-1 firmwares are generative; reimplement as named engines or leave emulator-only. Needs the maintainer's call on which are worth it.
+- [ ] **Vendoring Felucca's MIT `firmware/engines/`** (ANALOG, LOFI, TRIO, WHEEL, NOISE, PHASE): **blocked on the maintainer**, because rule 3 names Felucca a black box; amend it first. Until then `analog` is our own.
+- [ ] **Sampler packages with the host's file resolver** are built and tested through the C face; **no sample package has been made or heard**.
+- [ ] **Run on the unit**: the `analog` engine and a package with effects through the benchmark and the Device report (they measure `fm6` only), then listen.
+- [ ] **Move `fm6`, `analog` and the package host to `neumetik-synth`** when wanted (same note as section 5a).
+
 ## 5b. Efficient screen mirroring for a pixel screen (maintainer's brief, 2026-11-16)
 
 r3i6nos's mirror sends text cells (3 KB a frame, a few bytes a change); a pixel screen is out of scope for it. Plan and reasoning: `docs/SCREEN-MIRROR.md`. **Nothing is built.** In order:

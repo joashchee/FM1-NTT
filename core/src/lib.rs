@@ -5,16 +5,24 @@
 //!
 //! Rules: nothing here panics on bad input (a bad image is an `Error`); no firmware is in this repository (docs/FIRMWARE.md).
 
+pub mod analog;
 pub mod bench;
 pub mod capi;
+pub mod capi_inst;
 pub mod capi_sound;
 pub mod devices;
+pub mod engine;
 pub mod extract;
 pub mod factory;
 pub mod firmware;
 pub mod fm6;
+pub mod fx;
+pub mod instrument;
 pub mod machine;
+pub mod package;
+pub mod port;
 pub mod sampler;
+pub mod verify;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
