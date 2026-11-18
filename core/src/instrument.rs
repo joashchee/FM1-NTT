@@ -6,6 +6,7 @@
 
 use crate::{
     analog::Analog,
+    arp::{Arp, Event},
     fm4::Fm4,
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
@@ -32,6 +33,8 @@ pub struct Instrument {
     voices: Vec<[u8; 128]>,
     program: usize,
     mono: Vec<i16>,
+    arp: Arp,
+    arp_events: Vec<(usize, Event)>,
     // MIDI parser state
     status: u8,
     data: [u8; 2],
@@ -91,6 +94,8 @@ impl Instrument {
             voices,
             program: pkg.program,
             mono: vec![0; SLICE],
+            arp: Arp::new(rate),
+            arp_events: Vec::with_capacity(64),
             status: 0,
             data: [0; 2],
             have: 0,
@@ -99,6 +104,11 @@ impl Instrument {
         for &(id, v) in &pkg.params {
             if !inst.engine.set(id, v) {
                 return fail(format!("the {} engine has no parameter {id}", pkg.engine));
+            }
+        }
+        for &(id, v) in &pkg.arp {
+            if !inst.arp.set(id, v) {
+                return fail(format!("the arpeggiator has no parameter {id}"));
             }
         }
         for f in &pkg.fx {
@@ -193,16 +203,56 @@ impl Instrument {
         self.engine.load_voice(&v);
     }
 
+    /// A key goes down: to the arpeggiator when it is on (which plays the engine from its own clock), else straight to the engine.
     pub fn note_on(&mut self, note: u8, velocity: u8) {
-        self.engine.note_on(note, velocity);
+        if self.arp.on() {
+            self.arp.note_on(note, velocity);
+        } else {
+            self.engine.note_on(note, velocity);
+        }
     }
 
     pub fn note_off(&mut self, note: u8) {
-        self.engine.note_off(note);
+        if self.arp.on() {
+            self.arp.note_off(note);
+        } else {
+            self.engine.note_off(note);
+        }
     }
 
     pub fn all_off(&mut self) {
+        self.arp.all_off();
+        self.flush_arp();
         self.engine.all_off();
+    }
+
+    /// The arpeggiator's parameters (`arp.rs`), described like an engine's.
+    pub fn arp_params(&self) -> Vec<ParamDesc> {
+        self.arp.params()
+    }
+
+    pub fn get_arp_param(&self, id: u16) -> Option<i32> {
+        self.arp.get(id)
+    }
+
+    /// Sets an arpeggiator parameter. Switching it off releases the note it was holding; switching it on does not touch notes the engine is already playing.
+    pub fn set_arp_param(&mut self, id: u16, v: i32) -> bool {
+        let ok = self.arp.set(id, v);
+        self.flush_arp();
+        ok
+    }
+
+    /// Applies the arpeggiator's queued note-offs (a stop) at once.
+    fn flush_arp(&mut self) {
+        self.arp_events.clear();
+        self.arp.advance(0, &mut self.arp_events);
+        for k in 0..self.arp_events.len() {
+            match self.arp_events[k].1 {
+                Event::On(n, v) => self.engine.note_on(n, v),
+                Event::Off(n) => self.engine.note_off(n),
+            }
+        }
+        self.arp_events.clear();
     }
 
     pub fn sounding(&self) -> usize {
@@ -295,7 +345,26 @@ impl Instrument {
     /// Replaces `out` with mono samples: the engine, the effects in order, then the safety limiter (95%).
     pub fn render(&mut self, out: &mut [i16]) {
         for chunk in out.chunks_mut(SLICE) {
-            self.engine.render(chunk);
+            self.arp_events.clear();
+            self.arp.advance(chunk.len(), &mut self.arp_events);
+            if self.arp_events.is_empty() {
+                self.engine.render(chunk);
+            } else {
+                // the engine plays up to each arpeggiator event, which then lands on its exact frame
+                let mut at = 0;
+                for k in 0..self.arp_events.len() {
+                    let (frame, ev) = self.arp_events[k];
+                    if frame > at {
+                        self.engine.render(&mut chunk[at..frame]);
+                        at = frame;
+                    }
+                    match ev {
+                        Event::On(n, v) => self.engine.note_on(n, v),
+                        Event::Off(n) => self.engine.note_off(n),
+                    }
+                }
+                self.engine.render(&mut chunk[at..]);
+            }
             for f in &mut self.fx {
                 f.process(chunk);
             }
@@ -343,6 +412,12 @@ impl Instrument {
                     p.verify = format!("{} (edited since)", p.verify);
                 }
                 *slot = v;
+            }
+        }
+        for d in self.arp.params() {
+            let v = self.arp.get(d.id).unwrap_or(d.default);
+            if v != d.default {
+                p.arp.push((d.id, v));
             }
         }
         let skip_patch = self.engine.current_voice().is_some();
@@ -522,5 +597,41 @@ mod tests {
         let mut out = vec![0i16; 8192];
         i.render(&mut out);
         assert!(peak(&out) <= (0.95 * 32767.0) as u16 + 1);
+    }
+
+    #[test]
+    fn an_arpeggiator_package_plays_a_pattern_and_round_trips() {
+        let mut p = Package::new("A", "analog", "MIT");
+        p.params.push((crate::analog::P_RELEASE, 5)); // a short release, so the gate's gaps are audible
+        p.arp = vec![(crate::arp::P_ON, 1), (crate::arp::P_BPM, 240), (crate::arp::P_RATE, 2), (crate::arp::P_GATE, 60), (crate::arp::P_OCTAVES, 2)];
+        let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        i.midi_bytes(&[0x90, 60, 100, 0x90, 64, 100]);
+        let mut b = vec![0i16; 44_100];
+        i.render(&mut b);
+        // 240 BPM at 1/16 is 2756 frames a step: the note changes eight times a half second, and the sound comes in bursts, with silence between gated notes
+        let bursts = b.windows(2).filter(|w| w[0].abs() < 4 && w[1].abs() >= 4).count();
+        assert!(b.iter().any(|&x| x.abs() > 300), "the arpeggiator played");
+        let quiet = b.chunks(64).filter(|c| c.iter().all(|&x| x.abs() < 3)).count();
+        assert!(quiet > 20, "a 60 % gate leaves gaps ({quiet} quiet blocks, {bursts} onsets)");
+        i.midi_bytes(&[0x80, 60, 0, 0x80, 64, 0]);
+        let mut c = vec![0i16; 22_050];
+        i.render(&mut c);
+        assert!(c[15_000..].iter().all(|&x| x.abs() < 3), "released: it stops");
+        // the settings go back to a package and through the text form
+        let back = i.to_package("t", "0");
+        let mut want = p.arp.clone();
+        want.sort();
+        assert_eq!(back.arp, want, "every setting here differs from its default, in id order");
+        let again = Package::parse(&back.to_text()).unwrap();
+        assert_eq!(again.arp, back.arp);
+        // off: notes go straight to the engine; switching off mid-note releases it
+        assert!(i.set_arp_param(crate::arp::P_ON, 0) && !i.arp.on());
+        i.note_on(60, 100);
+        let mut d = vec![0i16; 4410];
+        i.render(&mut d);
+        assert!(d.iter().any(|&x| x.abs() > 300));
+        let mut q = Package::new("A", "analog", "MIT");
+        q.arp.push((77, 1));
+        assert!(Instrument::from_package(&q, 44_100.0, &none).is_err(), "an unknown arp parameter is refused");
     }
 }

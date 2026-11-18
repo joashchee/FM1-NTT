@@ -12,6 +12,7 @@ pub const MAX_SAMPLES: usize = 64;
 pub const MAX_FX: usize = 64;
 pub const MAX_MAP: usize = 128;
 pub const MAX_PARAMS: usize = 1024;
+pub const MAX_ARP: usize = 32;
 
 fn bad<T>(why: impl Into<String>) -> Result<T> {
     Err(Error::BadImage(format!("package: {}", why.into())))
@@ -156,6 +157,8 @@ pub struct Package {
     pub root: u8,
     pub voices: Vec<[u8; 128]>,
     pub params: Vec<(u16, i32)>,
+    /// the arpeggiator's settings (`arp N = V`, ids as in `arp.rs`); empty means it is off
+    pub arp: Vec<(u16, i32)>,
     pub samples: Vec<SampleRef>,
     pub fx: Vec<FxEntry>,
     pub map: Vec<MapEntry>,
@@ -174,6 +177,7 @@ impl Package {
             root: 60,
             voices: Vec::new(),
             params: Vec::new(),
+            arp: Vec::new(),
             samples: Vec::new(),
             fx: Vec::new(),
             map: Vec::new(),
@@ -208,6 +212,9 @@ impl Package {
         }
         for (id, v) in &self.params {
             t += &format!("param {id} = {v}\n");
+        }
+        for (id, v) in &self.arp {
+            t += &format!("arp {id} = {v}\n");
         }
         for s in &self.samples {
             t += &format!("sample {} = {}", s.note, one(&s.file));
@@ -290,6 +297,14 @@ impl Package {
                     let id = kw.next().map(|s| s.parse::<u16>()).and_then(|r| r.ok());
                     let Some(id) = id else { return bad(format!("line {at}: param needs an id")) };
                     p.params.push((id, num(v)?));
+                }
+                "arp" => {
+                    if p.arp.len() >= MAX_ARP {
+                        return bad("too many arp settings");
+                    }
+                    let id = kw.next().and_then(|s| s.parse::<u16>().ok());
+                    let Some(id) = id else { return bad(format!("line {at}: arp needs an id")) };
+                    p.arp.push((id, num(v)?));
                 }
                 "sample" => {
                     if p.samples.len() >= MAX_SAMPLES {

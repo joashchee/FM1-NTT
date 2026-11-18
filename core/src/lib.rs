@@ -6,6 +6,7 @@
 //! Rules: nothing here panics on bad input (a bad image is an `Error`); no firmware is in this repository (docs/FIRMWARE.md).
 
 pub mod analog;
+pub mod arp;
 pub mod bench;
 pub mod capi;
 pub mod capi_inst;

@@ -282,6 +282,55 @@ pub unsafe extern "C" fn fm1ntt_inst_set(h: *mut InstHandle, id: c_int, value: c
     }
 }
 
+/// The arpeggiator's parameters, as `fm1ntt_inst_param_count` and `fm1ntt_inst_param` do for the engine's (`arp.rs`).
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_arp_count(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.arp_params().len())
+}
+
+/// Arpeggiator parameter `index`: `info` gets { id, min, max, default }; 0 ok, -1 out of range.
+///
+/// # Safety
+/// `info` has room for 4 values; `name` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_arp_param(h: *const InstHandle, index: usize, info: *mut i32, name: *mut c_char, cap: usize) -> c_int {
+    let (Some(h), false) = (h.as_ref(), info.is_null()) else { return -1 };
+    let p = h.0.arp_params();
+    let Some(d) = p.get(index) else { return -1 };
+    *info = d.id as i32;
+    *info.add(1) = d.min;
+    *info.add(2) = d.max;
+    *info.add(3) = d.default;
+    put_str(&d.name, name, cap);
+    0
+}
+
+/// The value of arpeggiator parameter `id`, or `i32::MIN`.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_arp_get(h: *const InstHandle, id: c_int) -> i32 {
+    h.as_ref().and_then(|h| h.0.get_arp_param(id.clamp(0, 65535) as u16)).unwrap_or(i32::MIN)
+}
+
+/// Sets arpeggiator parameter `id` (clamped); 0 ok, -1 no such parameter. Switching it off releases the note it holds.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_arp_set(h: *mut InstHandle, id: c_int, value: c_int) -> c_int {
+    let Some(h) = h.as_mut() else { return -1 };
+    if (0..=65535).contains(&id) && h.0.set_arp_param(id as u16, value) {
+        0
+    } else {
+        -1
+    }
+}
+
 /// The instrument as package text (the edits included), written to `out` up to `cap` bytes (not NUL-terminated); the full length. `source` is the file it came from.
 ///
 /// # Safety
@@ -338,6 +387,13 @@ mod tests {
             assert_eq!(fm1ntt_inst_set(h, 135, 4), 0);
             assert_eq!(fm1ntt_inst_get(h, 135), 4);
             assert_eq!(fm1ntt_inst_set(h, 30000, 4), -1);
+            assert_eq!(fm1ntt_inst_arp_count(h), 10);
+            assert_eq!(fm1ntt_inst_arp_param(h, 3, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
+            assert_eq!((CStr::from_ptr(pn.as_ptr()).to_str().unwrap(), info[1], info[2]), ("BPM", 30, 300));
+            assert_eq!(fm1ntt_inst_arp_set(h, 3, 9999), 0);
+            assert_eq!(fm1ntt_inst_arp_get(h, 3), 300);
+            assert_eq!((fm1ntt_inst_arp_set(h, 99, 1), fm1ntt_inst_arp_get(h, 99)), (-1, i32::MIN));
+            assert_eq!(fm1ntt_inst_arp_set(h, 3, 120), 0);
             assert_eq!(fm1ntt_inst_get(h, 30000), i32::MIN);
             let n = fm1ntt_inst_to_package(h, c"by hand".as_ptr(), std::ptr::null_mut(), 0);
             let mut text = vec![0u8; n];

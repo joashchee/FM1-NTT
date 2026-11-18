@@ -111,5 +111,9 @@ size_t fm1ntt_inst_param_count(const fm1ntt_inst *h);
 int fm1ntt_inst_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);   /* info = { id, min, max, default }; 0 ok, -1 out of range */
 int32_t fm1ntt_inst_get(const fm1ntt_inst *h, int id);                                      /* INT32_MIN when there is no such parameter */
 int fm1ntt_inst_set(fm1ntt_inst *h, int id, int value);                                     /* clamped to the range; 0 ok, -1 */
+size_t fm1ntt_inst_arp_count(const fm1ntt_inst *h);                                        /* the arpeggiator's parameters (core/src/arp.rs): the same four calls */
+int fm1ntt_inst_arp_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
+int32_t fm1ntt_inst_arp_get(const fm1ntt_inst *h, int id);
+int fm1ntt_inst_arp_set(fm1ntt_inst *h, int id, int value);                                 /* off releases the held note */
 size_t fm1ntt_inst_to_package(const fm1ntt_inst *h, const char *source, uint8_t *out, size_t cap);   /* the instrument, edits included, as package text; the full length */
 void fm1ntt_sha256_hex(const uint8_t *data, size_t len, char out[65]);
