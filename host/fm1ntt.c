@@ -27,7 +27,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -55,7 +61,7 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 13
+#define NTOOLS 14
 #define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
@@ -131,6 +137,17 @@ typedef struct {
     int pv_solo;                        /* the machine is not run, only the engine (R2): the live-play mode for a unit too slow to emulate the firmware */
     int pv_n, pv_sel, pv_on, pv_oct;    /* voices found, the chosen one, preview on, octave -2..2 */
     int pv_key[27], pv_pad[4];          /* the MIDI note each held key or pad button started (+1; 0 none), so its release matches */
+    /* the firmware showcase (host/showcase.h, ROADMAP 5d): a background worker process, the firmware's page in FILES, the demo player */
+    int bg_demos;                       /* TOOLS > BACKGROUND DEMOS: make a demo of each firmware that has none (off by default) */
+    int info_on, info_i;                /* the page of the firmware at info_i (an index into files) replaces the list */
+    pid_t sw_pid;                       /* the worker (fm1ntt --showcase), 0 when none */
+    int sw_stopped, sw_cancelling, sw_cursor, sw_low;
+    char sw_name[PX_NAME];
+    double sw_start_ms, sw_next_ms, sw_batt_ms, sw_cancel_ms;
+    char fsha[PX_MAX_FILES][65];        /* each firmware's SHA-256 ("" not yet taken, "-" unreadable): the key of its demo folder */
+    struct { int found; char licence[96], source[120], name[48]; } info_rec;
+    struct { volatile int on; int16_t *pcm; size_t frames; volatile size_t pos; int nf, total_ms, cur; int ms[400]; char dir[420]; } pl;
+    uint32_t pl_pic[240 * 240];
     /* MONITOR (monitor.h, docs/MONITOR.md) */
     Mon mon;
     MonRain rain;
@@ -146,6 +163,9 @@ enum { JOB_NONE, JOB_REPORT, JOB_BENCH };
 static void job_start(App *a, int kind);
 static int job_pct(const App *a);
 static void rain_still(App *a);
+static int files_press(App *a, int act);
+static void ui_showcase(App *a, UiState *u);
+static void player_stop(App *a);
 
 /* ---- small helpers ------------------------------------------------------------------------------------------------------ */
 static void say(App *a, int style, const char *fmt, const char *arg) {
@@ -267,6 +287,18 @@ static int write_atomic(const char *path, const void *data, size_t len) {
     ok = fclose(f) == 0 && ok;
     if (!ok || rename(tmp, path) != 0) { remove(tmp); return -1; }
     return 0;
+}
+static char g_self_exe[1024];            /* this program, to start the showcase worker with */
+static void self_exe_init(const char *argv0) {
+    g_self_exe[0] = 0;
+#ifdef __APPLE__
+    uint32_t n = sizeof g_self_exe;
+    if (_NSGetExecutablePath(g_self_exe, &n) != 0) g_self_exe[0] = 0;
+#elif defined(__linux__)
+    ssize_t k = readlink("/proc/self/exe", g_self_exe, sizeof g_self_exe - 1);
+    if (k > 0) g_self_exe[k] = 0; else g_self_exe[0] = 0;
+#endif
+    if (!g_self_exe[0] && argv0 && strchr(argv0, '/')) snprintf(g_self_exe, sizeof g_self_exe, "%s", argv0);
 }
 static uint8_t *read_file(const char *path, size_t *len, char *why, size_t whylen) {
     FILE *f = fopen(path, "rb");
@@ -479,6 +511,8 @@ static void scan_files(App *a) {
         a->fbundled[i] = (char)ents[i].bundled;
     }
     free(ents);
+    memset(a->fsha, 0, sizeof a->fsha);                         /* the files may have changed: hash them again when asked */
+    if (a->info_on && a->info_i >= a->nfiles) a->info_on = 0;
     if (a->file_sel > a->nfiles) a->file_sel = a->nfiles;       /* nfiles is the Quit row */
 }
 /* The firmware Rec demo and the benchmark use when the person gave none: a bundled one with a screen worth recording. "" when none ships. */
@@ -567,6 +601,15 @@ static void rec_stop(App *a) {
 /* One buffer of the emulated machine's sound, and the meters, the scope and the recorder's ring that go with it. The callback's whole body,
  * so Rec demo steps the app with the same code. */
 static void audio_step(App *a, int16_t *out, size_t frames) {
+    if (a->pl.on) {                                                    /* a demo is playing: its sound, the machine waits */
+        size_t left = a->pl.frames > a->pl.pos ? a->pl.frames - a->pl.pos : 0, n = left < frames ? left : frames;
+        if (n) memcpy(out, a->pl.pcm + a->pl.pos * 2, n * 4);
+        if (n < frames) memset(out + n * 2, 0, (frames - n) * 4);
+        a->pl.pos += n;
+        if (a->pl.pos >= a->pl.frames) a->pl.on = 0;
+        a->level_l = a->level_r = 0;
+        return;
+    }
     int solo = a->pv_on && a->pv_solo && (a->pv || a->inst);      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
     if (a->paused || (!solo && !fm1ntt_loaded(a->m))) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
     if (solo) memset(out, 0, frames * 4);
@@ -741,6 +784,7 @@ static void tools_run(App *a) {
     case 9: a->want_demo = 1; break;
     case 10: job_start(a, JOB_BENCH); break;
     case 11: a->pace_mode = (a->pace_mode + 1) % 5; if (a->pace_mode == PACE_AUTO) a->pace_lvl = 0; apply_prefs(a); say(a, 0, a->pace_mode == PACE_AUTO ? "Pace AUTO: slows the main loop only when the unit cannot keep up" : a->pace_mode ? "Pace fixed: the main loop is slowed, the sound is not" : "Pace off: exact timing", NULL); break;
+    case 13: a->bg_demos = !a->bg_demos; say(a, 0, a->bg_demos ? "Background demos on: one at a time, paused while you play" : "Background demos off", NULL); break;
     case 12: a->rain_on = !a->rain_on; if (a->rain_on && a->reduced_motion) rain_still(a); say(a, 0, a->rain_on ? (a->reduced_motion ? "Data rain on, as a still page (reduced motion)" : "Data rain on: it shows on the MONITOR panel") : "Data rain off", NULL); break;
     default: break;
     }
@@ -761,10 +805,11 @@ static void act(App *a, int act) {
     int rows = a->nfiles + 1;
     switch (a->panel) {
     case PANEL_FILES:
+        if (files_press(a, act)) break;                                     /* the firmware's page, when it is open or A opens it */
         if (act == A_UP) a->file_sel = (a->file_sel + rows - 1) % rows;
         else if (act == A_DOWN) a->file_sel = (a->file_sel + 1) % rows;
-        else if (act == A_L2) a->file_sel = a->file_sel - 24 < 0 ? 0 : a->file_sel - 24;
-        else if (act == A_R2) a->file_sel = a->file_sel + 24 >= rows ? rows - 1 : a->file_sel + 24;
+        else if (act == A_L2) a->file_sel = a->file_sel - (a->mode == MODE_ZOOMED ? 20 : 22) < 0 ? 0 : a->file_sel - (a->mode == MODE_ZOOMED ? 20 : 22);
+        else if (act == A_R2) a->file_sel = a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22) >= rows ? rows - 1 : a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22);
         else if (act == A_X) { scan_files(a); say(a, 0, "Rescanned the folder", NULL); }
         else if (act == A_OK) {
             if (a->file_sel >= a->nfiles) request_quit(a);
@@ -939,11 +984,13 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     else if (a->pace_mode) snprintf(u->tools[11], PX_NAME, "  PACE: %d", a->pace_mode);
     else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
     snprintf(u->tools[12], PX_NAME, "  DATA RAIN: %s", a->rain_on ? "ON" : "OFF");
+    snprintf(u->tools[13], PX_NAME, "  BACKGROUND DEMOS: %s", a->bg_demos ? (a->sw_pid ? "ON (MAKING ONE)" : "ON") : "OFF");
     u->ntools = NTOOLS;
     u->tool_sel = a->tool_sel;
     if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried.");
     else if (a->confirm == CF_RESTORE) snprintf(u->confirm, sizeof u->confirm, "Restore slot %d into the flash? The machine reboots.", a->slot);
     else if (a->confirm == CF_QUIT) snprintf(u->confirm, sizeof u->confirm, "A recording is running. Stop it, save it and quit?");
+    ui_showcase(a, u);
 }
 
 /* AUTO pacing: one level up when the unit falls behind real time, one down when it has a lot to spare (exact timing is kept when it can) */
@@ -1177,6 +1224,7 @@ static void menu_toggle(App *a) {
     if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
 }
 static void dispatch(App *a, const SDL_Event *e) {
+    if (a->pl.on && (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && !(e->type == SDL_KEYDOWN && e->key.repeat)) { player_stop(a); return; }   /* a press ends the demo and is used up */
     if (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYAXISMOTION || e->type == SDL_JOYHATMOTION) a->last_input_ms = SDL_GetTicks();   /* the data rain's whole-panel mode ends on any of them */
     if ((e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && toast_key(&a->toast, SDL_GetTicks())) return;   /* a failure's key is used up */
     int turn = is_carousel(e);
@@ -1185,7 +1233,7 @@ static void dispatch(App *a, const SDL_Event *e) {
     int chord = e->type == SDL_JOYBUTTONDOWN && (e->jbutton.button == PAD_L1 || e->jbutton.button == PAD_R1) && (a->pad_mask >> PAD_L1 & 1) && (a->pad_mask >> PAD_R1 & 1);
     int fn_scale = e->type == SDL_JOYBUTTONDOWN && e->jbutton.button == PAD_FN && a->panel == PANEL_MACHINE && !a->confirm && (a->pad_mask >> PAD_L1 & 1);
     if (e->type == SDL_QUIT) { rec_stop(a); a->quit = 1; }
-    else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->confirm) a->confirm = CF_NONE; else request_quit(a); }
+    else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->confirm) a->confirm = CF_NONE; else if (a->info_on) a->info_on = 0; else request_quit(a); }
     else if (is_toggle(e)) a->mode ^= 1;
     else if (chord) { if (!a->confirm) menu_toggle(a); }
     else if (fn_scale) { a->scale = (a->scale + 1) % NSCALES; say(a, 0, "Scale %s", SCALES[a->scale].name); }
@@ -1216,6 +1264,266 @@ static void present(SDL_Renderer *r, SDL_Texture *t, const uint32_t *c) {
 
 #include "report.h"
 #include "demo.h"
+#include "showcase.h"
+
+/* ---- the showcase in the app: the worker, the queue, the firmware's page, the player (ROADMAP 5d, host/showcase.h) ----------------------------------------------------
+ * The worker is a separate process (`fm1ntt --showcase FILE`), not a thread: it has its own machine and its own FM1NTT_DIR-independent state, it can be stopped
+ * (SIGSTOP while you play, SIGCONT after), cancelled (SIGTERM: it removes what it wrote) and cannot touch the app's memory. It runs at the lowest priority (nice 19,
+ * SCHED_IDLE on Linux). Nothing starts unless TOOLS > BACKGROUND DEMOS is on, or Y is pressed on a firmware's page. Untested on an R36S. */
+static int fw_is_firmware(const char *path) { return has_ext(path, ".fwsc") || has_ext(path, ".bin"); }
+static void file_sha(App *a, int i) {
+    if (i < 0 || i >= a->nfiles || a->fsha[i][0]) return;
+    char why[64];
+    size_t n = 0;
+    uint8_t *b = read_file(a->fpaths[i], &n, why, sizeof why);
+    if (b) { fm1ntt_sha256_hex(b, n, a->fsha[i]); free(b); } else snprintf(a->fsha[i], sizeof a->fsha[i], "-");
+}
+static int demo_dir_of(App *a, int i, char *dir, size_t n) {
+    char base[300];
+    file_sha(a, i);
+    base_dir(base, sizeof base);
+    return show_dir(dir, n, base, a->fsha[i]);
+}
+static int host_battery_low(void) {
+    MonBat b;
+    memset(&b, 0, sizeof b);
+#ifdef __APPLE__
+    if (!mon_mac_battery(&b)) return 0;
+#else
+    if (!mon_read_battery(&b)) return 0;
+#endif
+    return b.has && b.pct >= 0 && b.pct <= 20 && !strncmp(b.status, "Discharging", 11);
+}
+/* May the worker run now? Not while you play a running firmware (input in the last 15 s), measure (a report, a benchmark, a Rec demo), record, or on a low battery. */
+static int show_may_run(App *a, double now) {
+    if (a->sw_pid || a->bg_demos) {
+        if (now - a->sw_batt_ms >= 30000.0 || a->sw_batt_ms == 0) { a->sw_low = host_battery_low(); a->sw_batt_ms = now ? now : 1; }
+    }
+    int playing = fm1ntt_loaded(a->m) && !a->paused && now - (double)a->last_input_ms < 15000.0;
+    return !playing && !a->job && !a->want_demo && !a->rec && !a->pl.on && !a->sw_low;
+}
+static int show_spawn(App *a, int i) {
+    if (a->sw_pid || !g_self_exe[0] || i < 0 || i >= a->nfiles || !fw_is_firmware(a->fpaths[i])) return -1;
+    file_sha(a, i);
+    if (!show_sha_ok(a->fsha[i])) return -1;
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {                                                    /* only async-signal-safe calls until the exec */
+        setpriority(PRIO_PROCESS, 0, 19);
+#ifdef __linux__
+        struct sched_param sp = {0};
+        sched_setscheduler(0, SCHED_IDLE, &sp);
+#endif
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); }
+        if (fm1ntt_jit_available()) execl(g_self_exe, g_self_exe, "--showcase", "--jit", a->fpaths[i], (char *)NULL);
+        else execl(g_self_exe, g_self_exe, "--showcase", a->fpaths[i], (char *)NULL);
+        _exit(127);
+    }
+    a->sw_pid = pid;
+    a->sw_stopped = a->sw_cancelling = 0;
+    snprintf(a->sw_name, sizeof a->sw_name, "%s", a->files[i]);
+    a->sw_start_ms = (double)SDL_GetTicks();
+    return 0;
+}
+/* Asks the worker to stop; it cleans up and exits (the poll reaps it; after 5 s it is killed and its folder removed here). */
+static void show_cancel(App *a) {
+    if (!a->sw_pid || a->sw_cancelling) return;
+    kill(a->sw_pid, SIGCONT);
+    kill(a->sw_pid, SIGTERM);
+    a->sw_cancelling = 1;
+    a->sw_cancel_ms = (double)SDL_GetTicks();
+}
+/* The worker's folder, from the name it was started for. */
+static int worker_dir(App *a, char *dir, size_t n) {
+    for (int i = 0; i < a->nfiles; i++) if (!strcmp(a->files[i], a->sw_name) && show_sha_ok(a->fsha[i])) { char base[300]; base_dir(base, sizeof base); return show_dir(dir, n, base, a->fsha[i]); }
+    return -1;
+}
+/* Once a loop pass. Reaps a finished worker, stops and continues it by the policy. 1 when something to draw changed. */
+static int show_poll(App *a, double now) {
+    if (!a->pl.on && a->pl.pcm) player_stop(a);                          /* a demo played to its end: free its sound */
+    if (!a->sw_pid) return 0;
+    int st = 0;
+    pid_t r = waitpid(a->sw_pid, &st, WNOHANG);
+    if (r == 0) {
+        if (a->sw_cancelling) { if (now - a->sw_cancel_ms > 5000.0) kill(a->sw_pid, SIGKILL); return 0; }
+        int may = show_may_run(a, now);
+        if (!may && !a->sw_stopped) { kill(a->sw_pid, SIGSTOP); a->sw_stopped = 1; return 1; }
+        if (may && a->sw_stopped) { kill(a->sw_pid, SIGCONT); a->sw_stopped = 0; return 1; }
+        return 0;
+    }
+    char dir[420];
+    int have_dir = worker_dir(a, dir, sizeof dir) == 0;
+    ShowState s;
+    if (have_dir) show_state_read(dir, &s); else memset(&s, 0, sizeof s);
+    int cancelled = a->sw_cancelling;
+    a->sw_pid = 0; a->sw_stopped = a->sw_cancelling = 0;
+    a->sw_next_ms = now + 2000.0;
+    if (cancelled || (WIFEXITED(st) && WEXITSTATUS(st) == 3)) { if (have_dir) show_clear(dir); say(a, 0, "Demo stopped", NULL); return 1; }
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 0 && have_dir && !strcmp(s.state, "ready")) { say(a, 1, "A demo of %s is ready", a->sw_name); return 1; }
+    if (have_dir && !strcmp(s.state, "failed")) { say(a, 2, "The demo of %s failed: see its page", a->sw_name); return 1; }
+    if (have_dir) {                                                     /* the worker died without saying why: a failure, written here, never retried in a loop */
+        mkdir_p(dir);
+        s.tour = SHOW_TOUR; s.attempts = s.attempts ? s.attempts : 1;
+        snprintf(s.state, sizeof s.state, "failed");
+        snprintf(s.reason, sizeof s.reason, WIFSIGNALED(st) ? "the worker stopped (signal %d)" : "the worker could not run (exit %d)", WIFSIGNALED(st) ? WTERMSIG(st) : WEXITSTATUS(st));
+        show_state_write(dir, &s);
+        say(a, 2, "The demo of %s could not be made", a->sw_name);
+    }
+    return 1;
+}
+/* One file looked at every 2 s (hashed once, its sidecar read): the first that needs a demo starts the worker. A pass over the folder, then a minute's rest. */
+static void show_queue(App *a, double now) {
+    if (!a->bg_demos || a->sw_pid || now < a->sw_next_ms) return;
+    if (!show_may_run(a, now)) { a->sw_next_ms = now + 5000.0; return; }
+    a->sw_next_ms = now + 2000.0;
+    if (a->sw_cursor >= a->nfiles) { a->sw_cursor = 0; a->sw_next_ms = now + 60000.0; return; }
+    int i = a->sw_cursor++;
+    if (!fw_is_firmware(a->fpaths[i])) return;
+    char dir[420];
+    if (demo_dir_of(a, i, dir, sizeof dir) != 0) return;
+    ShowState s;
+    show_state_read(dir, &s);
+    if (show_needed(&s)) show_spawn(a, i);
+}
+/* The app is closing: the worker is asked to stop and given 2 s; then it is killed and its half folder removed. */
+static void show_shutdown(App *a) {
+    if (!a->sw_pid) return;
+    show_cancel(a);
+    for (int k = 0; k < 40; k++) { int st; if (waitpid(a->sw_pid, &st, WNOHANG) == a->sw_pid) { a->sw_pid = 0; return; } usleep(50000); }
+    kill(a->sw_pid, SIGKILL);
+    int st;
+    waitpid(a->sw_pid, &st, 0);
+    char dir[420];
+    if (worker_dir(a, dir, sizeof dir) == 0) show_clear(dir);
+    a->sw_pid = 0;
+}
+
+/* ---- the firmware's page ------------------------------------------------------------------------------------------------------------------------ */
+/* The manifest line of this SHA-256 in `dir`/MANIFEST.tsv: tab-separated path, sha256, bytes, licence, name, version, source, built_from. */
+static int manifest_find(const char *dir, const char *sha, char *licence, size_t ln, char *source, size_t sn, char *name, size_t nn) {
+    char p[420];
+    snprintf(p, sizeof p, "%s/MANIFEST.tsv", dir);
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    char line[1024];
+    int found = 0;
+    while (!found && fgets(line, sizeof line, f)) {
+        char *col[8];
+        int n = 0;
+        for (char *c = line; n < 8; ) { col[n++] = c; char *t = strchr(c, '\t'); if (!t) break; *t = 0; c = t + 1; }
+        if (n >= 7 && !strcmp(col[1], sha)) {
+            char *nl = strchr(col[n - 1], '\n'); if (nl) *nl = 0;
+            snprintf(licence, ln, "%s", col[3]); snprintf(name, nn, "%s %s", col[4], col[5]); snprintf(source, sn, "%s", col[6]);
+            found = 1;
+        }
+    }
+    fclose(f);
+    return found;
+}
+static void info_open(App *a, int i) {
+    memset(&a->info_rec, 0, sizeof a->info_rec);
+    file_sha(a, i);
+    const char *dir = a->fbundled[i] == 1 ? a->bdir : a->fbundled[i] == 2 ? a->pdir : "";
+    if (dir[0] && show_sha_ok(a->fsha[i])) a->info_rec.found = manifest_find(dir, a->fsha[i], a->info_rec.licence, sizeof a->info_rec.licence, a->info_rec.source, sizeof a->info_rec.source, a->info_rec.name, sizeof a->info_rec.name);
+    a->info_on = 1;
+    a->info_i = i;
+}
+static void player_stop(App *a) {
+    if (!a->pl.pcm && !a->pl.on) return;
+    lock(a);
+    a->pl.on = 0;
+    unlock(a);
+    free(a->pl.pcm);
+    a->pl.pcm = NULL;
+    a->pl.cur = -1;
+}
+static int player_start(App *a, int i) {
+    char dir[420];
+    if (demo_dir_of(a, i, dir, sizeof dir) != 0) { say(a, 2, "No demo to play", NULL); return -1; }
+    ShowState s;
+    show_state_read(dir, &s);
+    if (!s.have || strcmp(s.state, "ready")) { say(a, 2, "No demo to play yet: Y makes it", NULL); return -1; }
+    player_stop(a);
+    int total = 0, nf = show_frames_read(dir, a->pl.ms, 400, &total);
+    int16_t *pcm = NULL;
+    size_t fr = 0;
+    char wp[460];
+    snprintf(wp, sizeof wp, "%s/audio.wav", dir);
+    if (nf < 1 || show_wav_read(wp, &pcm, &fr) != 0) { free(pcm); say(a, 3, "The demo's files cannot be read", NULL); return -1; }
+    snprintf(a->pl.dir, sizeof a->pl.dir, "%s", dir);
+    a->pl.nf = nf; a->pl.total_ms = total; a->pl.cur = -1; a->pl.pos = 0;
+    lock(a);
+    a->pl.pcm = pcm; a->pl.frames = fr; a->pl.on = 1;
+    unlock(a);
+    say(a, 0, "Playing the demo: any key stops it", NULL);
+    return 0;
+}
+/* A press on FILES: the page when it is open, or A opening it on a firmware. 1 when handled. */
+static int files_press(App *a, int act) {
+    if (a->info_on) {
+        int i = a->info_i;
+        if (i < 0 || i >= a->nfiles) { a->info_on = 0; return 1; }
+        if (act == A_OK) { a->info_on = 0; const char *p = a->fpaths[i]; load_firmware(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA); }
+        else if (act == A_X) player_start(a, i);
+        else if (act == A_Y) {
+            if (a->sw_pid && !strcmp(a->sw_name, a->files[i])) { show_cancel(a); say(a, 0, "Stopping the demo", NULL); }
+            else if (a->sw_pid) say(a, 2, "Another demo is being made: wait for it or stop it", NULL);
+            else if (show_spawn(a, i) == 0) say(a, 0, "Making the demo: it runs at the lowest priority", NULL);
+            else say(a, 2, "Cannot start the demo worker", NULL);
+        } else if (act == A_BACK) a->info_on = 0;
+        else if (act == A_UP || act == A_DOWN || act == A_L2 || act == A_R2) {}       /* the page does not move */
+        return 1;
+    }
+    if (act == A_OK && a->file_sel < a->nfiles && fw_is_firmware(a->fpaths[a->file_sel])) { info_open(a, a->file_sel); return 1; }
+    return 0;
+}
+
+/* The UI's side of it: the progress box, the page's text, and the demo's picture in the FM-1's screen while it plays. */
+static void ui_showcase(App *a, UiState *u) {
+    char dir[420], p[460];
+    if (a->sw_pid) {
+        snprintf(u->demo_run, sizeof u->demo_run, "%s", a->sw_name);
+        u->demo_secs = (int)(((double)SDL_GetTicks() - a->sw_start_ms) / 1000.0);
+        u->demo_paused = a->sw_stopped;
+        if (worker_dir(a, dir, sizeof dir) == 0) {
+            char t[40]; snprintf(p, sizeof p, "%s/progress.txt", dir);
+            FILE *f = fopen(p, "r"); size_t n = f ? fread(t, 1, sizeof t - 1, f) : 0; if (f) fclose(f); t[n] = 0;
+            const char *e = strstr(t, "pct=");
+            u->demo_pct = e ? atoi(e + 4) : 0;
+        }
+    }
+    if (a->info_on && a->info_i >= 0 && a->info_i < a->nfiles) {
+        int i = a->info_i;
+        u->info_on = 1;
+        snprintf(u->info_name, sizeof u->info_name, "%s", a->files[i]);
+        snprintf(u->info_tier, sizeof u->info_tier, "%s", a->fbundled[i] == 1 ? "BUNDLED (PERMISSIVE)" : a->fbundled[i] == 2 ? "THE GPL PACK (COPYLEFT)" : "YOUR OWN FILE");
+        snprintf(u->info_licence, sizeof u->info_licence, "%s", a->info_rec.found ? a->info_rec.licence : "NOT KNOWN: A FILE YOU BROUGHT");
+        snprintf(u->info_source, sizeof u->info_source, "%s", a->info_rec.found ? a->info_rec.source : "-");
+        if (show_sha_ok(a->fsha[i])) snprintf(u->info_sha, sizeof u->info_sha, "%s", a->fsha[i]);
+        u->info_busy = a->sw_pid && !strcmp(a->sw_name, a->files[i]);
+        ShowState s;
+        memset(&s, 0, sizeof s);
+        if (demo_dir_of(a, i, dir, sizeof dir) == 0) show_state_read(dir, &s);
+        if (u->info_busy) { u->info_demo_kind = 1; u->info_pct = u->demo_pct; snprintf(u->info_demo, sizeof u->info_demo, "BEING MADE%s: %d%%, %ds", u->demo_paused ? " (PAUSED WHILE YOU PLAY)" : "", u->demo_pct, u->demo_secs); }
+        else if (s.have && !strcmp(s.state, "ready")) { u->info_demo_kind = 2; u->info_can_play = 1; snprintf(u->info_demo, sizeof u->info_demo, "READY: %d PICTURES, %d S", s.frames, s.ms / 1000); }
+        else if (s.have && !strcmp(s.state, "failed")) { u->info_demo_kind = 3; snprintf(u->info_demo, sizeof u->info_demo, "FAILED: %.90s", s.reason); }
+        else if (s.have) snprintf(u->info_demo, sizeof u->info_demo, "NOT FINISHED: Y MAKES IT");
+        else snprintf(u->info_demo, sizeof u->info_demo, "NONE YET: Y MAKES IT%s", a->bg_demos ? " (OR IT IS QUEUED)" : "");
+    }
+    if (a->pl.on && a->pl.nf > 0) {                                      /* the demo's own picture, by the sound's position */
+        int t = (int)((unsigned long long)a->pl.pos * 1000 / FM1_SAMPLE_RATE), idx = 0;
+        for (int k = 0; k < a->pl.nf; k++) if (a->pl.ms[k] <= t) idx = k;
+        if (idx != a->pl.cur) {
+            char pp[460];
+            snprintf(pp, sizeof pp, "%s/%04d.png", a->pl.dir, idx);
+            if (show_png_read(pp, a->pl_pic, FM1_SCREEN_W, FM1_SCREEN_H) == 0) a->pl.cur = idx;
+        }
+        if (a->pl.cur >= 0) { memcpy(u->fb, a->pl_pic, sizeof u->fb); u->fb_valid = 1; }
+        u->run_state = "DEMO";
+        u->playing = 1;
+    }
+}
 
 /* ---- the data rain (monitor.h): one row of real data, from the first source that has some; the source rotates ---------------------------------- */
 static void rain_row_feed(App *a, double now_ms) {
@@ -1600,6 +1908,294 @@ static int mon_selftest(const char *root, App *app) {
     return bad;
 }
 
+/* ---- the firmware showcase's tests (host/showcase.h) -------------------------------------------------------------------------------- */
+static unsigned long long show_tree_hash(const char *dir) {                 /* FNV-1a over every file's name and bytes, in name order */
+    DIR *d = opendir(dir);
+    char names[600][24];
+    int n = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) && n < 600) if (e->d_name[0] != '.') snprintf(names[n++], sizeof names[0], "%s", e->d_name);
+    if (d) closedir(d);
+    for (int i = 1; i < n; i++) for (int j = i; j > 0 && strcmp(names[j], names[j - 1]) < 0; j--) { char t[24]; memcpy(t, names[j], 24); memcpy(names[j], names[j - 1], 24); memcpy(names[j - 1], t, 24); }
+    unsigned long long h = 1469598103934665603ULL;
+    for (int i = 0; i < n; i++) {
+        for (const char *c = names[i]; *c; c++) h = (h ^ (unsigned char)*c) * 1099511628211ULL;
+        char p[460]; size_t len = 0; char why[64];
+        snprintf(p, sizeof p, "%s/%s", dir, names[i]);
+        uint8_t *b = read_file(p, &len, why, sizeof why);
+        for (size_t k = 0; b && k < len; k++) h = (h ^ b[k]) * 1099511628211ULL;
+        free(b);
+    }
+    return h;
+}
+static int show_selftest(const char *root) {
+    int fails = 0;
+#define SCHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL (showcase): %s (line %d)\n", #c, __LINE__); fails++; } } while (0)
+    /* the sidecar's rules */
+    ShowState s;
+    show_state_parse("state=ready\nreason=\ntour=1\nframes=140\nms=15000\nattempts=1\njit=0\n", &s);
+    SCHECK(s.have && !strcmp(s.state, "ready") && s.tour == SHOW_TOUR && s.frames == 140 && s.ms == 15000 && !show_needed(&s));
+    show_state_parse("state=failed\nreason=the screen stayed blank\ntour=1\nattempts=1\n", &s);
+    SCHECK(s.have && !show_needed(&s) && !strcmp(s.reason, "the screen stayed blank"));         /* a failure is not retried */
+    show_state_parse("state=failed\ntour=0\n", &s);
+    SCHECK(show_needed(&s));                                                                      /* ... until the tour is a newer one */
+    show_state_parse("state=recording\ntour=1\nattempts=1\n", &s);
+    SCHECK(show_needed(&s));                                                                      /* a run that was killed: once more */
+    show_state_parse("state=recording\ntour=1\nattempts=2\n", &s);
+    SCHECK(!show_needed(&s));                                                                     /* ... and then it counts as failed */
+    show_state_parse("", &s); SCHECK(!s.have && show_needed(&s));
+    show_state_parse("state=banana\ntour=1\n", &s); SCHECK(!s.have && show_needed(&s));
+    show_state_parse("garbage\n\xff\x01=\n=state\nstate", &s); SCHECK(!s.have);
+    show_state_parse("state=ready\ntour=99999999999999999999\nframes=-4\n", &s); SCHECK(s.have && s.tour != SHOW_TOUR && show_needed(&s));
+    char dir[420], base[400], res[240];
+    snprintf(base, sizeof base, "%s/showbase", root);
+    SCHECK(show_dir(dir, sizeof dir, base, "../../etc/passwd") != 0 && show_dir(dir, sizeof dir, base, "ABCDEF") != 0 && show_dir(dir, sizeof dir, base, NULL) != 0);
+    char sha64[65];
+    memset(sha64, 'a', 64); sha64[64] = 0;
+    SCHECK(show_dir(dir, sizeof dir, base, sha64) == 0 && strstr(dir, "/demos/aaaa"));
+    sha64[10] = 'G'; SCHECK(show_dir(dir, sizeof dir, base, sha64) != 0);
+    /* the pictures: paletted and RGB both come back exactly; a cut or damaged file is refused, never read past its end */
+    static uint32_t pic[FM1_SCREEN_W * FM1_SCREEN_H], back[FM1_SCREEN_W * FM1_SCREEN_H];
+    char pp[460];
+    snprintf(pp, sizeof pp, "%s/t.png", root);
+    for (int colours = 5; colours <= 300; colours += 295) {
+        for (int i = 0; i < FM1_SCREEN_W * FM1_SCREEN_H; i++) pic[i] = ((uint32_t)(i / 97 % colours) * 0x010203u + (uint32_t)(i / 97 % colours) * 7u) & 0xFFFFFF;
+        SCHECK(show_png_write(pp, pic, FM1_SCREEN_W, FM1_SCREEN_H) == 0 && show_png_read(pp, back, FM1_SCREEN_W, FM1_SCREEN_H) == 0 && !memcmp(pic, back, sizeof pic));
+        size_t len = 0; char why[64];
+        uint8_t *png = read_file(pp, &len, why, sizeof why);
+        SCHECK(png && ((colours <= 256) == (png[25] == 3)));                                          /* 5 colours: paletted; 300: RGB */
+        int refused = 0, tried = 0;
+        for (size_t cut = 0; png && cut < len; cut += len / 40 + 1) {
+            FILE *f = fopen(pp, "wb"); fwrite(png, 1, cut, f); fclose(f);
+            tried++; refused += show_png_read(pp, back, FM1_SCREEN_W, FM1_SCREEN_H) != 0;
+        }
+        SCHECK(tried > 10 && refused == tried);
+        for (int k = 0; png && k < 200; k++) {                                                        /* a damaged byte: refused or still a picture, never a crash or an overread */
+            uint8_t *dmg = malloc(len);
+            memcpy(dmg, png, len);
+            dmg[(size_t)(k * 2654435761u) % len] ^= (uint8_t)(1 + k);
+            FILE *f = fopen(pp, "wb"); fwrite(dmg, 1, len, f); fclose(f); free(dmg);
+            (void)show_png_read(pp, back, FM1_SCREEN_W, FM1_SCREEN_H);
+        }
+        free(png);
+    }
+    SCHECK(show_png_read("/nonexistent/x.png", back, FM1_SCREEN_W, FM1_SCREEN_H) != 0);
+    { FILE *f = fopen(pp, "wb"); fputs("not a png at all, just text that is long enough to be read as a header", f); fclose(f); }
+    SCHECK(show_png_read(pp, back, FM1_SCREEN_W, FM1_SCREEN_H) != 0);
+    /* the table and the sound */
+    snprintf(dir, sizeof dir, "%s/tbl", root);
+    mkdir_p(dir);
+    { char t[460]; snprintf(t, sizeof t, "%s/frames.txt", dir); const char *ok = "0000 100\n0001 400\nend 15000\n"; write_atomic(t, ok, strlen(ok)); }
+    int ms[8], total = 0;
+    SCHECK(show_frames_read(dir, ms, 8, &total) == 2 && ms[0] == 100 && ms[1] == 400 && total == 15000);
+    const char *bad_tables[] = {"0001 100\nend 5\n", "0000 100\n", "end 5\n", "0000\nend 5\n", "0000 1\n0000 2\nend 3\n", "x\n", ""};
+    for (unsigned i = 0; i < sizeof bad_tables / sizeof *bad_tables; i++) { char t[460]; snprintf(t, sizeof t, "%s/frames.txt", dir); write_atomic(t, bad_tables[i], strlen(bad_tables[i])); { int rcx = show_frames_read(dir, ms, 8, &total); if (rcx >= 0) fprintf(stderr, "  table %u read as %d\n", i, rcx); SCHECK(rcx < 0); } }
+    { char t[460]; snprintf(t, sizeof t, "%s/frames.txt", dir); const char *two = "0000 1\n0001 2\nend 3\n"; write_atomic(t, two, strlen(two)); SCHECK(show_frames_read(dir, ms, 1, &total) < 0); }   /* more pictures than the table holds */
+    { char t[460], junk[100]; snprintf(t, sizeof t, "%s/audio.wav", dir); memset(junk, 'x', sizeof junk); write_atomic(t, junk, sizeof junk); int16_t *pcm = NULL; size_t fr = 0; SCHECK(show_wav_read(t, &pcm, &fr) != 0 && !pcm); }
+    show_clear(dir);
+    SCHECK(access(dir, F_OK) != 0);
+    snprintf(dir, sizeof dir, "%s/clr", root);                                                   /* only its own files go: a folder with anything else stays */
+    mkdir_p(dir);
+    { char t[460]; snprintf(t, sizeof t, "%s/keep.txt", dir); write_atomic(t, "mine", 4); snprintf(t, sizeof t, "%s/0001.png", dir); write_atomic(t, "x", 1); }
+    show_clear(dir);
+    { char t[460]; snprintf(t, sizeof t, "%s/keep.txt", dir); SCHECK(is_file(t)); snprintf(t, sizeof t, "%s/0001.png", dir); SCHECK(!is_file(t)); }
+    /* a firmware that is not one: failed with a reason, and not made again; nothing to read: no folder */
+    char junkfw[460];
+    snprintf(junkfw, sizeof junkfw, "%s/not-firmware.fwsc", root);
+    write_atomic(junkfw, "this is not a firmware package", 30);
+    SCHECK(showcase_run(junkfw, 0, FM1_ENTRY_FELUCCA, 0, base, 0, res, sizeof res) == 1 && strstr(res, "failed: cannot load"));
+    { char sh[65], d[460], b2[64]; (void)b2; size_t n = 0, w2[1]; (void)w2; char why[64]; uint8_t *bb = read_file(junkfw, &n, why, sizeof why); fm1ntt_sha256_hex(bb, n, sh); free(bb); show_dir(d, sizeof d, base, sh);
+      ShowState st; show_state_read(d, &st); SCHECK(st.have && !strcmp(st.state, "failed") && strstr(st.reason, "cannot load") && !show_needed(&st)); }
+    SCHECK(showcase_run("/nonexistent/fw.fwsc", 0, 0, 0, base, 0, res, sizeof res) == 2);
+    char empty[460]; snprintf(empty, sizeof empty, "%s/empty.fwsc", root); { FILE *f = fopen(empty, "wb"); if (f) fclose(f); }
+    SCHECK(showcase_run(empty, 0, 0, 0, base, 0, res, sizeof res) == 2);
+    char dflt[300];
+    { char *sv = getenv("FM1NTT_BUNDLED") ? strdup(getenv("FM1NTT_BUNDLED")) : NULL; unsetenv("FM1NTT_BUNDLED"); default_firmware(dflt, sizeof dflt); if (sv) { setenv("FM1NTT_BUNDLED", sv, 1); free(sv); } }
+    if (!dflt[0]) { fprintf(stderr, "  showcase: no bundled firmware here, the runs are skipped\n"); return fails; }
+    /* the time budget ends a run as failed, and that is not retried */
+    SCHECK(showcase_run(dflt, 0, 0, 0, base, 0.0001, res, sizeof res) == 1 && strstr(res, "time budget"));
+    { char sh[65], d[460], why[64]; size_t n = 0; uint8_t *bb = read_file(dflt, &n, why, sizeof why); fm1ntt_sha256_hex(bb, n, sh); free(bb); show_dir(d, sizeof d, base, sh);
+      ShowState st; show_state_read(d, &st); SCHECK(!strcmp(st.state, "failed") && !show_needed(&st)); }
+    /* a cancelled run (SIGTERM to a child) leaves no half files and no state: it is needed again */
+    { pid_t pid = fork();
+      if (pid == 0) { char r2[200]; int rc = showcase_run(dflt, 0, 0, 0, base, 0, r2, sizeof r2); _exit(rc); }
+      usleep(1500000);
+      kill(pid, SIGTERM);
+      int stt = 0; waitpid(pid, &stt, 0);
+      SCHECK(WIFEXITED(stt) && WEXITSTATUS(stt) == 3);
+      char sh[65], d[460], why[64]; size_t n = 0; uint8_t *bb = read_file(dflt, &n, why, sizeof why); fm1ntt_sha256_hex(bb, n, sh); free(bb); show_dir(d, sizeof d, base, sh);
+      ShowState st; show_state_read(d, &st);
+      SCHECK(access(d, F_OK) != 0 && !st.have && show_needed(&st)); }
+    /* two real runs: the same bytes (pictures, table, sound, state), and what they wrote reads back */
+    char a_base[420], b_base[420], da[460], db[460];
+    snprintf(a_base, sizeof a_base, "%s/runa", root); snprintf(b_base, sizeof b_base, "%s/runb", root);
+    SCHECK(showcase_run(dflt, 0, 0, 0, a_base, 0, res, sizeof res) == 0 && strstr(res, "ready"));
+    SCHECK(showcase_run(dflt, 0, 0, 0, b_base, 0, res, sizeof res) == 0);
+    { char sh[65], why[64]; size_t n = 0; uint8_t *bb = read_file(dflt, &n, why, sizeof why); fm1ntt_sha256_hex(bb, n, sh); free(bb); show_dir(da, sizeof da, a_base, sh); show_dir(db, sizeof db, b_base, sh); }
+    SCHECK(show_tree_hash(da) == show_tree_hash(db));
+    ShowState st;
+    show_state_read(da, &st);
+    SCHECK(!strcmp(st.state, "ready") && st.frames > 20 && st.frames <= SHOW_FRAMES_MAX && st.ms == 15000 && st.tour == SHOW_TOUR && !show_needed(&st));
+    static int fms[SHOW_FRAMES_MAX]; int ftotal = 0;
+    int nf = show_frames_read(da, fms, SHOW_FRAMES_MAX, &ftotal);
+    SCHECK(nf == st.frames && ftotal == 15000);
+    int rising = 1;
+    for (int i = 1; i < nf; i++) rising &= fms[i] - fms[i - 1] >= SHOW_MIN_GAP * 1000 / SHOW_FPS;
+    SCHECK(rising);                                                                                  /* at most 10 pictures a second */
+    for (int i = 0; i < nf && i < 3; i++) { char pf[480]; snprintf(pf, sizeof pf, "%s/%04d.png", da, i); SCHECK(show_png_read(pf, back, FM1_SCREEN_W, FM1_SCREEN_H) == 0); }
+    { char pf[480]; int16_t *pcm = NULL; size_t fr = 0; snprintf(pf, sizeof pf, "%s/audio.wav", da); SCHECK(show_wav_read(pf, &pcm, &fr) == 0 && fr == (size_t)SHOW_TICKS * SHOW_AUDIO);
+      int loud = 0; for (size_t i = 0; pcm && i < fr * 2; i++) loud |= abs(pcm[i]) > 200; SCHECK(loud); free(pcm);                  /* the notes were heard */
+      snprintf(pf, sizeof pf, "%s/progress.txt", da); SCHECK(!is_file(pf)); }
+    show_state_read(da, &st);
+    /* a changed tour version makes the same folder needed again (a state written by an older tour) */
+    st.tour = SHOW_TOUR - 1; show_state_write(da, &st); show_state_read(da, &st); SCHECK(show_needed(&st));
+#undef SCHECK
+    return fails;
+}
+
+/* ---- the showcase inside the app: the page, the policy, the worker, the queue, the player (needs the app `a` and its machine) ----------------------------------------------- */
+static int show_app_selftest(const char *root, App *a, UiState *ui) {
+    int fails = 0;
+#define ACHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL (showcase app): %s (line %d)\n", #c, __LINE__); fails++; } } while (0)
+    (void)root;
+    char dflt[300];
+    { char *sv = getenv("FM1NTT_BUNDLED") ? strdup(getenv("FM1NTT_BUNDLED")) : NULL; unsetenv("FM1NTT_BUNDLED"); default_firmware(dflt, sizeof dflt); bundled_dir(a->bdir, sizeof a->bdir); if (sv) { setenv("FM1NTT_BUNDLED", sv, 1); free(sv); } }
+    if (!dflt[0] || !g_self_exe[0]) { fprintf(stderr, "  showcase app: no bundled firmware or no program path, skipped\n"); return fails; }
+    memset(a->fsha, 0, sizeof a->fsha);
+    a->nfiles = 2;
+    snprintf(a->fpaths[0], sizeof a->fpaths[0], "%s", dflt); snprintf(a->files[0], PX_NAME, "%s", strrchr(dflt, '/') + 1); a->fbundled[0] = 1;
+    char own[460]; snprintf(own, sizeof own, "%s/own-firmware.fwsc", root); write_atomic(own, "own bytes of no manifest", 24);
+    snprintf(a->fpaths[1], sizeof a->fpaths[1], "%s", own); snprintf(a->files[1], PX_NAME, "own-firmware.fwsc"); a->fbundled[1] = 0;
+    a->panel = PANEL_FILES; a->mode = MODE_STANDARD; a->info_on = 0; a->file_sel = 0;
+    char d0[420], d1[420];
+    ACHECK(demo_dir_of(a, 0, d0, sizeof d0) == 0 && demo_dir_of(a, 1, d1, sizeof d1) == 0);
+    show_clear(d0); show_clear(d1);
+    /* the page: a bundled firmware knows its licence and source from the manifest, a file you brought says so */
+    act(a, A_OK);
+    ACHECK(a->info_on && a->info_i == 0 && a->info_rec.found);
+    fill_ui(a, ui, 0);
+    ACHECK(ui->info_on && !strcmp(ui->info_tier, "BUNDLED (PERMISSIVE)") && strstr(ui->info_licence, "MPL-2.0") && strstr(ui->info_source, "github.com") && strlen(ui->info_sha) == 64 && !ui->info_can_play && ui->info_demo_kind == 0 && strstr(ui->info_demo, "NONE YET") && !ui->demo_run[0]);
+    act(a, A_BACK);
+    a->file_sel = 1; act(a, A_OK); fill_ui(a, ui, 0);
+    ACHECK(ui->info_on && !strcmp(ui->info_tier, "YOUR OWN FILE") && strstr(ui->info_licence, "NOT KNOWN") && !strcmp(ui->info_source, "-"));
+    act(a, A_X); ACHECK(!a->pl.on && a->msg_style == 2);                                        /* no demo: X says so */
+    act(a, A_BACK);
+    /* the policy: not while you play, measure, record, or on a low battery */
+    a->last_input_ms = 1000; a->sw_low = 0; a->sw_batt_ms = 99999;
+    ACHECK(show_may_run(a, 100000.0) == 1);
+    a->last_input_ms = 99000;
+    int was_paused = a->paused; a->paused = 0;
+    ACHECK(fm1ntt_loaded(a->m) && show_may_run(a, 100000.0) == 0);                                 /* a running firmware and a key a second ago */
+    a->paused = 1; ACHECK(show_may_run(a, 100000.0) == 1); a->paused = was_paused;
+    a->last_input_ms = 1000;
+    a->job = (SDL_Thread *)(uintptr_t)1; ACHECK(show_may_run(a, 100000.0) == 0); a->job = NULL;
+    a->sw_low = 1; ACHECK(show_may_run(a, 100000.0) == 0); a->sw_low = 0;
+    /* the queue starts nothing while it is off, and no more than one worker; a worker is cancelled and leaves nothing */
+    a->bg_demos = 0; a->sw_next_ms = 0; a->sw_cursor = 0; a->paused = 1;
+    show_queue(a, 100000.0); ACHECK(a->sw_pid == 0);
+    a->bg_demos = 1; a->sw_next_ms = 0; a->sw_cursor = 0;
+    show_queue(a, 100000.0);                                                                       /* file 0: no demo, so a worker */
+    ACHECK(a->sw_pid > 0);
+    pid_t first = a->sw_pid;
+    show_queue(a, 200000.0); ACHECK(a->sw_pid == first);
+    fill_ui(a, ui, 0);
+    ACHECK(ui->demo_run[0] && !ui->demo_paused);
+    a->info_on = 1; a->info_i = 0; fill_ui(a, ui, 0);
+    ACHECK(ui->info_busy && ui->info_demo_kind == 1 && strstr(ui->info_demo, "BEING MADE"));
+    a->job = (SDL_Thread *)(uintptr_t)1;                                                           /* a report starts: the worker is stopped */
+    ACHECK(show_poll(a, 100500.0) == 1 && a->sw_stopped == 1);
+    { int st = 0; usleep(200000); pid_t w = waitpid(a->sw_pid, &st, WUNTRACED | WNOHANG); ACHECK(w == a->sw_pid && WIFSTOPPED(st)); }
+    fill_ui(a, ui, 0); ACHECK(ui->demo_paused && strstr(ui->info_demo, "PAUSED"));
+    a->job = NULL;                                                                                 /* ... and goes on when it ends */
+    ACHECK(show_poll(a, 101000.0) == 1 && a->sw_stopped == 0);
+    act(a, A_Y); ACHECK(a->sw_cancelling == 1);                                                    /* Y on its page stops it */
+    for (int k = 0; k < 200 && a->sw_pid; k++) { show_poll(a, 102000.0 + k * 100.0); usleep(100000); }
+    ACHECK(a->sw_pid == 0 && access(d0, F_OK) != 0 && strstr(a->msg, "stopped"));
+    ShowState s;
+    show_state_read(d0, &s); ACHECK(!s.have && show_needed(&s));
+    /* a whole run through the queue: ready, and not made again */
+    a->sw_next_ms = 0; a->sw_cursor = 0;
+    show_queue(a, 300000.0); ACHECK(a->sw_pid > 0);
+    for (int k = 0; k < 1200 && a->sw_pid; k++) { show_poll(a, 300000.0 + k * 100.0); usleep(100000); }
+    show_state_read(d0, &s);
+    ACHECK(a->sw_pid == 0 && !strcmp(s.state, "ready") && s.frames > 20 && strstr(a->msg, "ready"));
+    a->sw_next_ms = 0; a->sw_cursor = 0;
+    show_queue(a, 500000.0); ACHECK(a->sw_pid == 0);                                               /* a demo exists: no worker */
+    a->sw_next_ms = 0; a->sw_cursor = 1;
+    show_queue(a, 500000.0); ACHECK(a->sw_pid > 0);                                                /* the other file has none */
+    show_cancel(a);
+    for (int k = 0; k < 200 && a->sw_pid; k++) { show_poll(a, 500000.0 + k * 100.0); usleep(100000); }
+    ACHECK(a->sw_pid == 0);
+    /* a worker that dies without a word is a failure, written once, and not tried in a loop */
+    { char gone[460]; snprintf(gone, sizeof gone, "%s/gone.fwsc", root); write_atomic(gone, "x", 1);
+      snprintf(a->fpaths[1], sizeof a->fpaths[1], "%s", gone); memset(a->fsha[1], 0, 65); a->sw_cursor = 1; a->sw_next_ms = 0;
+      char saved[1024]; snprintf(saved, sizeof saved, "%s", g_self_exe);
+      snprintf(g_self_exe, sizeof g_self_exe, "/usr/bin/false");                                   /* a worker that exits 1 with no state of its own */
+      show_queue(a, 600000.0); ACHECK(a->sw_pid > 0);
+      for (int k = 0; k < 100 && a->sw_pid; k++) { show_poll(a, 600000.0 + k * 100.0); usleep(50000); }
+      snprintf(g_self_exe, sizeof g_self_exe, "%s", saved);
+      demo_dir_of(a, 1, d1, sizeof d1); show_state_read(d1, &s);
+      ACHECK(a->sw_pid == 0 && !strcmp(s.state, "failed") && strstr(s.reason, "could not run") && !show_needed(&s));
+      a->sw_cursor = 1; a->sw_next_ms = 0; show_queue(a, 700000.0); ACHECK(a->sw_pid == 0); }
+    a->info_on = 1; a->info_i = 1; fill_ui(a, ui, 0);
+    ACHECK(ui->info_demo_kind == 3 && strstr(ui->info_demo, "FAILED: the worker could not run"));
+    /* the player: the demo's sound and pictures, a press ends it, the end ends it, and the machine's own screen is back */
+    a->info_on = 1; a->info_i = 0;
+    act(a, A_X);
+    ACHECK(a->pl.on && a->pl.nf > 20 && a->pl.frames == (size_t)SHOW_TICKS * SHOW_AUDIO);
+    int16_t buf[1470 * 2];
+    audio_step(a, buf, 1470);
+    ACHECK(a->pl.pos == 1470);
+    for (int k = 1; k < 100; k++) audio_step(a, buf, 1470);                                         /* 3.3 s in: the first notes */
+    fill_ui(a, ui, 0);
+    ACHECK(ui->playing && ui->fb_valid && !strcmp(ui->run_state, "DEMO"));
+    { static uint32_t want[FM_W * FM_H]; char pf[480]; int t = (int)((unsigned long long)a->pl.pos * 1000 / FM1_SAMPLE_RATE), idx = 0; for (int k = 0; k < a->pl.nf; k++) if (a->pl.ms[k] <= t) idx = k;
+      snprintf(pf, sizeof pf, "%s/%04d.png", d0, idx); ACHECK(show_png_read(pf, want, FM_W, FM_H) == 0 && !memcmp(want, ui->fb, sizeof want)); }
+    { int loud = 0; for (int k = 0; k < 40; k++) { audio_step(a, buf, 1470); for (int i = 0; i < 1470 * 2; i++) loud |= abs(buf[i]) > 200; } ACHECK(loud); }
+    SDL_Event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.type = SDL_KEYDOWN; ev.key.keysym.sym = SDLK_z;
+    unsigned long long keys_before = fm1ntt_keys_down(a->m);
+    dispatch(a, &ev);
+    ACHECK(!a->pl.on && fm1ntt_keys_down(a->m) == keys_before);                                    /* a press ends it and is used up: no note */
+    show_poll(a, 800000.0); ACHECK(!a->pl.pcm);
+    act(a, A_X); ACHECK(a->pl.on);
+    for (int k = 0; k < SHOW_TICKS + 5 && a->pl.on; k++) audio_step(a, buf, 1470);
+    ACHECK(!a->pl.on && a->pl.pos == a->pl.frames);                                                 /* played to its end */
+    show_poll(a, 800100.0); ACHECK(!a->pl.pcm);
+    fill_ui(a, ui, 0); ACHECK(!ui->playing && strcmp(ui->run_state, "DEMO") != 0);
+    /* the page and the progress box drawn, both layouts: the FM-1's screen intact, the same pixels every time, above the foot */
+    static uint32_t cv[PX_W * PX_H], cv2[PX_W * PX_H];
+    const char *shots = getenv("FM1NTT_MON_SHOTS");
+    for (int mode = 0; mode < 2; mode++) {
+        for (int st = 0; st < 5; st++) {
+            fill_ui(a, ui, 0);
+            ui->info_on = st < 4;
+            ui->info_demo_kind = st == 0 ? 0 : st == 1 ? 1 : st == 2 ? 2 : 3; ui->info_can_play = st == 2; ui->info_busy = st == 1; ui->info_pct = 45;
+            snprintf(ui->info_demo, sizeof ui->info_demo, "%s", st == 0 ? "NONE YET: Y MAKES IT" : st == 1 ? "BEING MADE: 45%, 12S" : st == 2 ? "READY: 140 PICTURES, 15 S" : "FAILED: the screen stayed blank, so there is nothing to show");
+            if (st == 4) { snprintf(ui->demo_run, sizeof ui->demo_run, "untrue-0.1.fwsc"); ui->demo_pct = 45; ui->demo_secs = 12; }
+            px_draw(cv, mode, ui); px_draw(cv2, mode, ui);
+            ACHECK(!memcmp(cv, cv2, sizeof cv));
+            int s2 = px_scale(mode), ok = 1;
+            for (int y = 0; y < FM_H * s2 && ok; y++) for (int x = 0; x < FM_W * s2; x++) if (cv[y * PX_W + x] != (0xFF000000u | ui->fb[(y / s2) * FM_W + x / s2])) { ok = 0; break; }
+            ACHECK(ok);
+            PxRect cr = px_content_rect(mode);
+            long lit = 0, foot = 0;
+            for (int y = cr.y; y < cr.y + cr.h - 30; y++) for (int x = cr.x; x < cr.x + cr.w; x++) lit += cv[y * PX_W + x] != C_BG;
+            for (int y = cr.y + cr.h - 12; y < cr.y + cr.h; y++) for (int x = cr.x + cr.w - 4; x < cr.x + cr.w; x++) foot += cv[y * PX_W + x] != C_BG;
+            ACHECK(lit > 2000 && foot == 0);
+            if (shots) { char fn[420]; snprintf(fn, sizeof fn, "%s/files-m%d-state%d.bmp", shots, mode, st); mon_dump_bmp(fn, cv); }
+        }
+    }
+    /* the TOOLS row */
+    a->panel = PANEL_TOOLS; a->tool_sel = 13; a->bg_demos = 0;
+    act(a, A_OK); ACHECK(a->bg_demos == 1); fill_ui(a, ui, 0); ACHECK(strstr(ui->tools[13], "BACKGROUND DEMOS: ON"));
+    act(a, A_OK); ACHECK(a->bg_demos == 0); fill_ui(a, ui, 0); ACHECK(strstr(ui->tools[13], "BACKGROUND DEMOS: OFF"));
+    a->panel = PANEL_MACHINE; a->info_on = 0; a->paused = was_paused; a->nfiles = 0;
+#undef ACHECK
+    return fails;
+}
+
 static int selftest(void) {
     int bad = 0;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL: %s (line %d)\n", #c, __LINE__); bad++; } } while (0)
@@ -1819,10 +2415,13 @@ static int selftest(void) {
     CHECK(a.nfiles == 3 && !strcasecmp(a.files[0], "A.FWSC") && !strcasecmp(a.files[1], "b.bin") && !strcasecmp(a.files[2], "empty.fwsc"));
     a.panel = PANEL_FILES;
     a.file_sel = 0; act(&a, A_OK);
-    CHECK(!fm1ntt_loaded(a.m) && a.msg_style == 3 && a.msg[0]);                /* A.FWSC is garbage: refused with a reason */
-    a.file_sel = 2; act(&a, A_OK);
+    CHECK(a.info_on && a.info_i == 0 && !fm1ntt_loaded(a.m));                  /* A opens the firmware's page first: nothing is loaded yet */
+    act(&a, A_BACK); CHECK(!a.info_on && !fm1ntt_loaded(a.m));                 /* B closes it */
+    act(&a, A_OK); act(&a, A_OK);                                              /* the page, then Load */
+    CHECK(!a.info_on && !fm1ntt_loaded(a.m) && a.msg_style == 3 && a.msg[0]);  /* A.FWSC is garbage: refused with a reason */
+    a.file_sel = 2; act(&a, A_OK); act(&a, A_OK);
     CHECK(!fm1ntt_loaded(a.m) && a.msg_style == 3);                            /* empty file: refused */
-    a.file_sel = 1; act(&a, A_OK);
+    a.file_sel = 1; act(&a, A_OK); act(&a, A_OK);
     CHECK(fm1ntt_loaded(a.m) && !strcmp(a.file, "b.bin") && a.msg_style == 1); /* the .bin boots as a raw image */
     act(&a, A_UP); CHECK(a.file_sel == 0);
     act(&a, A_UP); CHECK(a.file_sel == 3);                                     /* wraps to the Quit row */
@@ -2205,6 +2804,9 @@ static int selftest(void) {
     /* a pause makes the audio callback silent without touching the machine */
     int16_t pcm[256];
     CHECK(fm1ntt_render(a.m, pcm, 128, 100000) <= 128);
+    CHECK(show_selftest(root) == 0);                                  /* the firmware showcase: its sidecar, its files, a cancel, a failure, two identical runs */
+    CHECK(show_app_selftest(root, &a, ui) == 0);                      /* the showcase in the app: page, policy, a real worker, the queue, the player (uses a.m and ui: before they are freed) */
+    CHECK(mon_selftest(root, &a) == 0);                               /* the MONITOR panel: parsers, maths, the fixture /proc, the cost rule, the layout, the keys (uses a.m: before it is freed) */
     free(ui);
     free(a.rec_ring);
     fm1ntt_free(a.m);
@@ -2279,7 +2881,6 @@ static int selftest(void) {
     }
     /* clean up the temporary folder (and only it) */
     char cmd[400];
-    CHECK(mon_selftest(root, &a) == 0);                           /* the MONITOR panel: parsers, maths, the fixture /proc, the cost rule, the layout, the keys */
     if (!getenv("FM1NTT_KEEP") && strstr(root, "fm1ntt-selftest-")) { snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); if (system(cmd) != 0) fprintf(stderr, "could not remove %s\n", root); }
     if (bad) { fprintf(stderr, "fm1ntt selftest: %d failure(s)\n", bad); return 1; }
     puts("fm1ntt selftest: ok");
@@ -2346,6 +2947,9 @@ static int wait_event(SDL_Event *e, int ms) {
 
 int main(int argc, char **argv) {
     const char *path = NULL, *shot = NULL, *fwopt = NULL, *features = NULL;
+    self_exe_init(argv[0]);
+    int do_show = 0, show_jit = 0;
+    const char *show_out = NULL;
     int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, pace_opt = PACE_AUTO;
     const char *inst_opt = NULL;
     double seconds = 1.0;
@@ -2367,6 +2971,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-jit")) no_jit = 1;
         else if (!strcmp(argv[i], "--pin")) pin_opt = 1;
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
+        else if (!strcmp(argv[i], "--showcase")) do_show = 1;
+        else if (!strcmp(argv[i], "--jit")) show_jit = 1;
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) show_out = argv[++i];
         else if (!strcmp(argv[i], "--features") && i + 1 < argc) features = argv[++i];
         else if (!strcmp(argv[i], "--no-video")) no_video = 1;
         else if (!strcmp(argv[i], "--reduced-motion")) setenv("FM1NTT_REDUCED_MOTION", "1", 1);
@@ -2398,6 +3005,15 @@ int main(int argc, char **argv) {
         int rc = bench_run(NULL, seconds, fw, raw || (fw && has_ext(fw, ".bin")), res, sizeof res);
         printf("%s\n", res);
         return rc == 0 ? 0 : 1;
+    }
+    if (do_show) {                                       /* the headless showcase (host/showcase.h): no window, no SDL, its own machine */
+        if (!path) { fprintf(stderr, "fm1ntt --showcase: give a firmware\n"); return 2; }
+        char base[300], res[240];
+        if (show_out) snprintf(base, sizeof base, "%s", show_out); else base_dir(base, sizeof base);
+        const char *bs = getenv("FM1NTT_SHOWCASE_BUDGET_S");
+        int rc = showcase_run(path, raw || has_ext(path, ".bin"), entry, show_jit, base, bs ? atof(bs) : 0, res, sizeof res);
+        printf("%s\n", res);
+        return rc;
     }
     if (do_demo) {
         int bad = 0;
@@ -2501,6 +3117,7 @@ int main(int argc, char **argv) {
         rec_pump(&a);
         speed_tick(&a);
         if (job_poll(&a)) dirty = 1;
+        { double nd = (double)SDL_GetTicks(); if (show_poll(&a, nd)) dirty = 1; show_queue(&a, nd); }
         {   /* MONITOR: nothing runs unless the panel shows; one sample a second while it does (monitor.h) */
             double nowm = (double)SDL_GetTicks(), before_ms = a.mon.last_ms;
             int mon_on = a.panel == PANEL_MONITOR;
@@ -2539,8 +3156,8 @@ int main(int argc, char **argv) {
         uint32_t now = SDL_GetTicks();
         /* Redraw rates (audio comes first, and a repaint costs ~3.5 ms of the unit's time and a lock on the audio): the firmware's screen at most 15 times a
          * second, the panels and the clock 5 times (the SOUND meters 10), and at once for anything the person did. */
-        uint32_t panel_ms = a.panel == PANEL_SOUND ? 100 : a.panel == PANEL_MONITOR ? 1000 : a.job ? 250 : 200;       /* a job's progress box moves 4 times a second: the report measures idle while it shows */
-        if (dirty || (rev != a.rev && now - last_draw >= 60) || ((fm1ntt_loaded(a.m) || a.job) && now - last_draw > panel_ms)) {
+        uint32_t panel_ms = a.pl.on ? 100 : (a.sw_pid && a.panel == PANEL_FILES) ? 500 : a.panel == PANEL_SOUND ? 100 : a.panel == PANEL_MONITOR ? 1000 : a.job ? 250 : 200;       /* a job's progress box moves 4 times a second: the report measures idle while it shows */
+        if (dirty || (rev != a.rev && now - last_draw >= 60) || ((fm1ntt_loaded(a.m) || a.job || a.pl.on || (a.sw_pid && a.panel == PANEL_FILES)) && now - last_draw > panel_ms)) {
             uint32_t t0 = SDL_GetTicks();
             int by_input = dirty;
             fill_ui(&a, &u, 1);
@@ -2562,6 +3179,8 @@ int main(int argc, char **argv) {
         }
     }
     rec_stop(&a);
+    show_shutdown(&a);
+    player_stop(&a);
     if (a.job) SDL_WaitThread(a.job, NULL);
     if (a.dev) SDL_CloseAudioDevice(a.dev);
     free(a.rec_ring);

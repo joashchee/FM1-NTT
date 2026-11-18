@@ -208,6 +208,13 @@ typedef struct {
     MonView mon;
     MonRain rain;
     int mon_page, mon_paused, rain_on, rain_full, rain_still;
+    /* the firmware showcase (showcase.h): the demo being made (a box on FILES), the firmware's own page, and the demo playing */
+    char demo_run[PX_NAME];             /* the firmware a background demo is being made of, "" when none */
+    int demo_pct, demo_secs, demo_paused;
+    int info_on;                        /* the page of the picked firmware replaces the list */
+    char info_name[PX_NAME], info_tier[40], info_licence[104], info_source[124], info_sha[65], info_demo[104];
+    int info_demo_kind, info_pct, info_busy, info_can_play;   /* kind: 0 none yet, 1 being made, 2 ready, 3 failed; busy: a demo of THIS firmware is being made */
+    int playing;
 } UiState;
 
 static inline void px_box(uint32_t *c, PxRect r, const char *title) {
@@ -300,7 +307,7 @@ static inline void px_carousel(uint32_t *c, int mode, int cur) {
 /* What the buttons do, per panel: the area below the FM-1's screen in Standard. */
 static const char *const PX_HINTS[PANEL_COUNT][9] = {
     {"PAD ON MACHINE", "D-PAD A B X Y  NOTES", "SELECT START  OCT- OCT+", "STICKS  KNOBS 1-4", "L1  OP1-6 PIT GLO MONO POLY", "L1 STICKS MASTER PRESETS...", "L2  FX HOME SAVE ENV ARP SEQ", "R2  GLO EDIT PLAY REC", "L1+R1  MENU   FN  PANELS"},
-    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  BOOT THE FILE", "X  RESCAN THE FOLDER", "LAST ROW  QUIT", "", "", ""},
+    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "LAST ROW  QUIT", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO", "Y  MAKE OR STOP IT  B BACK"},
     {"BOTH CORES", "UP DOWN  CORE 0 1", "LEFT RIGHT  CORE 0 1", "", "", "", "", "", ""},
     {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
@@ -366,9 +373,41 @@ static inline void px_panel_machine(uint32_t *c, PxRect r, const UiState *u, int
     }
 }
 
+/* The firmware's own page: what it is, where it came from, its demo; then what the buttons do. Whole page, nothing scrolls, and it names no file of the app's own. */
+static inline void px_panel_info(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    int x = r.x + 10, w = r.w - 20, y = r.y + 14;
+    px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, narrow ? 330 : 290}, "FIRMWARE");
+    px_wrap(c, x, y, u->info_name, C_TEXT, w, 2);
+    y += narrow ? 22 : 12;
+    px_text(c, x, y, "TIER", C_HEAD, 1, 0);
+    if (narrow) { px_wrap(c, x, y + 10, u->info_tier, C_TEXT, w, 2); y += 34; }
+    else { px_text(c, x + 42, y, u->info_tier, C_TEXT, 1, w - 42); y += 14; }
+    px_text(c, x, y, "LICENCE", C_HEAD, 1, 0);
+    px_wrap(c, x, y + 10, u->info_licence, C_TEXT, w, 3);
+    y += 44;
+    px_text(c, x, y, "SOURCE", C_HEAD, 1, 0);
+    px_wrap(c, x, y + 10, u->info_source, C_TEXT, w, 4);
+    y += narrow ? 54 : 44;
+    px_text(c, x, y, "SHA-256", C_HEAD, 1, 0);
+    char half[40];
+    for (int k = 0; k < 2; k++) { snprintf(half, sizeof half, "%.32s", u->info_sha[0] ? u->info_sha + k * 32 : "-"); px_text(c, x, y + 10 + k * 10, narrow ? "" : half, C_DIM, 1, w); }
+    if (narrow) { for (int k = 0; k < 4; k++) { snprintf(half, sizeof half, "%.16s", u->info_sha[0] ? u->info_sha + k * 16 : "-"); px_text(c, x, y + 10 + k * 10, half, C_DIM, 1, w); } y += 20; }
+    y += 36;
+    px_text(c, x, y, "DEMO", C_HEAD, 1, 0);
+    uint32_t col = u->info_demo_kind == 2 ? C_OK : u->info_demo_kind == 3 ? C_ERR : u->info_demo_kind == 1 ? C_HEAD : C_DIM;
+    px_wrap(c, x, y + 10, u->info_demo, col, w, 4);
+    if (u->info_demo_kind == 1) px_meter(c, (PxRect){x, y + 44, w, 8}, u->info_pct, C_HEAD);
+    PxRect b = {r.x + 4, r.y + (narrow ? 346 : 306), r.w - 8, 48};
+    px_box(c, b, NULL);
+    px_text(c, x, b.y + 8, "A  LOAD IT", C_TEXT, 1, w);
+    px_text(c, x, b.y + 19, u->info_can_play ? "X  PLAY THE DEMO" : "X  NO DEMO YET", u->info_can_play ? C_TEXT : C_DIM, 1, w);
+    px_text(c, x, b.y + 30, u->info_busy ? "Y  STOP MAKING THE DEMO" : "Y  MAKE THE DEMO NOW", C_TEXT, 1, w);
+}
+
 static inline void px_panel_files(uint32_t *c, PxRect r, const UiState *u, int narrow) {
     char line[96];
-    int x = r.x + 10, w = r.w - 20, per = narrow ? 20 : 24;
+    int x = r.x + 10, w = r.w - 20, per = narrow ? 20 : 22;
+    if (u->info_on) { px_panel_info(c, r, u, narrow); return; }
     px_box(c, (PxRect){r.x + 4, r.y + 8, r.w - 8, 28}, "FOLDER");
     px_text(c, x, r.y + 20, u->file_dir, C_DIM, 1, w);
     int page = 0, pages;
@@ -391,6 +430,14 @@ static inline void px_panel_files(uint32_t *c, PxRect r, const UiState *u, int n
     snprintf(line, sizeof line, "BOARD %s", u->fw_board && u->fw_board[0] ? u->fw_board : "-");
     px_text(c, x, by + 24, line, C_DIM, 1, w);
     px_wrap(c, x, by + 36, u->msg ? u->msg : "", px_style(u->msg_style), w, 2);
+    if (u->demo_run[0]) {                              /* a demo is being made in the background: step, bar, time (it is paused while you play) */
+        PxRect b = {r.x + 4, by + 62, r.w - 8, 46};
+        px_box(c, b, u->demo_paused ? "MAKING A DEMO (PAUSED)" : "MAKING A DEMO");
+        px_text(c, x, b.y + 10, u->demo_run, C_TEXT, 1, w);
+        px_meter(c, (PxRect){x, b.y + 22, w, 8}, u->demo_pct, C_HEAD);
+        snprintf(line, sizeof line, "%d%%  %ds", u->demo_pct, u->demo_secs);
+        px_text(c, x, b.y + 33, line, u->demo_paused ? C_WARN : C_DIM, 1, w);
+    }
 }
 
 static inline void px_regs(uint32_t *c, int x, int y, const PxCpu *p, int cols, int colw) {

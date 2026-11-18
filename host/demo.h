@@ -29,7 +29,7 @@ static const Hero HEROES[] = {
 #define DEMO_AUDIO_FRAMES (FM1_SAMPLE_RATE / DEMO_FPS)       /* 1470 */
 /* The tour's length in frames, measured by the self-test (which fails when it is out of date): the splash and the end, then each feature. */
 #define DEMO_FRAMES_BASE 120
-static const int DEMO_FRAMES_FEATURE[NHERO] = {394, 100, 122, 264, 303};
+static const int DEMO_FRAMES_FEATURE[NHERO] = {394, 100, 122, 264, 335};
 
 static volatile sig_atomic_t g_cancel;
 static void on_signal(int s) { (void)s; g_cancel = 1; }
@@ -249,7 +249,10 @@ static void tour(Rec *r) {
         rec_place(r, PANEL_FILES, MODE_STANDARD);
         rec_hold(r, 30, 1);
         rec_shot(r, "files");
-        rec_press(r, 1, 8);                                                  /* A on the first file: boot it */
+        rec_press(r, 1, 8);                                                  /* A on the first file: its page */
+        rec_hold(r, 20, 1);
+        rec_shot(r, "files-page");
+        rec_press(r, 1, 8);                                                  /* A again: load it */
         rec_cap(r, 4, "booted the firmware from the FILES panel");
         rec_hold(r, 30, 1);
     }

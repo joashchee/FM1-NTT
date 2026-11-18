@@ -40,6 +40,8 @@ r36s/build-deb.sh             # build/pkg/FM1-NTT.deb for the R36S (Docker)
 
 ## Panels and controls
 
+**FILES:** A on a firmware opens its page (licence, source, SHA-256, its demo), where A loads it, X plays its 15 s demo and Y makes it; TOOLS > BACKGROUND DEMOS makes the missing demos in the background at the lowest priority (`docs/SHOWCASE.md`).
+
 **Fn** (Home / End on a keyboard) turns the panel carousel: MACHINE, FILES, CPU, MEMORY, CONSOLE, MIDI, SOUND, MONITOR, TOOLS. **MONITOR** is a `top` for the machine the app runs on (CPU per core, memory, processes, this app's threads, battery; L2 R2 pages, X sorts, Y freezes; `docs/MONITOR.md`); it costs nothing while another panel is showing, and TOOLS > DATA RAIN adds an opt-in stream of the data passing through. **L1 + R1** together open the menu
 (TOOLS) and close it again. **Tab / F1** toggles Standard and Zoomed (2x). **Start** (P) pauses on every panel but MACHINE.
 
