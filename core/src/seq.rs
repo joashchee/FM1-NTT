@@ -97,7 +97,7 @@ impl Seq {
             ID_VOICE => Some(self.voice[pat]),
             ID_STEP..=ID_LAST => {
                 let k = (id - ID_STEP) as usize;
-                Some(if k % 2 == 0 { i32::from(self.notes[pat][k / 2]) } else { i32::from(self.vels[pat][k / 2]) })
+                Some(if k & 1 == 0 { i32::from(self.notes[pat][k / 2]) } else { i32::from(self.vels[pat][k / 2]) })
             }
             _ => None,
         }
@@ -123,7 +123,7 @@ impl Seq {
             ID_VOICE => self.voice[pat] = value.clamp(-1, 255),
             ID_STEP..=ID_LAST => {
                 let k = (id - ID_STEP) as usize;
-                if k % 2 == 0 {
+                if k & 1 == 0 {
                     self.notes[pat][k / 2] = value.clamp(0, 127) as u8;
                 } else {
                     self.vels[pat][k / 2] = value.clamp(1, 127) as u8;
@@ -274,7 +274,7 @@ impl Seq {
                 self.step_at = 0;
                 self.chain_at = (self.chain_at + 1) % chain;
             }
-            self.to_next += if k % 2 == 0 { step_len * (1.0 + swing) } else { step_len * (1.0 - swing) };
+            self.to_next += if k & 1 == 0 { step_len * (1.0 + swing) } else { step_len * (1.0 - swing) };
         }
     }
 }
