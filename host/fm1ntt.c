@@ -3226,7 +3226,7 @@ static int selftest(void) {
                     a.ed_sel = 30; fill_ui(&a, ui, 0); CHECK(ui->ed_page == 1 && ui->ed_n == 9 && ui->ed_sel == 6);   /* the second page holds the last 9 rows */
                     act(&a, A_R2); CHECK(a.ed_group == 4);                                       /* the global settings: channels, bend range, velocity, mono */
                     fill_ui(&a, ui, 0);
-                    CHECK(ui->ed_total == 6 && !strcmp(ui->ed_title, "GLOBAL") && ui->ed_row[2].max == 24);
+                    CHECK(ui->ed_total == 7 && !strcmp(ui->ed_title, "GLOBAL") && ui->ed_row[2].max == 24);
                     a.ed_sel = 2; act(&a, A_RIGHT); CHECK(fm1ntt_inst_global_get(a.inst, 2) == 3 && a.ed_dirty);   /* BEND RANGE 2 to 3 */
                     a.ed_group = 3; a.ed_sel = 1; act(&a, A_X); CHECK(fm1ntt_inst_seq_get(a.inst, 101) == 0);
                     act(&a, A_L2); act(&a, A_L2); act(&a, A_L2); CHECK(a.ed_group == 0);

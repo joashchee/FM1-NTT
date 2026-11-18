@@ -12,7 +12,7 @@ use crate::{
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
     fx::{self, Effect, Limiter},
-    globals::{Globals, Route, G_BEND, G_FX_CHANNEL, G_MONO, G_STOCK_CC},
+    globals::{Globals, Route, G_BEND, G_FX_CHANNEL, G_GLIDE, G_MONO, G_STOCK_CC},
     package::{Package, Target},
     sampler::{parse_wav, Kit},
     Error, Result,
@@ -285,6 +285,7 @@ impl Instrument {
         match id {
             G_BEND => self.engine.bend_range(self.globals.get(G_BEND).unwrap_or(2)),
             G_MONO => self.all_off(),
+            G_GLIDE => self.engine.glide(self.globals.get(G_GLIDE).unwrap_or(0)),
             _ => {}
         }
         true
@@ -1119,7 +1120,7 @@ mod tests {
 #[cfg(test)]
 mod tests_globals {
     use super::*;
-    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_STOCK_CC, G_VELOCITY};
+    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_GLIDE, G_STOCK_CC, G_VELOCITY};
 
     fn none(_: &str) -> Option<Vec<u8>> {
         None
@@ -1376,6 +1377,30 @@ mod tests_globals {
         j.set_global(G_STOCK_CC, 1);
         j.midi_bytes(&[0xB1, 2, 50, 0xB1, 0, 0, 0xB1, 11, 70]);
         assert_eq!(j.get_fx_param(0, 2), Some(70));
+    }
+
+    #[test]
+    fn glide_is_a_setting_that_reaches_the_engine_and_the_package() {
+        let mut i = analog();
+        assert_eq!(i.get_global(G_GLIDE), Some(0));
+        assert!(i.set_global(G_GLIDE, 250) && i.get_global(G_GLIDE) == Some(250));
+        assert!(i.set_global(G_GLIDE, 99_999) && i.get_global(G_GLIDE) == Some(2000), "clamped");
+        i.set_global(G_GLIDE, 400);
+        let back = Instrument::from_package(&Package::parse(&i.to_package("", "").to_text()).unwrap(), 44_100.0, &none).unwrap();
+        assert_eq!(back.get_global(G_GLIDE), Some(400));
+        // it reaches the engine: with glide the second note does not start at its own pitch
+        let count = |glide: i32| {
+            let mut m = analog();
+            m.set_global(G_GLIDE, glide);
+            m.note_on(45, 100);
+            run(&mut m, 2000);
+            m.note_off(45);
+            run(&mut m, 2000);
+            m.note_on(81, 100);
+            let x = run(&mut m, 4096);
+            x.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count()
+        };
+        assert!(count(600) + 15 < count(0), "{} against {}: a slide upward has fewer cycles", count(600), count(0));
     }
 
     #[test]

@@ -51,6 +51,8 @@ struct Voice {
     held: bool,
     age: u64,
     f0: f64,
+    /// where the pitch is going (`f0` slides to it when glide is on)
+    tf0: f64,
     ph: [f64; 2],
     tri: [f64; 2],
     env: f64,
@@ -61,7 +63,7 @@ struct Voice {
     co: [f64; 3],
 }
 
-const IDLE: Voice = Voice { stage: Stage::Idle, note: 0, held: false, age: 0, f0: 0.0, ph: [0.0; 2], tri: [0.0; 2], env: 0.0, gain: 0.0, ic1: 0.0, ic2: 0.0, co: [0.0; 3] };
+const IDLE: Voice = Voice { stage: Stage::Idle, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, ph: [0.0; 2], tri: [0.0; 2], env: 0.0, gain: 0.0, ic1: 0.0, ic2: 0.0, co: [0.0; 3] };
 
 pub struct Analog {
     rate: f64,
@@ -71,6 +73,9 @@ pub struct Analog {
     bend: f64,
     bend_raw: i32,
     bend_semis: f64,
+    /// portamento time in ms (0 off), and the pitch of the last note started
+    glide_ms: i32,
+    last_f0: f64,
 }
 
 fn poly_blep(t: f64, dt: f64) -> f64 {
@@ -92,7 +97,7 @@ impl Analog {
         for (i, d) in DESC.iter().enumerate() {
             p[i] = d.3;
         }
-        Analog { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0 }
+        Analog { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, glide_ms: 0, last_f0: 0.0 }
     }
 
     fn osc(&mut self, vi: usize, k: usize, ratio: f64) -> f64 {
@@ -159,7 +164,9 @@ impl Engine for Analog {
         let f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
         // a velocity law of its own: 0.2 to 1.0, convex
         let gain = 0.2 + 0.8 * (velocity.min(127) as f64 / 127.0).powf(1.5);
-        self.voices[i] = Voice { stage: Stage::Attack, note, held: true, age: self.clock, f0, ph: [0.0, 0.0], tri: [0.0; 2], env: 0.0, gain, ic1: 0.0, ic2: 0.0, co: [0.0; 3] };
+        let start = if self.glide_ms > 0 && self.last_f0 > 0.0 { self.last_f0 } else { f0 };
+        self.last_f0 = f0;
+        self.voices[i] = Voice { stage: Stage::Attack, note, held: true, age: self.clock, f0: start, tf0: f0, ph: [0.0, 0.0], tri: [0.0; 2], env: 0.0, gain, ic1: 0.0, ic2: 0.0, co: [0.0; 3] };
     }
 
     fn note_off(&mut self, note: u8) {
@@ -178,6 +185,10 @@ impl Engine for Analog {
                 v.stage = Stage::Release;
             }
         }
+    }
+
+    fn glide(&mut self, ms: i32) {
+        self.glide_ms = ms.clamp(0, 5000);
     }
 
     fn bend_range(&mut self, semitones: i32) {
@@ -204,6 +215,8 @@ impl Engine for Analog {
         let live = self.voices.iter().filter(|v| v.stage != Stage::Idle).count().max(1);
         let poly = if live > 4 { (4.0 / live as f64).sqrt() } else { 1.0 };
         let bend = self.bend;
+        // the pitch slides in the log domain, 99% of the way in the glide time (done every eighth sample: a pitch moves slowly against that)
+        let slide = if self.glide_ms > 0 { (-4.6 * 8.0 / (f64::from(self.glide_ms) * 0.001 * rate)).exp() } else { 0.0 };
         for (n, o) in out.iter_mut().enumerate() {
             let refresh = n & 7 == 0;
             let mut acc = 0.0;
@@ -232,6 +245,15 @@ impl Engine for Analog {
                             }
                         }
                         Stage::Idle => continue,
+                    }
+                }
+                if refresh {
+                    let v = &mut self.voices[i];
+                    if v.f0 != v.tf0 {
+                        v.f0 = if slide == 0.0 { v.tf0 } else { v.tf0 * (v.f0 / v.tf0).powf(slide) };
+                        if (v.f0 / v.tf0 - 1.0).abs() < 1e-5 {
+                            v.f0 = v.tf0;
+                        }
                     }
                 }
                 let f0 = self.voices[i].f0;
@@ -270,6 +292,62 @@ mod tests {
 
     fn peak(x: &[i16]) -> u16 {
         x.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0)
+    }
+
+    /// The frequency of a sine from its rising zero crossings over `x`.
+    fn hz(x: &[i16]) -> f64 {
+        let n = x.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count();
+        n as f64 * 44_100.0 / x.len() as f64
+    }
+
+    fn sine() -> Analog {
+        let mut a = Analog::new(44_100.0);
+        for (id, v) in [(P_WAVE, 3), (P_ATTACK, 1), (P_RELEASE, 1), (P_SUSTAIN, 99), (P_DETUNE, 0), (P_CUTOFF, 127), (P_LEVEL, 100)] {
+            a.set(id, v);
+        }
+        a
+    }
+
+    #[test]
+    fn glide_slides_from_the_last_note_to_the_next() {
+        let play = |ms: i32| {
+            let mut a = sine();
+            a.glide(ms);
+            let mut buf = vec![0i16; 4410];
+            a.note_on(57, 100); // 220 Hz
+            a.render(&mut buf);
+            a.note_off(57);
+            a.render(&mut buf);
+            a.note_on(69, 100); // 440 Hz
+            let mut out = vec![0i16; 22_050];
+            a.render(&mut out);
+            out
+        };
+        let none = play(0);
+        assert!((hz(&none[2048..8192]) - 440.0).abs() < 10.0, "no glide: the new pitch at once, {}", hz(&none[2048..8192]));
+        let g = play(300);
+        let early = hz(&g[1024..3072]);
+        assert!(early > 235.0 && early < 400.0, "part way up: {early}");
+        let mid = hz(&g[6000..8048]);
+        assert!(mid > early + 20.0 && mid < 440.0, "still rising: {early} then {mid}");
+        let late = hz(&g[14_000..22_050]);
+        assert!((late - 440.0).abs() < 9.0, "arrived: {late}");
+        // the first note ever has nothing to slide from
+        let mut a = sine();
+        a.glide(500);
+        a.note_on(69, 100);
+        let mut out = vec![0i16; 4096];
+        a.render(&mut out);
+        assert!((hz(&out[512..4096]) - 440.0).abs() < 14.0, "first note: {}", hz(&out[512..4096]));
+        // down as well as up, and a huge value is clamped, not trusted
+        let mut a = sine();
+        a.glide(i32::MAX);
+        a.note_on(81, 100);
+        a.note_off(81);
+        a.note_on(45, 100);
+        let mut out = vec![0i16; 2048];
+        a.render(&mut out);
+        assert!(out.iter().any(|&v| v != 0));
     }
 
     #[test]

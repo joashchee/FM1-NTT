@@ -39,6 +39,8 @@ pub trait Engine {
     fn pitch_bend(&mut self, _value: i32) {}
     /// The wheel's range in semitones either way (the instrument's BEND RANGE); engines that cannot change it keep their own.
     fn bend_range(&mut self, _semitones: i32) {}
+    /// Portamento: a new note starts at the pitch of the last one and slides to its own in about this many milliseconds (0 off). Engines that cannot slide ignore it.
+    fn glide(&mut self, _ms: i32) {}
     /// Replaces `out` with mono samples.
     fn render(&mut self, out: &mut [i16]);
     fn sounding(&self) -> usize;

@@ -1,6 +1,6 @@
 //! The instrument's global settings, what the FM-1 keeps outside a voice: the MIDI channel, the effect channel, the pitch-bend range, a fixed velocity and mono mode
 //! (docs/HARDWARE.md, docs/FM-1-MIDI.md). Described like an engine's parameters (`ParamDesc`) so the editor and a package reach them the same way. Pure data: the
-//! instrument host (`instrument.rs`) applies them. Glide is not here: no engine can slide its pitch yet.
+//! instrument host (`instrument.rs`) applies them. Glide slides only in `analog` (the other engines ignore it).
 
 use crate::engine::ParamDesc;
 
@@ -17,7 +17,9 @@ pub const G_MONO: u16 = 4;
 /// 0 off, 1 on: controllers 0 to 23 on the effect channel are the stock FM-1's six effects (`stockmap.rs`) and no longer go through the package's map. Notes and other
 /// controllers are unchanged.
 pub const G_STOCK_CC: u16 = 5;
-pub const G_COUNT: usize = 6;
+/// Portamento in milliseconds, 0 off: a new note slides from the last one's pitch. Only engines that can slide do (`analog`); the others ignore it.
+pub const G_GLIDE: u16 = 6;
+pub const G_COUNT: usize = 7;
 
 /// name, min, max, default, unit
 const DESC: [(&str, i32, i32, i32, &str); G_COUNT] = [
@@ -27,6 +29,7 @@ const DESC: [(&str, i32, i32, i32, &str); G_COUNT] = [
     ("FIXED VELOCITY (0 OFF)", 0, 127, 0, ""),
     ("MONO", 0, 1, 0, ""),
     ("STOCK EFFECT CCS", 0, 1, 0, ""),
+    ("GLIDE (0 OFF)", 0, 2000, 0, "ms"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

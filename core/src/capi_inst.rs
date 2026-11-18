@@ -787,7 +787,7 @@ mod tests {
             assert_eq!((fm1ntt_inst_seq_set(h, 101, 62), fm1ntt_inst_seq_get(h, 101)), (0, 62));
             assert_eq!((fm1ntt_inst_seq_set(h, 55, 1), fm1ntt_inst_seq_get(h, 55)), (-1, i32::MIN));
             assert_eq!(fm1ntt_inst_seq_set(h, 101, 0), 0);
-            assert_eq!(fm1ntt_inst_global_count(h), 6);
+            assert_eq!(fm1ntt_inst_global_count(h), 7);
             let mut gi = [0i32; 4];
             let mut gn = [0 as c_char; 40];
             assert_eq!(fm1ntt_inst_global_param(h, 2, gi.as_mut_ptr(), gn.as_mut_ptr(), 40), 0);
