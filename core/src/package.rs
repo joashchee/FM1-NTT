@@ -1,4 +1,4 @@
-//! The instrument package (`.ntt`): data, never code (docs/PORTING.md). A text file of `key = value` lines.
+//! The instrument package (`.fm1i`): data, never code (docs/PORTING.md). A text file of `key = value` lines.
 //!
 //! Bounded and strict: at most 1 MiB, 4096 lines, 256 voices, 64 samples, 64 effects, 128 map entries; an unknown key, a bad number or a missing licence is an `Error`.
 //! No dependency: the SHA-256 and the parser are here.
@@ -191,7 +191,7 @@ impl Package {
     /// The package as text. Values are one line each (a line break in a value becomes a space).
     pub fn to_text(&self) -> String {
         let one = |s: &str| s.replace(['\n', '\r'], " ");
-        let mut t = String::from("ntt = 1\n");
+        let mut t = String::from("fm1i = 1\n");
         t += &format!("name = {}\nengine = {}\nlicence = {}\n", one(&self.name), one(&self.engine), one(&self.licence));
         if !self.source.is_empty() {
             t += &format!("source = {}\n", one(&self.source));
@@ -258,8 +258,8 @@ impl Package {
             let key = kw.next().unwrap_or("");
             let num = |s: &str| -> Result<i32> { s.parse::<i32>().or_else(|_| bad(format!("line {at}: {s:?} is not a number"))) };
             if !seen_header {
-                if key != "ntt" || v != "1" {
-                    return bad("the first line must be `ntt = 1`");
+                if key != "fm1i" || v != "1" {
+                    return bad("the first line must be `fm1i = 1`");
                 }
                 seen_header = true;
                 continue;
@@ -425,6 +425,7 @@ mod tests {
     fn refuses_bad_packages() {
         let good = sample_package().to_text();
         assert!(Package::parse("").is_err());
+        assert!(Package::parse("ntt = 1\nengine = fm6\nlicence = MIT\n").is_err(), "a Neumetik .ntt header is not ours");
         assert!(Package::parse("name = x\n").is_err(), "no header");
         assert!(Package::parse(&good.replace("licence = GPL-3.0-only\n", "")).is_err(), "no licence");
         assert!(Package::parse(&good.replace("GPL-3.0-only", "AGPL-3.0-only")).is_err());
@@ -434,16 +435,16 @@ mod tests {
         assert!(Package::parse(&format!("{good}sample 40 = ../../etc/passwd\n")).is_err());
         assert!(Package::parse(&format!("{good}sample 40 = /abs.wav\n")).is_err());
         assert!(Package::parse(&format!("{good}map cc 300 = e1 0 1\n")).is_err());
-        assert!(Package::parse("ntt = 1\nengine = fm6\nlicence = MIT\nfxparam 0 = 1\n").is_err());
+        assert!(Package::parse("fm1i = 1\nengine = fm6\nlicence = MIT\nfxparam 0 = 1\n").is_err());
         let many = "voice = ".to_string() + &"00".repeat(128) + "\n";
-        assert!(Package::parse(&format!("ntt = 1\nengine = fm6\nlicence = MIT\n{}", many.repeat(257))).is_err());
+        assert!(Package::parse(&format!("fm1i = 1\nengine = fm6\nlicence = MIT\n{}", many.repeat(257))).is_err());
         assert!(Package::parse(&"x".repeat(MAX_BYTES + 1)).is_err());
         assert!(Package::parse(&format!("{good}{}", "# c\n".repeat(5000))).is_err(), "too many lines");
     }
 
     #[test]
     fn comments_blank_lines_and_program_clamp() {
-        let t = "# hi\nntt = 1\n\nengine = analog\nlicence = MIT\nprogram = 9\n";
+        let t = "# hi\nfm1i = 1\n\nengine = analog\nlicence = MIT\nprogram = 9\n";
         let p = Package::parse(t).unwrap();
         assert_eq!(p.engine, "analog");
         assert_eq!(p.program, 0, "past the bank: back to 0");

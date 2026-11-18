@@ -1,4 +1,4 @@
-//! The C face of the instrument host (`fm1ntt.h`, docs/PORTING.md): load a package (`.ntt` text), play it from MIDI bytes or notes, edit its parameters, write it back.
+//! The C face of the instrument host (`fm1ntt.h`, docs/PORTING.md): load a package (`.fm1i` text), play it from MIDI bytes or notes, edit its parameters, write it back.
 //! Every function tolerates null, reads only what its length says, bounds every size, and never unwinds. A failure says why in `fm1ntt_error`.
 
 use crate::capi::set_error;
@@ -360,7 +360,7 @@ mod tests {
             assert!(fm1ntt_inst_load(std::ptr::null(), 0, 44_100.0, None, std::ptr::null_mut()).is_null());
             assert!(fm1ntt_inst_load(b"junk".as_ptr(), 4, 44_100.0, None, std::ptr::null_mut()).is_null());
             assert!(fm1ntt_inst_load([0xffu8, 0xfe].as_ptr(), 2, 44_100.0, None, std::ptr::null_mut()).is_null());
-            let (gpl, agpl) = ("ntt = 1\nengine = fm6\nlicence = GPL-3.0-only\n", "ntt = 1\nengine = fm6\nlicence = AGPL-3.0-only\n");
+            let (gpl, agpl) = ("fm1i = 1\nengine = fm6\nlicence = GPL-3.0-only\n", "fm1i = 1\nengine = fm6\nlicence = AGPL-3.0-only\n");
             assert_eq!(fm1ntt_package_tier(gpl.as_ptr(), gpl.len()), 1);
             assert_eq!(fm1ntt_package_tier(agpl.as_ptr(), agpl.len()), -1);
             let mut hex = [0 as c_char; 65];

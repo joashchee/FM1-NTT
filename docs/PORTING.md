@@ -34,13 +34,15 @@ R36S: the instrument host loads the package, plays it (pad, keys, USB MIDI), and
 A level-C firmware is either reimplemented as a named native engine (written from what it is measured to do, never from GPL source) or stays
 **emulator-only: not live on the R36S**. `port` says which, and why.
 
-## The instrument package (`.ntt`)
+## The instrument package (`.fm1i`)
+
+The extension is `.fm1i` (FM-1 instrument) and the first line is `fm1i = 1`. It was `.ntt` for a day, which is Neumetik's tracker format (renamed 2026-11-18); `.fmi` (FME, FMTracker, Garmin), `.fm1` (Lotus 1-2-3) and `.inst` (used in the sister apps) were also avoided. A Neumetik `.ntt` file is refused with a message, never mistaken for a package.
 
 A text file, one `key = value` per line, `#` comments. **Data, never code.** No parser dependency (rule 4): the
 reader is `core/src/package.rs`, bounded (1 MiB, 4096 lines, 256 voices, 64 effects, 128 map entries) and an `Error` on anything else.
 
 ```
-ntt = 1
+fm1i = 1
 name = Felucca factory
 engine = fm6
 licence = GPL-3.0-only
@@ -81,7 +83,7 @@ and the modulation matrix are generic over them, so a new engine gets an editor 
 
 The shared effects (`core/src/fx.rs`): limiter, delay, low-pass, chorus, reverb.
 
-In the app, `fm1ntt --instrument FILE.ntt` loads a package into the SOUND preview (Solo when no firmware is given); the C API is `fm1ntt_inst_*`.
+In the app, `fm1ntt --instrument FILE.fm1i` loads a package into the SOUND preview (Solo when no firmware is given); the C API is `fm1ntt_inst_*`.
 
 ## The instrument host (`core/src/instrument.rs`)
 

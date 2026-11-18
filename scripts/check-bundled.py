@@ -136,13 +136,13 @@ def stray_firmware(repo, listed, problems, hint):
 
 
 def ntt_problems(root, hint, skip_pack_repo=True):
-    """Instrument packages (`*.ntt`, docs/PORTING.md) carry their source's licence on a `licence =` line. In the MIT app's repository or a build, only the permissive allowlist
+    """Instrument packages (`*.fm1i`, docs/PORTING.md) carry their source's licence on a `licence =` line. In the MIT app's repository or a build, only the permissive allowlist
     is allowed: a port of a GPL firmware is that firmware's data and belongs in the Pack repository."""
     problems = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not (skip_pack_repo and d == PACK_REPO_NAME)]
         for name in filenames:
-            if not name.endswith(".ntt"):
+            if not name.endswith(".fm1i"):
                 continue
             p = os.path.join(dirpath, name)
             lic = None

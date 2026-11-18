@@ -1,5 +1,5 @@
-//! `port FIRMWARE.fwsc --licence EXPR [--felucca-sweep N] [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify [--program P] [--voice I] [--channel C] [--note N] [--vel V]] [--out FILE.ntt]`
-//! `port --check PACKAGE.ntt`
+//! `port FIRMWARE.fwsc --licence EXPR [--felucca-sweep N] [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify [--program P] [--voice I] [--channel C] [--note N] [--vel V]] [--out FILE.fm1i]`
+//! `port --check PACKAGE.fm1i`
 //!
 //! The porting tool (docs/PORTING.md): identify a firmware, make a level-A port (its DX7-style bank into the `fm6` engine) and optionally verify it against the
 //! emulator. `--licence` is the firmware's own, read from its licence files; the tier it prints says where the package may ship. A firmware with no bank is
@@ -87,7 +87,7 @@ fn main() -> ExitCode {
         i += 1;
     }
     let (Some(file), Some(licence)) = (file, licence) else {
-        eprintln!("usage: port FIRMWARE.fwsc --licence EXPR [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify ...] [--out FILE.ntt]\n       port --check PACKAGE.ntt");
+        eprintln!("usage: port FIRMWARE.fwsc --licence EXPR [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify ...] [--out FILE.fm1i]\n       port --check PACKAGE.fm1i");
         return ExitCode::from(2);
     };
     let bytes = match fs::read(&file) {
@@ -153,7 +153,7 @@ fn main() -> ExitCode {
     } else {
         println!("  unverified (run with --verify)");
     }
-    let out = out.unwrap_or_else(|| format!("{}.ntt", base.trim_end_matches(".fwsc")));
+    let out = out.unwrap_or_else(|| format!("{}.fm1i", base.trim_end_matches(".fwsc")));
     match write_atomic(&out, &pkg.to_text()) {
         Ok(()) => println!("wrote {out}"),
         Err(e) => {

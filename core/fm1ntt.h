@@ -89,7 +89,7 @@ void fm1ntt_kit_all_off(fm1ntt_kit *h);
 size_t fm1ntt_kit_render(fm1ntt_kit *h, int16_t *out, size_t frames);
 #endif
 
-/* The instrument host (core/src/capi_inst.rs, docs/PORTING.md): a package (.ntt text) played, edited and written back. Null-safe; failures say why in fm1ntt_error. */
+/* The instrument host (core/src/capi_inst.rs, docs/PORTING.md): a package (.fm1i text) played, edited and written back. Null-safe; failures say why in fm1ntt_error. */
 typedef struct InstHandle fm1ntt_inst;
 typedef int64_t (*fm1ntt_read_fn)(void *user, const char *name, uint8_t *buf, size_t cap);   /* a sample file for the loader: cap 0 asks the size; -1 when unreadable */
 fm1ntt_inst *fm1ntt_inst_load(const uint8_t *text, size_t len, double rate, fm1ntt_read_fn read, void *user);   /* NULL when not a package, the licence is off the allowlist, or the engine cannot be built */

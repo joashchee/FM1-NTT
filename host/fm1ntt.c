@@ -1545,9 +1545,9 @@ static int selftest(void) {
         CHECK(!a.pv_on && !a.pv_solo && a.pv_pad[3] == 0);
         /* an instrument package (docs/PORTING.md): loaded from a file, its notes reach the mix, Solo plays it alone, and a firmware's voices replace it */
         {
-            const char *pk = "ntt = 1\nname = Selftest\nengine = analog\nlicence = MIT\n";
+            const char *pk = "fm1i = 1\nname = Selftest\nengine = analog\nlicence = MIT\n";
             char ip[256];
-            snprintf(ip, sizeof ip, "%s/selftest-instrument.ntt", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+            snprintf(ip, sizeof ip, "%s/selftest-instrument.fm1i", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
             FILE *tf = fopen(ip, "wb");
             CHECK(tf != NULL);
             if (tf) {
@@ -1562,7 +1562,7 @@ static int selftest(void) {
                 long ie = 0; for (int i = 0; i < 2 * 2048; i++) ie += abs(io[i]);
                 CHECK(ie > 2048L * 50);
                 pv_note(&a, &a.pv_key[0], 60, 0);
-                CHECK(inst_load(&a, "/nonexistent/none.ntt") != 0 && a.inst != NULL && a.msg_style == 2);   /* a bad load keeps the instrument and says why */
+                CHECK(inst_load(&a, "/nonexistent/none.fm1i") != 0 && a.inst != NULL && a.msg_style == 2);   /* a bad load keeps the instrument and says why */
                 pv_set(&a, two, 2); CHECK(a.inst == NULL && a.pv != NULL);
                 remove(ip);
             }
@@ -1953,7 +1953,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!strcmp(argv[i], "--panel") && i + 1 < argc) panel = atoi(argv[++i]) % PANEL_COUNT;
         else if (!strcmp(argv[i], "--zoomed")) zoomed = 1;
-        else if (!strcmp(argv[i], "--instrument") && i + 1 < argc) inst_opt = argv[++i];   /* an instrument package (.ntt) for the SOUND preview, with Solo's engine-alone play when no firmware is given */
+        else if (!strcmp(argv[i], "--instrument") && i + 1 < argc) inst_opt = argv[++i];   /* an instrument package (.fm1i) for the SOUND preview, with Solo's engine-alone play when no firmware is given */
         else if (!strcmp(argv[i], "--preview")) preview_opt = 1;   /* the SOUND preview on from the start (a screenshot shows it playing) */
         else if (!strcmp(argv[i], "--report")) do_report = 1;
         else if (!strcmp(argv[i], "--bench")) do_bench = 1;
