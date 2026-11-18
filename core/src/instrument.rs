@@ -6,6 +6,7 @@
 
 use crate::{
     analog::Analog,
+    fm4::Fm4,
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
     fx::{self, Effect, Limiter},
@@ -55,6 +56,7 @@ impl Instrument {
                 Box::new(Fm6Engine::new(rate, &v)?)
             }
             "analog" => Box::new(Analog::new(rate)),
+            "fm4" => Box::new(Fm4::new(rate)),
             "sampler" => {
                 let Some(s) = pkg.samples.first() else { return fail("a sampler package needs a `sample` line") };
                 let Some(bytes) = resolve(&s.file) else { return fail(format!("cannot read sample {:?}", s.file)) };
@@ -71,7 +73,7 @@ impl Instrument {
                 }
                 Box::new(KitEngine::new(k))
             }
-            other => return fail(format!("no engine called {other:?} (fm6, analog, sampler, kit)")),
+            other => return fail(format!("no engine called {other:?} (fm6, fm4, analog, sampler, kit)")),
         };
         let mut inst = Instrument {
             name: pkg.name.clone(),
@@ -447,6 +449,23 @@ mod tests {
         // a map to nothing is refused at load
         p.map.push(MapEntry { cc: 1, target: Target::Engine(999), min: 0, max: 1 });
         assert!(Instrument::from_package(&p, 44_100.0, &none).is_err());
+    }
+
+    #[test]
+    fn an_fm4_package_plays_with_a_map_and_a_filter() {
+        let mut p = Package::new("F4", "fm4", "MIT");
+        p.params.push((crate::fm4::P_ALGORITHM, 7));
+        p.fx.push(FxEntry { name: "filter".into(), params: vec![(0, 0)] });
+        p.map.push(MapEntry { cc: 74, target: Target::Engine(crate::fm4::op_param(0, crate::fm4::O_LEVEL)), min: 0, max: 99 });
+        let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        assert_eq!(i.kind(), "fm4");
+        i.note_on(60, 100);
+        let mut b = vec![0i16; 4410];
+        i.render(&mut b);
+        assert!(b.iter().any(|&x| x.abs() > 300));
+        assert!(i.cc(74, 0), "the map reaches an operator's level");
+        let back = i.to_package("test", "0");
+        assert_eq!(back.engine, "fm4");
     }
 
     #[test]

@@ -111,7 +111,7 @@ unsafe fn put_str(s: &str, out: *mut c_char, cap: usize) -> usize {
     s.len()
 }
 
-/// The instrument's name, kind ("fm6", "analog", "sampler", "kit"), licence or verification note, as text in `out` (NUL-terminated, cut to `cap`); the full length.
+/// The instrument's name, kind ("fm6", "fm4", "analog", "sampler", "kit"), licence or verification note, as text in `out` (NUL-terminated, cut to `cap`); the full length.
 /// `which`: 0 name, 1 kind, 2 licence, 3 verification note (empty when unverified), 4 voice name of the current program (fm6).
 ///
 /// # Safety

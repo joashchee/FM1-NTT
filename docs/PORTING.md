@@ -79,7 +79,7 @@ and the modulation matrix are generic over them, so a new engine gets an editor 
 | `fm6` | DX7-style 6-operator (msfa port), fitted to DX747, Felucca; params 0 to 154 are the patch bytes, 200 up the model |
 | `sampler`, `kit` | IMA ADPCM / WAV, drum map, choke, limiter; fitted to X0X |
 | `analog` | subtractive: polyBLEP saw/pulse/triangle/sine, a state-variable filter, ADSR, 8 voices; **written fresh, not fitted to any firmware** |
-| `fm4` | 4-operator FM for the OPERATOR / Mighty Arp family; **not built, not fitted** |
+| `fm4` | 4-operator FM for the OPERATOR / Mighty Arp family (`core/src/fm4.rs`, 2026-11-18): eight algorithms, feedback on OP4, per operator a ratio, fine ratio, detune, level, velocity sensitivity, key scaling and ADSR (parameter ids: 0 to 2 global, then ten a operator from 10); 8 voices; **built and tested, fitted to nothing** |
 
 The shared effects (`core/src/fx.rs`): limiter, delay, low-pass, chorus, reverb, **filter** (low, band, high), **distortion** and **phaser** (2026-11-18: written fresh, fitted to nothing, tested for pass bands, stability, bounds and silence).
 
@@ -108,5 +108,5 @@ Stock is the one firmware with a manual, a MIDI table and a known engine (DX747,
 ## Limits (said plainly)
 
 - Nothing here has been heard on, or run on, a real R36S or a real FM-1.
-- Level B and C ports exist only as far as the engines do. `fm4` and the level-C reimplementations are open.
+- Level B and C ports exist only as far as the engines do. `fm4` is built but unfitted; the level-C reimplementations are open.
 - Extracted data from a GPL firmware is that firmware's: no bank leaves this machine except into the Pack (`docs/LICENSING.md`).

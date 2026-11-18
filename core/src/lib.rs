@@ -15,6 +15,7 @@ pub mod engine;
 pub mod extract;
 pub mod factory;
 pub mod firmware;
+pub mod fm4;
 pub mod fm6;
 pub mod fx;
 pub mod instrument;

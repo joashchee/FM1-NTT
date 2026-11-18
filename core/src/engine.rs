@@ -26,7 +26,7 @@ fn pd(id: u16, name: &str, min: i32, max: i32, default: i32, unit: &'static str)
 }
 
 pub trait Engine {
-    /// The name a package uses: "fm6", "sampler", "kit", "analog".
+    /// The name a package uses: "fm6", "fm4", "sampler", "kit", "analog".
     fn kind(&self) -> &'static str;
     fn params(&self) -> Vec<ParamDesc>;
     fn get(&self, id: u16) -> Option<i32>;
