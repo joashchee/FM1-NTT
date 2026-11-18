@@ -50,7 +50,7 @@ which is itself a result.
 | `core.nop.jit`, `.xrt` | the same with the native block compiler switched on (skipped on a CPU the core does not support) | higher |
 | `core.boot`, `core.reset` | building a machine from an image, and back to power-on, in milliseconds | lower |
 | `mem.read` | 256-byte reads of the flash region, as the MEMORY panel does them | higher |
-| `screen.draw.standard`, `.zoomed` | the whole 640 x 480 canvas drawn, averaged over all eight panels, ms a frame | lower |
+| `screen.draw.standard`, `.zoomed` | the whole 640 x 480 canvas drawn, averaged over the eight panels of workload 2 (the MONITOR panel, added later, is left out so the figures stay comparable), ms a frame | lower |
 | `io.flash.write`, `io.flash.read` | a 1 MiB flash slot written the way the app writes it (temporary name, flush, rename) and read back | lower |
 | `fw.<hash>.interp.xrt`, `.jit.xrt`, `.jit.pace{1,2,3}.xrt` | **with `--fw FILE`:** that firmware, **after a warm-up past its boot** (2000 emulated ms with the JIT, at most 20 s of real time; the file says what was reached in a `# fw warm-up` line), then three consecutive windows run flat out: emulated time over real time (1.0 is real time) | higher |
 

@@ -409,7 +409,7 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
             for (int i = 0; i < BENCH_RUNS; i++) {
                 double t0 = r3_report_ms();
                 int frames = 0;
-                while (r3_report_ms() - t0 < seconds * 250 || frames < PANEL_COUNT) { u.panel = frames % PANEL_COUNT; px_draw(canvas, mode, &u); frames++; }
+                while (r3_report_ms() - t0 < seconds * 250 || frames < PANEL_COUNT - 1) { int bp = frames % (PANEL_COUNT - 1); u.panel = bp >= PANEL_MONITOR ? bp + 1 : bp; px_draw(canvas, mode, &u); frames++; }   /* the eight panels of workload 2: MONITOR draws the host's own numbers and is left out, so the workload and its figures do not change */
                 v[i] = (r3_report_ms() - t0) / frames;
             }
             bench_line(&b, mode ? "screen.draw.zoomed" : "screen.draw.standard", v, "ms/frame", 0);

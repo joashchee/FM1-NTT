@@ -18,7 +18,7 @@
 
 typedef struct { const char *id, *label; } Hero;
 static const Hero HEROES[] = {
-    {"carousel", "The eight panels on Fn"},
+    {"carousel", "The nine panels on Fn"},
     {"zoom", "Standard and Zoomed with F1 or Tab"},
     {"midi", "Send notes to the MIDI jack"},
     {"tools", "Pause, reset and flash slots"},
@@ -29,7 +29,7 @@ static const Hero HEROES[] = {
 #define DEMO_AUDIO_FRAMES (FM1_SAMPLE_RATE / DEMO_FPS)       /* 1470 */
 /* The tour's length in frames, measured by the self-test (which fails when it is out of date): the splash and the end, then each feature. */
 #define DEMO_FRAMES_BASE 120
-static const int DEMO_FRAMES_FEATURE[NHERO] = {354, 100, 122, 264, 303};
+static const int DEMO_FRAMES_FEATURE[NHERO] = {394, 100, 122, 264, 303};
 
 static volatile sig_atomic_t g_cancel;
 static void on_signal(int s) { (void)s; g_cancel = 1; }
@@ -405,6 +405,7 @@ static int rec_demo_run(unsigned mask, const char *firmware, int firmware_raw, i
     }
     App *a = &r->app;
     a->m = fm1ntt_new();
+    mon_init(&a->mon, NULL);                   /* the tour never samples the host: the MONITOR frame is the same every time (a recording stays deterministic) */
     a->budget = g_demo_budget;
     a->midi_note = 60; a->midi_vel = 100; a->slot = 1; a->mode = MODE_STANDARD;
     say(a, 0, "Pick a firmware in FILES", NULL);

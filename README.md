@@ -40,7 +40,7 @@ r36s/build-deb.sh             # build/pkg/FM1-NTT.deb for the R36S (Docker)
 
 ## Panels and controls
 
-**Fn** (Home / End on a keyboard) turns the panel carousel: MACHINE, FILES, CPU, MEMORY, CONSOLE, MIDI, SOUND, TOOLS. **L1 + R1** together open the menu
+**Fn** (Home / End on a keyboard) turns the panel carousel: MACHINE, FILES, CPU, MEMORY, CONSOLE, MIDI, SOUND, MONITOR, TOOLS. **MONITOR** is a `top` for the machine the app runs on (CPU per core, memory, processes, this app's threads, battery; L2 R2 pages, X sorts, Y freezes; `docs/MONITOR.md`); it costs nothing while another panel is showing, and TOOLS > DATA RAIN adds an opt-in stream of the data passing through. **L1 + R1** together open the menu
 (TOOLS) and close it again. **Tab / F1** toggles Standard and Zoomed (2x). **Start** (P) pauses on every panel but MACHINE.
 
 **The SOUND preview** (L2, or Page Up on a keyboard, on the SOUND panel): the DX7 voices found in the loaded firmware's banks (Felucca's eight, for one; DX747 keeps none in a form the extractor finds) played by the fm6
@@ -67,7 +67,7 @@ and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return 
 
 ## Hero features (the Rec demo's checklist)
 
-1. **carousel**: the eight panels on Fn, and the menu on L1 + R1. 2. **zoom**: Standard and Zoomed with F1 or Tab. 3. **midi**: send notes to the MIDI jack.
+1. **carousel**: the nine panels on Fn, and the menu on L1 + R1. 2. **zoom**: Standard and Zoomed with F1 or Tab. 3. **midi**: send notes to the MIDI jack.
 4. **tools**: pause, reset, flash slots. 5. **firmware**: boot a firmware and play it (a bundled one unless you give yours).
 
 ## Docs

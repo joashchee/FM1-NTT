@@ -35,6 +35,7 @@ typedef struct {
     int has;
     uint32_t until;
     int dirty;
+    char hist[3][44];               /* the last three changes, newest first (the MONITOR panel's hot-plug history) */
 } Toast;
 
 static void toast_show_next(Toast *t, uint32_t now) {
@@ -54,6 +55,8 @@ static void toast_add(Toast *t, const char *text, int error, uint32_t now) {
     ToastItem it;
     memset(&it, 0, sizeof it);
     snprintf(it.text, sizeof it.text, "%s", text);
+    memmove(t->hist[1], t->hist[0], sizeof t->hist[0] * 2);
+    snprintf(t->hist[0], sizeof t->hist[0], "%s%s", error ? "! " : "", text);
     it.error = error;
     if (error) {
         int at = 0;

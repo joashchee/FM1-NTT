@@ -8,12 +8,13 @@
  *   fm1ntt --bench [--seconds N] [--fw FILE]   the Benchmark report to $BASE/bench/ (compare with scripts/bench-compare.py)
  *   fm1ntt --rec-demo [--features a,b] [--no-video] [FIRMWARE]   Rec demo (rule 11) to $BASE/Demo/
  *   fm1ntt --pin ...                   (or FM1NTT_PIN=1) the emulating (audio) thread on the last core, the main thread on the first: off by default, to be measured
+ *   fm1ntt --reduced-motion ...        (or FM1NTT_REDUCED_MOTION=1) the MONITOR panel's data rain is a still page
  *   fm1ntt --version
  *
  * The FM-1's 240x240 screen sits flush top left, pixel for pixel. Fn (raw button 16, Tab or F1) toggles Standard (1x, panels right and
  * below) and Zoomed (2x, one narrow panel at the right; Tab or F1 on a keyboard). On the pad Fn turns the panel carousel and L1+R1 together
  * open and close the menu (TOOLS); Home and End turn the carousel on a keyboard; on MACHINE the pad plays, see the pad section below. The carousel is as TinyNTT's:
- * MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND TOOLS. The audio device paces the emulation: SDL's callback asks the core for frames.
+ * MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND MONITOR TOOLS. The audio device paces the emulation: SDL's callback asks the core for frames.
  * Files are only written under the app's folder ($FM1NTT_DIR, else /roms/FM1-NTT on the R36S, else ~/FM1-NTT), to a temporary name
  * and then renamed. Nothing here has run on an R36S. */
 #define _GNU_SOURCE
@@ -54,7 +55,8 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 12
+#define NTOOLS 13
+#define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
 enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_X, A_Y, A_L2, A_R2 };
@@ -129,11 +131,20 @@ typedef struct {
     int pv_solo;                        /* the machine is not run, only the engine (R2): the live-play mode for a unit too slow to emulate the firmware */
     int pv_n, pv_sel, pv_on, pv_oct;    /* voices found, the chosen one, preview on, octave -2..2 */
     int pv_key[27], pv_pad[4];          /* the MIDI note each held key or pad button started (+1; 0 none), so its release matches */
+    /* MONITOR (monitor.h, docs/MONITOR.md) */
+    Mon mon;
+    MonRain rain;
+    int mon_page, rain_on, reduced_motion, njoy, cb_rate;
+    uint32_t last_input_ms, frame_ms, frame_max_ms;
+    int cb_prev; double cb_prev_ms;
+    SDL_atomic_t late_cb;               /* audio buffers that took longer than their own length to make */
     uint32_t budget;                    /* instructions a buffer may spend (0: MAX_INSNS_PER_BUFFER); Rec demo's self-test lowers it */
 } App;
 
 enum { JOB_NONE, JOB_REPORT, JOB_BENCH };
 static void job_start(App *a, int kind);
+static int job_pct(const App *a);
+static void rain_still(App *a);
 
 /* ---- small helpers ------------------------------------------------------------------------------------------------------ */
 static void say(App *a, int style, const char *fmt, const char *arg) {
@@ -599,7 +610,10 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
     App *a = ud;
     SDL_AtomicAdd(&a->callbacks, 1);
     if (a->pin && !a->pinned) { int e, u; a->pinned = 1; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }   /* the emulation runs here: the last core */
+    Uint64 t0 = SDL_GetPerformanceCounter();
     audio_step(a, (int16_t *)stream, (size_t)len / 4);
+    double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+    if (ms > (double)(len / 4) * 1000.0 / FM1_SAMPLE_RATE) SDL_AtomicAdd(&a->late_cb, 1);       /* longer than the buffer it fills: the sound has a gap */
 }
 
 /* ---- the machine's inputs ---------------------------------------------------------------------------------------------- */
@@ -726,6 +740,7 @@ static void tools_run(App *a) {
     case 9: a->want_demo = 1; break;
     case 10: job_start(a, JOB_BENCH); break;
     case 11: a->pace_mode = (a->pace_mode + 1) % 5; if (a->pace_mode == PACE_AUTO) a->pace_lvl = 0; apply_prefs(a); say(a, 0, a->pace_mode == PACE_AUTO ? "Pace AUTO: slows the main loop only when the unit cannot keep up" : a->pace_mode ? "Pace fixed: the main loop is slowed, the sound is not" : "Pace off: exact timing", NULL); break;
+    case 12: a->rain_on = !a->rain_on; if (a->rain_on && a->reduced_motion) rain_still(a); say(a, 0, a->rain_on ? (a->reduced_motion ? "Data rain on, as a still page (reduced motion)" : "Data rain on: it shows on the MONITOR panel") : "Data rain off", NULL); break;
     default: break;
     }
 }
@@ -792,6 +807,13 @@ static void act(App *a, int act) {
         else if (act == A_X) screenshot(a);
         else if (act == A_Y) { a->peak_l = a->peak_r = 0; say(a, 0, "Peaks cleared", NULL); }
         break;
+    case PANEL_MONITOR: {
+        int narrow = a->mode == MODE_ZOOMED, pages = mon_pages(narrow, a->mon.v.nprocs);
+        if (act == A_L2 || act == A_R2) { a->mon_page = (a->mon_page + (act == A_R2 ? 1 : pages - 1)) % pages; a->mon.force = 1; }
+        else if (act == A_X) { a->mon.v.sort = (a->mon.v.sort + 1) % MON_SORTS; a->mon.force = 1; { static const char *const sn[MON_SORTS] = {"Sorted by CPU", "Sorted by memory", "Sorted by PID"}; say(a, 0, sn[a->mon.v.sort % MON_SORTS], NULL); } }
+        else if (act == A_Y) { a->mon.paused = !a->mon.paused; a->mon.force = 0; say(a, 0, a->mon.paused ? "Monitor frozen: nothing is read" : "Monitor running", NULL); }
+        break;
+    }
     case PANEL_TOOLS:
         if (act == A_UP) a->tool_sel = (a->tool_sel + NTOOLS - 1) % NTOOLS;
         else if (act == A_DOWN) a->tool_sel = (a->tool_sel + 1) % NTOOLS;
@@ -872,6 +894,29 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     u->rec_on = a->rec != NULL;
     u->rec_frames = a->rec_frames;
     snprintf(u->rec_file, sizeof u->rec_file, "%s", a->rec_name);
+    /* MONITOR: the host's numbers as the sampler last took them (nothing is read here), and what the app itself knows */
+    u->mon_page = a->mon_page;
+    u->mon_paused = a->mon.paused;
+    if (a->panel == PANEL_MONITOR) {
+        u->mon = a->mon.v;
+        MonApp *p = &u->mon.app;
+        int loaded_now = fm1ntt_loaded(a->m);
+        p->speed_pct = loaded_now && !a->paused && a->speed > 0 ? (int)(a->speed * 100.0 + 0.5) : MON_NA;
+        p->jit = u->jit;
+        p->cb_per_s = a->cb_rate;
+        p->late_cb = SDL_AtomicGet(&a->late_cb);
+        p->frame_ms = (int)a->frame_ms; p->frame_max_ms = (int)a->frame_max_ms;
+        if (a->job) { snprintf(p->job, sizeof p->job, "%s", a->job_kind == JOB_REPORT ? "REPORT" : "BENCHMARK"); p->job_pct = job_pct(a); } else p->job_pct = MON_NA;
+        snprintf(p->fw, sizeof p->fw, "%s", a->file);
+        p->njoy = a->njoy;
+        if (u->midi_queued) snprintf(p->midi, sizeof p->midi, "SENT %llu DROP %llu", (unsigned long long)u->midi_queued, (unsigned long long)u->midi_dropped);
+        for (int k = 0; k < 3; k++) snprintf(p->hot[k], sizeof p->hot[k], "%s", a->toast.hist[k]);
+        if (loaded_now) { size_t kb = 0; for (int rgn = 0; rgn < 3; rgn++) { uint32_t b32; size_t sz = 0; fm1ntt_region(a->m, rgn, &b32, &sz); kb += sz / 1024; } p->emu_kb = (int)kb; }
+        u->rain_on = a->rain_on;
+        u->rain = a->rain;
+        u->rain_still = a->reduced_motion;
+        u->rain_full = a->rain_on && SDL_GetTicks() - a->last_input_ms >= RAIN_IDLE_MS && !a->job;
+    }
     /* tools */
     char slotp[320];
     slot_path(a, slotp, sizeof slotp);
@@ -889,6 +934,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     if (a->pace_mode == PACE_AUTO) snprintf(u->tools[11], PX_NAME, "  PACE: AUTO (NOW %d)", a->pace_lvl);
     else if (a->pace_mode) snprintf(u->tools[11], PX_NAME, "  PACE: %d", a->pace_mode);
     else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
+    snprintf(u->tools[12], PX_NAME, "  DATA RAIN: %s", a->rain_on ? "ON" : "OFF");
     u->ntools = NTOOLS;
     u->tool_sel = a->tool_sel;
     if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried.");
@@ -1127,6 +1173,7 @@ static void menu_toggle(App *a) {
     if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
 }
 static void dispatch(App *a, const SDL_Event *e) {
+    if (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYAXISMOTION || e->type == SDL_JOYHATMOTION) a->last_input_ms = SDL_GetTicks();   /* the data rain's whole-panel mode ends on any of them */
     if ((e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && toast_key(&a->toast, SDL_GetTicks())) return;   /* a failure's key is used up */
     int turn = is_carousel(e);
     if (e->type == SDL_JOYBUTTONDOWN && e->jbutton.button < 32) a->pad_mask |= 1u << e->jbutton.button;
@@ -1166,16 +1213,46 @@ static void present(SDL_Renderer *r, SDL_Texture *t, const uint32_t *c) {
 #include "report.h"
 #include "demo.h"
 
+/* ---- the data rain (monitor.h): one row of real data, from the first source that has some; the source rotates ---------------------------------- */
+static void rain_row_feed(App *a, double now_ms) {
+    uint8_t b[RAIN_COLS];
+    for (int k = 0; k < RAIN_SRC; k++) {
+        int src = (int)((a->rain.step + (unsigned)k) % RAIN_SRC), n = 0;
+        if (src == 0) { for (int i = 0; i < RAIN_COLS; i++) b[i] = (uint8_t)(a->scope[(i * 7) % PX_SCOPE] >> 8); n = RAIN_COLS; }     /* the audio out, high bytes */
+        else if (src == 1) { n = a->midi_log_n < RAIN_COLS ? a->midi_log_n : RAIN_COLS; if (n) memcpy(b, a->midi_log + a->midi_log_n - n, (size_t)n); }
+        else if (src == 2) {                                                                                                  /* the LCD's pixels as RGB bytes */
+            if (a->fb_ok) { int y = (int)(a->rain.step % 240); for (int i = 0; i < RAIN_COLS; i++) { uint32_t px = a->fbc[y * 240 + 10 + i / 3]; b[i] = (uint8_t)(px >> (8 * (2 - i % 3))); } n = RAIN_COLS; }
+        } else if (fm1ntt_loaded(a->m)) {                                                                                     /* a page of the emulated RAM */
+            uint32_t b32; size_t size = 0;
+            lock(a);
+            fm1ntt_region(a->m, 0, &b32, &size);
+            if (size > RAIN_COLS) n = (int)fm1ntt_read_mem(a->m, 0, (uint32_t)((a->rain.step * RAIN_COLS) % (size - RAIN_COLS)), b, RAIN_COLS);
+            unlock(a);
+        }
+        if (n > 0) { rain_feed(&a->rain, now_ms, src, b, n); return; }
+    }
+}
+/* Reduced motion: the page is filled once and never steps. */
+static void rain_still(App *a) { for (int i = 0; i < RAIN_ROWS; i++) rain_row_feed(a, 0); }
+
 /* ---- the progress box: shown over the window for as long as a job (Device report, Benchmark) runs, so a wait is never silent ---- */
-static void draw_job_progress(uint32_t *c, const App *a) {
-    if (!a->job) return;
+static int job_pct(const App *a) {
+    if (!a->job) return MON_NA;
     int step, steps; char doing[96]; uint32_t since, step_since;
     prog_get(&step, &steps, doing, sizeof doing, &since, &step_since);
     uint32_t now = SDL_GetTicks();
     if (steps < 1) steps = 1;
     double within = 1.0 - exp(-(double)(now - step_since) / 3000.0);       /* the current step creeps toward its end, never reaching it */
     int pct = (int)(100.0 * ((double)step + 0.9 * within) / steps);
-    if (pct > 99) pct = 99;
+    return pct > 99 ? 99 : pct;
+}
+static void draw_job_progress(uint32_t *c, const App *a) {
+    if (!a->job) return;
+    int step, steps; char doing[96]; uint32_t since, step_since;
+    prog_get(&step, &steps, doing, sizeof doing, &since, &step_since);
+    uint32_t now = SDL_GetTicks();
+    if (steps < 1) steps = 1;
+    int pct = job_pct(a);
     PxRect box = {PX_W / 2 - 220, PX_H / 2 - 56, 440, 112};
     px_rect(c, (PxRect){box.x - 2, box.y - 2, box.w + 4, box.h + 4}, C_BG);
     px_box(c, box, a->job_kind == JOB_REPORT ? "DEVICE REPORT" : "BENCHMARK");
@@ -1198,6 +1275,317 @@ static int pin_job(void *p) {
     return 0;
 }
 #endif
+/* ---- the MONITOR panel's tests (monitor.h, docs/MONITOR.md) -------------------------------------------------------------------------------- */
+static void mon_dump_bmp(const char *path, const uint32_t *canvas) {      /* FM1NTT_MON_SHOTS=dir: the panel's pictures, for a person to look at */
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    uint32_t size = 54 + PX_W * PX_H * 3;
+    uint8_t h[54] = {'B', 'M'};
+    memcpy(h + 2, &size, 4); h[10] = 54; h[14] = 40;
+    int32_t w = PX_W, hh = PX_H; memcpy(h + 18, &w, 4); memcpy(h + 22, &hh, 4); h[26] = 1; h[28] = 24;
+    fwrite(h, 1, 54, f);
+    for (int y = PX_H - 1; y >= 0; y--) for (int x = 0; x < PX_W; x++) { uint32_t p = canvas[y * PX_W + x]; uint8_t b[3] = {(uint8_t)p, (uint8_t)(p >> 8), (uint8_t)(p >> 16)}; fwrite(b, 1, 3, f); }
+    fclose(f);
+}
+static void mon_put(const char *dir, const char *name, const char *text) {
+    char p[480];
+    mkdir_p(dir);
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    write_atomic(p, text, strlen(text));
+}
+static void mon_put_proc(const char *procdir, int pid, const char *name, unsigned long long ut, unsigned long long st, unsigned long long rss_pages) {
+    char d[400], t[300];
+    snprintf(d, sizeof d, "%s/%d", procdir, pid);
+    snprintf(t, sizeof t, "%d (%s) S 1 1 1 0 -1 0 0 0 0 0 %llu %llu 0 0 20 0 1 0 100 1000 %llu 0\n", pid, name, ut, st, rss_pages);
+    mon_put(d, "stat", t);
+}
+
+static int mon_selftest(const char *root, App *app) {
+    int bad = 0;
+    static UiState mui;                                              /* its own: the caller's has been freed by now */
+    UiState *ui = &mui;
+#define MCHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL (monitor): %s (line %d)\n", #c, __LINE__); bad++; } } while (0)
+    /* thresholds: one table, inclusive edges, and the glyph says what the colour says */
+    MCHECK(mon_level(TH_CPU, 69) == LV_OK && mon_level(TH_CPU, 70) == LV_WARN && mon_level(TH_CPU, 89) == LV_WARN && mon_level(TH_CPU, 90) == LV_CRIT && mon_level(TH_CPU, -1) == LV_OK);
+    MCHECK(mon_level(TH_BATT, 31) == LV_OK && mon_level(TH_BATT, 30) == LV_WARN && mon_level(TH_BATT, 16) == LV_WARN && mon_level(TH_BATT, 15) == LV_CRIT && mon_level(TH_BATT, 0) == LV_CRIT);
+    MCHECK(mon_level(TH_SPEED, 97) == LV_OK && mon_level(TH_SPEED, 96) == LV_WARN && mon_level(TH_SPEED, 50) == LV_WARN && mon_level(TH_SPEED, 49) == LV_CRIT);
+    MCHECK(mon_level(TH_FRAME, 10) == LV_OK && mon_level(TH_FRAME, 11) == LV_WARN && mon_level(TH_FRAME, 25) == LV_CRIT);
+    MCHECK(mon_level(TH_TEMP, 64) == LV_OK && mon_level(TH_TEMP, 65) == LV_WARN && mon_level(TH_TEMP, 80) == LV_CRIT);
+    MCHECK(mon_level(TH_MEM, 74) == LV_OK && mon_level(TH_MEM, 75) == LV_WARN && mon_level(TH_MEM, 90) == LV_CRIT);
+    MCHECK(mon_level(TH_CARD, 16) == LV_OK && mon_level(TH_CARD, 15) == LV_WARN && mon_level(TH_CARD, 5) == LV_CRIT);
+    MCHECK(mon_level(99, 50) == LV_OK && mon_level(-1, 50) == LV_OK);
+    MCHECK(mon_glyph(LV_OK) == ' ' && mon_glyph(LV_WARN) == '*' && mon_glyph(LV_CRIT) == '!');
+    for (int i = 0; i < TH_COUNT; i++) MCHECK(MON_TH[i].low_is_bad ? MON_TH[i].warn > MON_TH[i].crit : MON_TH[i].warn < MON_TH[i].crit);
+    /* the colours: text pairs 4.5:1 (the whole-palette check above), and a bar's fill 3:1 against the bar's own ground, and the three verdict colours differ */
+    MCHECK(px_contrast(C_OK, C_BG) >= 3.0 && px_contrast(C_WARN, C_BG) >= 3.0 && px_contrast(C_ERR, C_BG) >= 3.0);
+    MCHECK(px_contrast(C_OK, C_FRAME) >= 3.0 && px_contrast(C_WARN, C_FRAME) >= 3.0 && px_contrast(C_ERR, C_FRAME) >= 3.0);
+    MCHECK(px_lv_col(LV_OK) != px_lv_col(LV_WARN) && px_lv_col(LV_WARN) != px_lv_col(LV_CRIT) && px_lv_col(LV_OK) != px_lv_col(LV_CRIT));
+    /* the percent maths: a counter that goes backwards, stands still, or does not add up is unknown, never a number */
+    MonCpuRaw a0 = {1000, 400, 1}, a1 = {1200, 500, 1};
+    MCHECK(mon_pct(&a0, &a1) == 50);
+    MonCpuRaw back = {900, 300, 1}, still = {1000, 400, 1}, idle_back = {1200, 300, 1}, idle_over = {1100, 600, 1}, none = {0, 0, 0};
+    MCHECK(mon_pct(&a0, &back) == MON_NA && mon_pct(&a0, &still) == MON_NA && mon_pct(&a0, &idle_back) == MON_NA && mon_pct(&a0, &idle_over) == MON_NA);
+    MCHECK(mon_pct(&none, &a1) == MON_NA && mon_pct(&a0, &none) == MON_NA);
+    MonCpuRaw full0 = {0, 0, 1}, full1 = {100, 0, 1}, big0 = {1ULL << 60, 1ULL << 59, 1}, big1 = {(1ULL << 60) + 1000, (1ULL << 59) + 250, 1};
+    MCHECK(mon_pct(&full0, &full1) == 100 && mon_pct(&big0, &big1) == 75);
+    /* /proc/stat: a normal file, a truncated line, garbage, more cores than the cap, numbers that would wrap a sum */
+    MonCpuRaw all, cores[MON_CORES];
+    MCHECK(mon_parse_stat("cpu  400 0 0 400 0 0 0 0 0 0\ncpu0 100 0 0 100 0 0 0 0\ncpu1 300 0 0 300 5 1 2 3\nintr 5\nctxt 6\n", &all, cores, MON_CORES) == 2);
+    MCHECK(all.ok && all.total == 800 && all.idle == 400 && cores[0].total == 200 && cores[0].idle == 100 && cores[1].idle == 305 && cores[1].total == 611 && !cores[2].ok);
+    MCHECK(mon_parse_stat("cpu0 1 2\ncpux 1 2 3 4\ncpu 1 2\n\n\n", &all, cores, MON_CORES) == 0 && !all.ok && !cores[0].ok);
+    MCHECK(mon_parse_stat("", &all, cores, MON_CORES) == 0 && mon_parse_stat("garbage \xff\x01 no newline", &all, cores, MON_CORES) == 0);
+    char many[4096] = "";
+    for (int i = 0; i < 40; i++) { char l[64]; snprintf(l, sizeof l, "cpu%d 1 1 1 1 1 1 1 1\n", i); strcat(many, l); }
+    MCHECK(mon_parse_stat(many, &all, cores, MON_CORES) == MON_CORES);
+    MCHECK(mon_parse_stat("cpu0 99999999999999999999999 99999999999999999999999 99999999999999999999999 99999999999999999999999 99999999999999999999999 99999999999999999999999 99999999999999999999999 99999999999999999999999\n", &all, cores, 4) == 1 && cores[0].total >= (1ULL << 60) && cores[0].total <= 8 * (1ULL << 60));
+    MCHECK(mon_parse_stat("cpu-1 1 1 1 1\ncpu5 1 1 1 1\n", &all, cores, 4) == 0);                 /* a core number outside the table is dropped, not written */
+    /* /proc/meminfo */
+    MonMem mm;
+    mon_parse_meminfo("MemTotal:  2000000 kB\nMemFree:  100000 kB\nMemAvailable:  800000 kB\nBuffers: 1 kB\nCached:  500000 kB\nSwapTotal: 100000 kB\nSwapFree: 40000 kB\n", &mm);
+    MCHECK(mm.has && mm.total_kb == 2000000 && mm.used_kb == 1200000 && mm.cached_kb == 500000 && mm.swap_used_kb == 60000 && mm.free_kb == 100000);
+    mon_parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 150 kB\n", &mm);
+    MCHECK(mm.has && mm.used_kb == 700);                                                           /* no MemAvailable: free + buffers + cached */
+    mon_parse_meminfo("MemTotal: 99999999999999999999 kB\nMemAvailable: 5 kB\nSwapTotal: 1 kB\nSwapFree: 9 kB\n", &mm);
+    MCHECK(mm.has && mm.total_kb <= (1ULL << 40) && mm.used_kb <= mm.total_kb && mm.swap_used_kb == 0);
+    mon_parse_meminfo("garbage\n\xff", &mm);
+    MCHECK(!mm.has && mm.used_kb == 0);
+    mon_parse_meminfo("MemTotal: 100 kB\nMemAvailable: 900 kB\n", &mm);
+    MCHECK(mm.used_kb == 0);                                                                       /* available above total: clamped, not a wrapped number */
+    double la[3];
+    MCHECK(mon_parse_loadavg("0.52 0.40 0.31 1/200 999\n", la) && la[0] > 0.51 && la[2] < 0.32);
+    MCHECK(!mon_parse_loadavg("", la) && !mon_parse_loadavg("a b c", la) && !mon_parse_loadavg("-1 0 0", la) && !mon_parse_loadavg("nan 0 0", la) && !mon_parse_loadavg("1e99 0 0", la) && !mon_parse_loadavg("0.5 0.4", la));
+    /* /proc/<pid>/stat: a name with spaces and a ")", a short line, garbage, a huge resident size */
+    MonProc mp;
+    MCHECK(mon_parse_pstat("77 (my (odd) name) S 1 1 1 0 -1 0 0 0 0 0 120 30 0 0 20 0 1 0 100 1000 250 0\n", &mp, 4) && mp.pid == 77 && !strcmp(mp.name, "my (odd) name") && mp.ticks == 150 && mp.rss_kb == 1000);
+    MCHECK(!mon_parse_pstat("77 (x) S 1 1 1", &mp, 4) && !mon_parse_pstat("", &mp, 4) && !mon_parse_pstat("no parens at all", &mp, 4) && !mon_parse_pstat(") (", &mp, 4));
+    MCHECK(mon_parse_pstat("5 (a) S 1 1 1 0 -1 0 0 0 0 0 99999999999999999999 1 0 0 20 0 1 0 1 1 99999999999999999999 0", &mp, 4) && mp.ticks <= (2ULL << 50) && mp.rss_kb >= 0);
+    MCHECK(mon_parse_pstat("5 (a) S 1 1 1 0 -1 0 0 0 0 0 1 2", &mp, 4) && mp.ticks == 3 && mp.rss_kb == 0);          /* no rss field: the CPU time is still good */
+    /* the battery, the temperature */
+    MonBat bt;
+    mon_battery_from("87\n", "Discharging\n", "-500000\n", "3800000\n", &bt);
+    MCHECK(bt.has && bt.pct == 87 && !strcmp(bt.status, "Discharging") && bt.mw == 1900);
+    mon_battery_from("abc", "\xff\x01zz", "x", "y", &bt);
+    MCHECK(bt.has && bt.pct == MON_NA && bt.mw == MON_NA);
+    mon_battery_from("150", "Full", "99999999999999999999", "99999999999999999999", &bt);
+    MCHECK(bt.pct == MON_NA && bt.mw == MON_NA);
+    mon_battery_from("50", "Charging", "400000", "0", &bt);
+    MCHECK(bt.pct == 50 && bt.mw == MON_NA);
+    MCHECK(mon_parse_milli("54000\n") == 54 && mon_parse_milli("x") == MON_NA && mon_parse_milli("") == MON_NA && mon_parse_milli("999999999") == MON_NA && mon_parse_milli("-300000") == MON_NA && mon_parse_milli("-5500") == -5);
+    /* the bounded sorted list */
+    static MonProc big[300], top[MON_TOP];
+    for (int i = 0; i < 300; i++) { big[i].pid = 1000 - i; big[i].cpu_x10 = (i * 37) % 1000; big[i].rss_kb = (i * 91) % 5000; snprintf(big[i].name, sizeof big[i].name, "p%d", i); }
+    for (int sort = 0; sort < MON_SORTS; sort++) {
+        int n = mon_top(big, 300, top, sort), ok = n == MON_TOP;
+        for (int i = 1; i < n; i++) ok &= !mon_before(&top[i], &top[i - 1], sort);
+        for (int i = 0; i < 300 && ok; i++) { int worse = 0; for (int k = 0; k < n; k++) worse += mon_before(&big[i], &top[k], sort) ? 1 : 0; if (worse && i >= 0) { int in = 0; for (int k = 0; k < n; k++) in |= top[k].pid == big[i].pid; if (!in) { /* an entry left out must sort after the last kept one */ ok &= !mon_before(&big[i], &top[n - 1], sort); } } }
+        MCHECK(ok);
+    }
+    MCHECK(mon_top(big, 3, top, MON_SORT_PID) == 3 && top[0].pid < top[1].pid && mon_top(big, 0, top, 0) == 0);
+    MCHECK(mon_pages(0, 0) == 2 && mon_pages(1, 0) == 3 && mon_pages(0, MON_ROWS_STD) == 2 && mon_pages(0, MON_ROWS_STD + 1) == 3 && mon_pages(1, MON_TOP) == 2 + (MON_TOP + MON_ROWS_NARROW - 1) / MON_ROWS_NARROW);
+    MCHECK(!mon_page_has_procs(0, 0) && mon_page_has_procs(0, 1) && !mon_page_has_procs(1, 1) && mon_page_has_procs(1, 2));
+    char kb[16];
+    mon_kb_text(kb, sizeof kb, 512); MCHECK(!strcmp(kb, "512K"));
+    mon_kb_text(kb, sizeof kb, 3 * 1024 * 1024 / 2); MCHECK(!strcmp(kb, "1.5G"));
+    mon_kb_text(kb, sizeof kb, 99999999999ULL); MCHECK(strlen(kb) < 8);
+
+    /* a fixture /proc and /sys: the sampler reads them, and reads NOTHING while the panel is not showing */
+    char pr[420], sy[420], d[480];
+    snprintf(pr, sizeof pr, "%s/monfix/proc", root);
+    snprintf(sy, sizeof sy, "%s/monfix/sys", root);
+    setenv("FM1NTT_MON_PROC", pr, 1);
+    setenv("FM1NTT_MON_SYS", sy, 1);
+    long hz = sysconf(_SC_CLK_TCK);
+    char one[200];
+    mon_put(pr, "stat", "cpu  400 0 0 400 0 0 0 0\ncpu0 100 0 0 100 0 0 0 0\ncpu1 300 0 0 300 0 0 0 0\n");
+    mon_put(pr, "loadavg", "0.50 0.40 0.30 1/100 123\n");
+    mon_put(pr, "meminfo", "MemTotal: 1000000 kB\nMemAvailable: 100000 kB\nMemFree: 50000 kB\nCached: 300000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    snprintf(d, sizeof d, "%s/self", pr); mon_put(d, "statm", "1000 500 0 0 0 0 0\n");
+    mon_put_proc(pr, 1234, "busy", 100, 0, 10);
+    mon_put_proc(pr, 2222, "bigmem", 5, 5, 900000);
+    mon_put_proc(pr, 3, "idle", 1, 1, 5);
+    snprintf(d, sizeof d, "%s/4444", pr); mon_put(d, "stat", "garbage \xff no parens");
+    snprintf(d, sizeof d, "%s/class/power_supply/BAT0", sy);
+    mon_put(d, "type", "Battery\n"); mon_put(d, "capacity", "12\n"); mon_put(d, "status", "Discharging\n"); mon_put(d, "current_now", "-500000\n"); mon_put(d, "voltage_now", "3800000\n");
+    snprintf(d, sizeof d, "%s/class/thermal/thermal_zone0", sy); mon_put(d, "temp", "71000\n");
+    snprintf(d, sizeof d, "%s/devices/system/cpu/cpu0/cpufreq", sy); mon_put(d, "scaling_cur_freq", "1512000\n"); mon_put(d, "scaling_governor", "schedutil\n");
+    snprintf(d, sizeof d, "%s/class/net/eth0", sy); mon_put(d, "operstate", "up\n");
+    snprintf(d, sizeof d, "%s/class/net/lo", sy); mon_put(d, "operstate", "unknown\n");
+    static Mon m;
+    mon_init(&m, root);
+    unsigned long r0 = g_mon_reads;
+    for (int i = 0; i < 2000; i++) MCHECK(mon_tick(&m, 0, i * 7.0, 1) == 0);                          /* not showing: no sample, no read, however often it is asked */
+    MCHECK(g_mon_reads == r0);
+    MCHECK(mon_tick(&m, 1, 10000, 0) == 1 && g_mon_reads > r0 && !m.v.sampled && m.v.core_pct[0] == MON_NA && m.v.ncores == 2);   /* the first sample is a baseline: dashes, not guesses */
+    MCHECK(m.v.mem.has && m.v.mem.used_kb == 900000 && m.v.has_load && m.v.temp_c == 71 && m.v.core_mhz[0] == 1512 && !strcmp(m.v.gov, "SCHEDUTIL") && !strcmp(m.v.net, "ETH0 UP"));
+    MCHECK(m.v.bat.has && m.v.bat.pct == 12 && m.v.bat.mw == 1900 && m.v.self_rss_kb == 500 * mon_page_kb());
+    MCHECK(!m.v.procs_read && m.v.nprocs == 0);                                                      /* the process list was not wanted: not read */
+    unsigned long r1 = g_mon_reads;
+    MCHECK(mon_tick(&m, 1, 10500, 0) == 0 && g_mon_reads == r1);                                      /* half a second later: nothing is due */
+    mon_put(pr, "stat", "cpu  680 0 0 520 0 0 0 0\ncpu0 200 0 0 200 0 0 0 0\ncpu1 480 0 0 320 0 0 0 0\n");   /* cpu0 +100 busy +100 idle: 50%; cpu1 +180 busy +20 idle: 90%; all +280 of 400: 70% */
+    mon_put_proc(pr, 1234, "busy", 100 + (unsigned long long)hz, 0, 10);
+    unsigned long r2 = g_mon_reads;
+    MCHECK(mon_tick(&m, 1, 11000, 1) == 1);
+    unsigned long with_procs = g_mon_reads - r2;
+    MCHECK(m.v.sampled && m.v.core_pct[0] == 50 && m.v.core_pct[1] == 90 && m.v.hist[1][MON_HIST - 1] == 90 && m.v.cpu_pct == 70);
+    MCHECK(m.v.procs_read && m.v.nprocs == 3 && m.v.nproc_total >= 3 && !m.v.proc_capped);                  /* the garbage one is skipped, not fatal */
+    MCHECK(m.v.procs[0].pid == 1234 || m.v.procs[0].cpu_x10 == 0);                                           /* the first list has no delta: sorted as idle */
+    mon_put_proc(pr, 1234, "busy", 100 + 2 * (unsigned long long)hz, 0, 10);
+    mon_put(pr, "stat", "cpu  500 0 0 440 0 0 0 0\ncpu0 200 0 0 200 0 0 0 0\ncpu1 480 0 0 320 0 0 0 0\n");   /* every counter still or lower: unknown */
+    r2 = g_mon_reads;
+    MCHECK(mon_tick(&m, 1, 12000, 0) == 1);
+    MCHECK(g_mon_reads - r2 < with_procs && m.v.core_pct[0] == MON_NA && m.v.core_pct[1] == MON_NA);       /* a page with no list reads fewer files than one with it */
+    mon_put_proc(pr, 1234, "busy", 100 + 3 * (unsigned long long)hz, 0, 10);
+    mon_put(pr, "stat", "cpu  780 0 0 760 0 0 0 0\ncpu0 250 0 0 250 0 0 0 0\ncpu1 530 0 0 370 0 0 0 0\n");
+    MCHECK(mon_tick(&m, 1, 13000, 1) == 1);
+    MCHECK(m.v.procs[0].pid == 1234 && m.v.procs[0].cpu_x10 == 1000 && !strcmp(m.v.procs[0].name, "busy"));    /* one second of CPU in one second: 100.0% of a core */
+    m.v.sort = MON_SORT_MEM; m.force = 1;
+    MCHECK(mon_tick(&m, 1, 13300, 1) == 1 && m.v.procs[0].pid == 2222 && m.v.procs[0].rss_kb == 900000 * mon_page_kb());   /* a sort key asks for a sample now, once in 250 ms */
+    m.v.sort = MON_SORT_PID; m.force = 1;
+    MCHECK(mon_tick(&m, 1, 13400, 1) == 0);                                                          /* two keys within 250 ms: the second waits */
+    MCHECK(mon_tick(&m, 1, 13600, 1) == 1 && m.v.procs[0].pid == 3);
+    m.paused = 1;
+    unsigned long r3 = g_mon_reads;
+    for (int i = 0; i < 500; i++) MCHECK(mon_tick(&m, 1, 20000 + i * 50.0, 1) == 0);                    /* frozen: showing, but nothing is read */
+    MCHECK(g_mon_reads == r3);
+    m.paused = 0;
+    MCHECK(mon_tick(&m, 0, 50000, 1) == 0 && !m.on && !m.v.sampled);                                    /* leaving the panel forgets the baseline: no gap is averaged into the next reading */
+    MCHECK(mon_tick(&m, 1, 90000, 0) == 1 && !m.v.sampled && m.v.core_pct[0] == MON_NA);
+    for (int i = 0; i < 20; i++) { snprintf(one, sizeof one, "%s/%d", pr, 5000 + i); mon_put(one, "stat", "1 (x) S 1 1 1 0 -1 0 0 0 0 0 1 1 0 0 20 0 1 0 1 1 1 0\n"); }
+    char rm[520]; snprintf(rm, sizeof rm, "rm -rf '%s/monfix'", root); if (system(rm) != 0) fprintf(stderr, "could not remove the monitor fixture\n");
+    MCHECK(mon_tick(&m, 1, 120000, 1) == 1 && !m.v.mem.has && m.v.nprocs == 0 && !m.v.has_load && m.v.temp_c == MON_NA && !m.v.bat.has && m.v.ncores == 0);  /* every file gone: n/a everywhere, no crash */
+    unsetenv("FM1NTT_MON_PROC"); unsetenv("FM1NTT_MON_SYS");
+
+    /* the data rain: the same bytes and step give the same rows, it steps at most 3 times a second, and not at all under reduced motion */
+    static MonRain r1a, r1b;
+    memset(&r1a, 0, sizeof r1a); memset(&r1b, 0, sizeof r1b);
+    uint8_t bytes[7] = {1, 2, 3, 4, 5, 6, 7};
+    for (int i = 0; i < 12; i++) { rain_feed(&r1a, i * 334.0, i % RAIN_SRC, bytes, 7); rain_feed(&r1b, i * 334.0, i % RAIN_SRC, bytes, 7); bytes[0]++; }
+    MCHECK(!memcmp(&r1a, &r1b, sizeof r1a));
+    char tg = 0;
+    const uint8_t *row0 = rain_row(&r1a, 0, &tg);
+    MCHECK(row0 && tg == RAIN_TAG[11 % RAIN_SRC] && row0[0] == 12 && rain_row(&r1a, 11, NULL) && !rain_row(&r1a, 12, NULL) && !rain_row(&r1a, -1, NULL) && !rain_row(&r1a, RAIN_ROWS, NULL));
+    for (int i = 0; i < RAIN_ROWS + 9; i++) rain_feed(&r1a, 0, 0, bytes, 7);
+    MCHECK(rain_row(&r1a, RAIN_ROWS - 1, NULL) && !rain_row(&r1a, RAIN_ROWS, NULL));                 /* the ring is bounded */
+    rain_feed(&r1a, 0, 99, bytes, 0);                                                                  /* an odd source and no bytes: a row of zeros, no crash */
+    MCHECK(rain_row(&r1a, 0, &tg)[5] == 0);
+    static MonRain st;
+    memset(&st, 0, sizeof st);
+    int steps_total = 0, worst_window = 0;
+    int stamps[4000], ns = 0;
+    for (int ms = 0; ms < 4000; ms++) if (rain_due(&st, (double)ms, 0)) { rain_feed(&st, (double)ms, 0, bytes, 7); stamps[ns++] = ms; steps_total++; }
+    for (int i = 0; i < ns; i++) { int c = 0; for (int k = i; k < ns && stamps[k] < stamps[i] + 1000; k++) c++; if (c > worst_window) worst_window = c; }
+    MCHECK(worst_window <= 3 && steps_total >= 10);                                                    /* no second holds more than 3 changes */
+    memset(&st, 0, sizeof st);
+    int stepped = 0;
+    for (int ms = 0; ms < 4000; ms++) stepped += rain_due(&st, (double)ms, 1);
+    MCHECK(stepped == 0);                                                                                /* reduced motion: a still page */
+
+    /* the panel, drawn: every page of both layouts at low, mid and high load, 1, 4 and 12 cores; it stays above the foot, is the same every time, and reads nothing */
+    static UiState u;
+    static uint32_t cv[PX_W * PX_H], cv2[PX_W * PX_H];
+    unsigned long reads_before = g_mon_reads;
+    const int loads[3] = {5, 55, 97};
+    const int corecounts[3] = {1, 4, 12};
+    const char *shots = getenv("FM1NTT_MON_SHOTS");
+    for (int mode = 0; mode < 2; mode++)
+        for (int li = 0; li < 3; li++)
+            for (int ci = 0; ci < 3; ci++) {
+                memset(&u, 0, sizeof u);
+                for (int i = 0; i < FM_W * FM_H; i++) u.fb[i] = (uint32_t)(i * 2654435761u) & 0xFFFFFF;
+                u.fb_valid = 1; u.panel = PANEL_MONITOR; u.run_state = "RUN"; u.fw_name = "X.FWSC";
+                MonView *v = &u.mon;
+                v->platform = MON_PLAT_LINUX; v->sampled = 1; v->ncores = corecounts[ci]; v->cpu_pct = loads[li]; v->has_load = 1; v->load[0] = loads[li] / 25.0; v->load[1] = 0.4; v->load[2] = 0.3;
+                snprintf(v->gov, sizeof v->gov, "SCHEDUTIL"); v->temp_c = 40 + loads[li] / 3; v->hist_n = MON_HIST;
+                for (int k = 0; k < v->ncores && k < MON_CORES; k++) { v->core_pct[k] = (loads[li] + k * 7) % 101; v->core_mhz[k] = 1512; for (int h = 0; h < MON_HIST; h++) v->hist[k][h] = (uint8_t)((loads[li] + h * 5 + k) % 101); }
+                v->mem.has = 1; v->mem.total_kb = 2000000; v->mem.used_kb = 2000000ULL * (unsigned)loads[li] / 100; v->mem.cached_kb = 300000; v->mem.free_kb = 80000; v->mem.swap_total_kb = 500000; v->mem.swap_used_kb = 1000;
+                v->self_rss_kb = 36000; v->has_card = 1; v->card_free_pct = 100 - loads[li]; v->card_free_mb = 12000;
+                v->procs_read = 1; v->nproc_total = 300; v->proc_capped = 1; v->nprocs = MON_TOP; v->self_pid = 1;
+                for (int k = 0; k < MON_TOP; k++) { v->procs[k].pid = 1 + k; snprintf(v->procs[k].name, MON_NAME, "%.15s", "proc-with-a-long-name"); v->procs[k].cpu_x10 = (1000 - k * 15) > 0 ? 1000 - k * 15 : 0; v->procs[k].rss_kb = 120000 - k * 1000; }
+                v->nthr = MON_THR; for (int k = 0; k < MON_THR; k++) { snprintf(v->thr[k].name, sizeof v->thr[k].name, "thread-name-%d", k); v->thr[k].cpu_x10 = 900 - k * 80; v->thr[k].core = k % 4; }
+                v->bat.has = 1; v->bat.pct = 100 - loads[li]; v->bat.mw = 1840; snprintf(v->bat.status, sizeof v->bat.status, "Discharging");
+                v->wake_ps = 25; snprintf(v->net, sizeof v->net, "WLAN0 UP"); v->sample_us = 450; v->share_x100 = 5; v->app_cpu_x10 = loads[li] * 10;
+                v->app.speed_pct = loads[li] < 50 ? 120 : 20; v->app.jit = 1; v->app.cb_per_s = 86; v->app.late_cb = li; v->app.frame_ms = 4 + li * 12; v->app.frame_max_ms = 30; v->app.njoy = 2;
+                snprintf(v->app.job, sizeof v->app.job, "BENCHMARK"); v->app.job_pct = 40; snprintf(v->app.fw, sizeof v->app.fw, "A-LONG-FIRMWARE-NAME.FWSC"); snprintf(v->app.midi, sizeof v->app.midi, "SENT 12 DROP 12");
+                snprintf(v->app.hot[0], sizeof v->app.hot[0], "USB MIDI KEYBOARD PLUGGED IN"); snprintf(v->app.hot[1], sizeof v->app.hot[1], "GAMEPAD OUT"); snprintf(v->app.hot[2], sizeof v->app.hot[2], "STORAGE IN");
+                u.rain_on = 1;
+                for (int i = 0; i < RAIN_ROWS; i++) { uint8_t b[RAIN_COLS]; for (int k = 0; k < RAIN_COLS; k++) b[k] = (uint8_t)(i * 31 + k * 7); rain_feed(&u.rain, 0, i, b, RAIN_COLS); }
+                int pages = mon_pages(mode, v->nprocs);
+                MCHECK(pages >= 3);
+                for (int pg = 0; pg < pages; pg++) {
+                    u.mon_page = pg;
+                    px_draw(cv, mode, &u);
+                    px_draw(cv2, mode, &u);
+                    MCHECK(!memcmp(cv, cv2, sizeof cv));                                               /* the same state, the same pixels */
+                    PxRect cr = px_content_rect(mode);
+                    static uint32_t scratch[PX_W * PX_H];
+                    int bottom = px_panel_monitor(scratch, cr, &u, mode);
+                    if (bottom > cr.y + cr.h - 26) fprintf(stderr, "  layout: mode %d cores %d page %d bottom %d limit %d\n", mode, corecounts[ci], pg, bottom, cr.y + cr.h - 26);
+                    MCHECK(bottom <= cr.y + cr.h - 26);                                                /* above the page line and the foot */
+                    int s = px_scale(mode), ok = 1;
+                    for (int y = 0; y < FM_H * s && ok; y++) for (int x = 0; x < FM_W * s; x++) if (cv[y * PX_W + x] != (0xFF000000u | u.fb[(y / s) * FM_W + x / s])) { ok = 0; break; }
+                    MCHECK(ok);
+                    long lit = 0;
+                    for (int y = cr.y; y < cr.y + cr.h; y++) for (int x = cr.x; x < cr.x + cr.w; x++) lit += cv[y * PX_W + x] != C_BG;
+                    MCHECK(lit > 3000);
+                    if (shots && (ci == 1 || pg == 0)) { char fn[420]; snprintf(fn, sizeof fn, "%s/mon-m%d-load%d-cores%d-page%d.bmp", shots, mode, loads[li], corecounts[ci], pg); mon_dump_bmp(fn, cv); }
+                }
+                u.rain_full = 1;
+                px_draw(cv, mode, &u);
+                if (shots && li == 1 && ci == 1) { char fn[420]; snprintf(fn, sizeof fn, "%s/mon-m%d-rain-full.bmp", shots, mode); mon_dump_bmp(fn, cv); }
+                memcpy(cv2, cv, sizeof cv);
+                px_draw(cv, mode, &u);
+                MCHECK(!memcmp(cv, cv2, sizeof cv));                                                   /* the rain draws the same bytes for the same input */
+            }
+    MCHECK(g_mon_reads == reads_before);                                                               /* drawing reads nothing from the host */
+    /* an empty view (the Rec demo's, or the first frame): dashes and n/a, deterministic, no verdict colours on a number nobody read */
+    memset(&u, 0, sizeof u);
+    mon_init(&m, NULL);
+    u.panel = PANEL_MONITOR; u.mon = m.v;
+    for (int mode = 0; mode < 2; mode++) {
+        for (int pg = 0; pg < mon_pages(mode, 0); pg++) { u.mon_page = pg; px_draw(cv, mode, &u); px_draw(cv2, mode, &u); MCHECK(!memcmp(cv, cv2, sizeof cv)); }
+        u.mon_page = 99; px_draw(cv, mode, &u);                                                      /* a page past the end is clamped, not drawn from nowhere */
+    }
+
+    /* the keys, the TOOLS row, the cost rule through the app */
+    memset(app->mon.card_path, 0, sizeof app->mon.card_path);
+    int reads_app = (int)g_mon_reads;
+    app->panel = PANEL_CPU; app->mode = MODE_STANDARD; app->rain_on = 0;
+    fill_ui(app, ui, 0);
+    MCHECK((int)g_mon_reads == reads_app && !ui->rain_on && ui->mon.ncores == 0);                      /* another panel: the monitor's data is not even copied */
+    app->panel = PANEL_MONITOR; app->mon_page = 0;
+    act(app, A_R2); MCHECK(app->mon_page == 1 && app->mon.force);
+    act(app, A_R2); MCHECK(app->mon_page == 2 || mon_pages(0, app->mon.v.nprocs) == 2);
+    for (int i = 0; i < 5; i++) act(app, A_L2);
+    MCHECK(app->mon_page >= 0 && app->mon_page < mon_pages(0, app->mon.v.nprocs));
+    app->mon_page = 0;
+    act(app, A_L2); MCHECK(app->mon_page == mon_pages(0, app->mon.v.nprocs) - 1);                      /* the pages wrap */
+    int s0 = app->mon.v.sort;
+    act(app, A_X); MCHECK(app->mon.v.sort == (s0 + 1) % MON_SORTS);
+    act(app, A_Y); MCHECK(app->mon.paused && !app->mon.force);
+    act(app, A_Y); MCHECK(!app->mon.paused);
+    app->mode = MODE_ZOOMED; act(app, A_R2); app->mode = MODE_STANDARD;
+    MCHECK(app->rain_on == 0);                                                                         /* off by default: nothing turns it on but its TOOLS row */
+    app->panel = PANEL_TOOLS; app->tool_sel = 12;
+    act(app, A_OK); MCHECK(app->rain_on == 1);
+    fill_ui(app, ui, 0); MCHECK(strstr(ui->tools[12], "DATA RAIN: ON") != NULL && ui->ntools == NTOOLS);
+    act(app, A_OK); MCHECK(app->rain_on == 0);
+    fill_ui(app, ui, 0); MCHECK(strstr(ui->tools[12], "DATA RAIN: OFF") != NULL);
+    app->reduced_motion = 1; app->rain.step = 0;
+    act(app, A_OK); MCHECK(app->rain_on == 1 && app->rain.step == RAIN_ROWS);                           /* reduced motion: one still page, filled at once */
+    app->panel = PANEL_MONITOR; app->last_input_ms = SDL_GetTicks() - RAIN_IDLE_MS - 1;
+    fill_ui(app, ui, 0); MCHECK(ui->rain_on && ui->rain_full && ui->rain_still);
+    app->last_input_ms = SDL_GetTicks();
+    fill_ui(app, ui, 0); MCHECK(ui->rain_on && !ui->rain_full);                                         /* any input ends the whole-panel rain */
+    app->rain_on = 0; app->reduced_motion = 0; app->panel = PANEL_MACHINE;
+    /* the hot-plug history behind the DEVICE box */
+    static Toast tt;
+    memset(&tt, 0, sizeof tt);
+    toast_add(&tt, "USB MIDI IN", 0, 100); toast_add(&tt, "PAD OUT", 0, 200); toast_add(&tt, "DISK ERROR", 1, 300); toast_add(&tt, "PAD IN", 0, 400);
+    MCHECK(!strcmp(tt.hist[0], "PAD IN") && !strcmp(tt.hist[1], "! DISK ERROR") && !strcmp(tt.hist[2], "PAD OUT"));
+#undef MCHECK
+    return bad;
+}
+
 static int selftest(void) {
     int bad = 0;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL: %s (line %d)\n", #c, __LINE__); bad++; } } while (0)
@@ -1398,6 +1786,7 @@ static int selftest(void) {
     memset(&a, 0, sizeof a);
     g_quiet_logs = 1;
     a.m = fm1ntt_new();
+    mon_init(&a.mon, NULL);
     a.midi_note = 60; a.midi_vel = 100; a.slot = 1;
     /* the firmware folder: the right extensions, sorted, a Quit row last, a garbage file refused with a reason, a raw file booted */
     char fdir[300], p[400];
@@ -1876,6 +2265,7 @@ static int selftest(void) {
     }
     /* clean up the temporary folder (and only it) */
     char cmd[400];
+    CHECK(mon_selftest(root, &a) == 0);                           /* the MONITOR panel: parsers, maths, the fixture /proc, the cost rule, the layout, the keys */
     if (!getenv("FM1NTT_KEEP") && strstr(root, "fm1ntt-selftest-")) { snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); if (system(cmd) != 0) fprintf(stderr, "could not remove %s\n", root); }
     if (bad) { fprintf(stderr, "fm1ntt selftest: %d failure(s)\n", bad); return 1; }
     puts("fm1ntt selftest: ok");
@@ -1965,6 +2355,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
         else if (!strcmp(argv[i], "--features") && i + 1 < argc) features = argv[++i];
         else if (!strcmp(argv[i], "--no-video")) no_video = 1;
+        else if (!strcmp(argv[i], "--reduced-motion")) setenv("FM1NTT_REDUCED_MOTION", "1", 1);
         else if (argv[i][0] != '-') path = argv[i];
         else { fprintf(stderr, "fm1ntt: unknown option %s\n", argv[i]); return 2; }
     }
@@ -1973,6 +2364,9 @@ int main(int argc, char **argv) {
     static UiState u;
     static uint32_t canvas[PX_W * PX_H];
     a.m = fm1ntt_new();
+    { char cp[300]; sub_path(cp, sizeof cp, "firmware", NULL); mon_init(&a.mon, cp); }
+    a.reduced_motion = getenv("FM1NTT_REDUCED_MOTION") != NULL;
+    a.last_input_ms = SDL_GetTicks();
     a.mode = zoomed ? MODE_ZOOMED : MODE_STANDARD;
     a.panel = panel;
     a.midi_note = 60; a.midi_vel = 100; a.slot = 1;
@@ -2093,6 +2487,20 @@ int main(int argc, char **argv) {
         rec_pump(&a);
         speed_tick(&a);
         if (job_poll(&a)) dirty = 1;
+        {   /* MONITOR: nothing runs unless the panel shows; one sample a second while it does (monitor.h) */
+            double nowm = (double)SDL_GetTicks(), before_ms = a.mon.last_ms;
+            int mon_on = a.panel == PANEL_MONITOR;
+            if (mon_tick(&a.mon, mon_on, nowm, mon_page_has_procs(a.mode == MODE_ZOOMED, a.mon_page))) dirty = 1;
+            if (!mon_on) a.cb_prev_ms = 0;
+            else if (a.mon.last_ms != before_ms) {                      /* a sample was just taken: the app's own once-a-second figures move with it */
+                int cb = SDL_AtomicGet(&a.callbacks);
+                if (a.cb_prev_ms > 0 && nowm > a.cb_prev_ms) a.cb_rate = (int)((double)(cb - a.cb_prev) * 1000.0 / (nowm - a.cb_prev_ms) + 0.5);
+                a.cb_prev = cb; a.cb_prev_ms = nowm;
+                a.njoy = SDL_NumJoysticks();
+                a.frame_max_ms = 0;
+            }
+            if (mon_on && a.rain_on && !a.job && !(a.mon.v.bat.has && a.mon.v.bat.pct >= 0 && a.mon.v.bat.pct <= 15) && rain_due(&a.rain, nowm, a.reduced_motion)) { rain_row_feed(&a, nowm); dirty = 1; }
+        }
         if (a.want_demo) {                                /* Rec demo owns the unit until it ends */
             a.want_demo = 0;
             char dflt[300];
@@ -2116,7 +2524,7 @@ int main(int argc, char **argv) {
         uint32_t now = SDL_GetTicks();
         /* Redraw rates (audio comes first, and a repaint costs ~3.5 ms of the unit's time and a lock on the audio): the firmware's screen at most 15 times a
          * second, the panels and the clock 5 times (the SOUND meters 10), and at once for anything the person did. */
-        uint32_t panel_ms = a.panel == PANEL_SOUND ? 100 : a.job ? 250 : 200;       /* a job's progress box moves 4 times a second: the report measures idle while it shows */
+        uint32_t panel_ms = a.panel == PANEL_SOUND ? 100 : a.panel == PANEL_MONITOR ? 1000 : a.job ? 250 : 200;       /* a job's progress box moves 4 times a second: the report measures idle while it shows */
         if (dirty || (rev != a.rev && now - last_draw >= 60) || ((fm1ntt_loaded(a.m) || a.job) && now - last_draw > panel_ms)) {
             uint32_t t0 = SDL_GetTicks();
             int by_input = dirty;
@@ -2125,6 +2533,8 @@ int main(int argc, char **argv) {
             draw_job_progress(canvas, &a);
             toast_draw(&a.toast, canvas);
             present(ren, tex, canvas);
+            a.frame_ms = SDL_GetTicks() - t0;
+            if (a.frame_ms > a.frame_max_ms) a.frame_max_ms = a.frame_ms;
             if (dirty) trace("draw (by input) took %u ms, sel %d/%d", SDL_GetTicks() - t0, a.tool_sel, a.file_sel);
             last_draw = last_settle = now;
             dirty = 0;

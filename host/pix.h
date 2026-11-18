@@ -13,9 +13,11 @@
 #ifndef FM1NTT_PIX_H
 #define FM1NTT_PIX_H
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "monitor.h"
 
 enum { PX_W = 640, PX_H = 480, FM_W = 240, FM_H = 240 };
 enum { MODE_STANDARD = 0, MODE_ZOOMED = 1 };
@@ -140,13 +142,13 @@ static inline void px_wrap(uint32_t *c, int x, int y, const char *s, uint32_t co
 }
 
 /* ---- what the panels show ---------------------------------------------------------------------------------------------- */
-enum { PANEL_MACHINE, PANEL_FILES, PANEL_CPU, PANEL_MEMORY, PANEL_CONSOLE, PANEL_MIDI, PANEL_SOUND, PANEL_TOOLS, PANEL_COUNT };
-static const char *const PX_PANEL_NAMES[PANEL_COUNT] = {"MACHINE", "FILES", "CPU", "MEMORY", "CONSOLE", "MIDI", "SOUND", "TOOLS"};
+enum { PANEL_MACHINE, PANEL_FILES, PANEL_CPU, PANEL_MEMORY, PANEL_CONSOLE, PANEL_MIDI, PANEL_SOUND, PANEL_MONITOR, PANEL_TOOLS, PANEL_COUNT };
+static const char *const PX_PANEL_NAMES[PANEL_COUNT] = {"MACHINE", "FILES", "CPU", "MEMORY", "CONSOLE", "MIDI", "SOUND", "MONITOR", "TOOLS"};
 static const char *const PX_BUTTON_NAMES[14] = {"OCT-", "OCT+", "FX", "SCL", "ENV", "LFO", "EDIT", "GLO", "HOME", "SAVE", "ARP", "SEQ", "PLAY", "REC"};
 static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", "KNOB2", "KNOB3", "KNOB4", "PRESETS"};
 static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
 
-enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 12, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
+enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 14, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
 
 typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
 
@@ -202,6 +204,10 @@ typedef struct {
     char tools[PX_MAX_TOOLS][PX_NAME];
     int ntools, tool_sel;
     char confirm[96];                   /* a question awaiting A or B, "" when none */
+    /* monitor: the host's numbers (monitor.h), the page, and the data rain (off by default, opt-in from TOOLS) */
+    MonView mon;
+    MonRain rain;
+    int mon_page, mon_paused, rain_on, rain_full, rain_still;
 } UiState;
 
 static inline void px_box(uint32_t *c, PxRect r, const char *title) {
@@ -300,6 +306,7 @@ static const char *const PX_HINTS[PANEL_COUNT][9] = {
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
     {"SEND TO THE MIDI JACK", "A  NOTE ON, THEN OFF", "LEFT RIGHT  NOTE", "UP DOWN  OCTAVE", "X Y  VELOCITY", "L2 R2  CHANNEL", "B  ALL NOTES OFF", "", ""},
     {"SCOPE, RECORDER, PREVIEW", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "L2  PREVIEW ON OR OFF", "UP DOWN  VOICE", "LEFT RIGHT  OCTAVE", "Y B A X  PLAY (PREVIEW)", ""},
+    {"THIS DEVICE, NOT THE FM-1", "L2 R2  PAGE", "X  SORT CPU MEM PID", "Y  FREEZE OR RESUME", "A BAR NEVER LIES: THE", "NUMBER AND ! * SAY IT TOO", "TOOLS: DATA RAIN", "", ""},
     {"RESET, SLOTS, JIT, PANIC", "UP DOWN  PICK", "LEFT RIGHT  SLOT", "A  RUN", "B  NO TO A QUESTION", "", "", "", ""},
 };
 
@@ -562,6 +569,253 @@ static inline void px_panel_sound(uint32_t *c, PxRect r, const UiState *u, int n
     }
 }
 
+/* ---- MONITOR: a `top` for the machine the app runs on (monitor.h, docs/MONITOR.md). Colour is never alone: the number and a glyph (* amber, ! red) say the
+ * same, and a bar's length is the value. An unknown value is a dash, in the dim colour; a box with no source here says n/a. ----------------------------- */
+static inline uint32_t px_lv_col(int lv) { return lv == LV_CRIT ? C_ERR : lv == LV_WARN ? C_WARN : C_OK; }
+static inline void px_textf(uint32_t *c, int x, int y, uint32_t col, int max_w, const char *fmt, ...) {
+    char b[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    px_text(c, x, y, b, col, 1, max_w);
+}
+/* "LABEL 54C!" in the verdict's colour; "LABEL -" dim when unknown. th is a TH_* row, or -1 for a plain number. */
+static inline int px_mon_num(uint32_t *c, int x, int y, int w, const char *label, int val, const char *unit, int th) {
+    char b[64];
+    int lv = th >= 0 ? mon_level(th, val) : LV_OK;
+    if (val < 0) snprintf(b, sizeof b, "%s -", label);
+    else snprintf(b, sizeof b, "%s %d%s%c", label, val, unit, th >= 0 ? mon_glyph(lv) : ' ');
+    return px_text(c, x, y, b, val < 0 ? C_DIM : th < 0 ? C_TEXT : px_lv_col(lv), 1, w);
+}
+static inline void px_mon_hist(uint32_t *c, int x, int y, const uint8_t *h, int n, int sw) {
+    px_rect(c, (PxRect){x, y, n * sw, 8}, C_BG);
+    for (int i = 0; i < n; i++) {
+        int p = h[MON_HIST - n + i], bh = p > 0 ? 1 + p * 7 / 100 : 0;
+        if (bh) px_rect(c, (PxRect){x + i * sw, y + 8 - bh, sw, bh}, px_lv_col(mon_level(TH_CPU, p)));
+    }
+}
+
+static inline int px_mon_cpu(uint32_t *c, PxRect b, const MonView *v, int narrow) {
+    int x = b.x + 8, y = b.y + 10, w = b.w - 16, shown = v->ncores < MON_SHOW_CORES ? v->ncores : MON_SHOW_CORES;
+    px_box(c, b, "CPU");
+    char s[48];
+    if (v->has_load) snprintf(s, sizeof s, "LOAD %.2f %.2f %.2f", v->load[0], v->load[1], v->load[2]); else snprintf(s, sizeof s, "LOAD -");
+    px_text(c, x, y, s, v->has_load ? C_TEXT : C_DIM, 1, w);
+    int xa = narrow ? x : x + 130, ya = narrow ? y + 11 : y;
+    px_mon_num(c, xa, ya, 0, "ALL", v->cpu_pct, "%", TH_CPU);
+    px_mon_num(c, narrow ? x + 66 : x + 210, narrow ? y + 11 : y, 0, "TEMP", v->temp_c, "C", TH_TEMP);
+    int yb = narrow ? y + 22 : y + 11;
+    snprintf(s, sizeof s, "GOV %s", v->gov[0] ? v->gov : "-");
+    px_text(c, x, yb, s, v->gov[0] ? C_TEXT : C_DIM, 1, narrow ? 80 : 124);
+    if (!v->sampled) px_text(c, narrow ? x + 84 : x + 130, yb, "SAMPLING...", C_WARN, 1, 0);
+    else px_textf(c, narrow ? x + 84 : x + 130, yb, C_DIM, 0, "%d CORE%s", v->ncores, v->ncores == 1 ? "" : "S");
+    int y0 = yb + 13, bw = narrow ? 28 : 130;
+    int hn = narrow ? 20 : MON_HIST, sw = narrow ? 2 : 3;
+    if (v->ncores == 0) px_text(c, x, y0, v->platform ? "NO CORE COUNTERS" : "N/A: NO HOST SOURCE", C_DIM, 1, w);
+    for (int i = 0; i < shown; i++) {
+        int ry = y0 + i * 11, pc = v->core_pct[i], bx = x + 20;
+        px_textf(c, x, ry, C_DIM, 0, "C%d", i);
+        px_meter(c, (PxRect){bx, ry, bw, 8}, pc < 0 ? 0 : pc, px_lv_col(mon_level(TH_CPU, pc)));
+        int tx = bx + bw + 4;
+        if (pc < 0) px_text(c, tx, ry, "-", C_DIM, 1, 0);
+        else px_textf(c, tx, ry, px_lv_col(mon_level(TH_CPU, pc)), 0, "%d%%%c", pc, mon_glyph(mon_level(TH_CPU, pc)));
+        int hx = tx + 34;
+        if (!narrow) { if (v->core_mhz[i] >= 0) px_textf(c, hx, ry, C_TEXT, 0, "%dM", v->core_mhz[i]); else px_text(c, hx, ry, "-", C_DIM, 1, 0); hx += 36; }
+        px_mon_hist(c, hx, ry, v->hist[i], hn, sw);
+    }
+    if (v->ncores > shown) px_textf(c, x, y0 + shown * 11, C_DIM, w, "+%d MORE CORES", v->ncores - shown);
+    return y0 + (shown + (v->ncores > shown)) * 11 + 6 - b.y;       /* the height this box wanted */
+}
+static inline int px_mon_cpu_h(const MonView *v, int narrow) { int sh = v->ncores < MON_SHOW_CORES ? v->ncores : MON_SHOW_CORES; if (sh < 1) sh = 1; return 10 + (narrow ? 33 : 22) + 13 + (sh + (v->ncores > sh)) * 11 + 6; }
+
+static inline void px_mon_mem(uint32_t *c, PxRect b, const MonView *v) {
+    int x = b.x + 8, y = b.y + 10, w = b.w - 16;
+    char a[16], t[16];
+    px_box(c, b, "MEMORY");
+    if (v->mem.has) {
+        int pct = (int)(v->mem.used_kb * 100 / (v->mem.total_kb ? v->mem.total_kb : 1)), lv = mon_level(TH_MEM, pct);
+        mon_kb_text(a, sizeof a, v->mem.used_kb); mon_kb_text(t, sizeof t, v->mem.total_kb);
+        px_textf(c, x, y, px_lv_col(lv), w, "RAM %s/%s %d%%%c", a, t, pct, mon_glyph(lv));
+        px_meter(c, (PxRect){x, y + 10, w, 7}, pct, px_lv_col(lv));
+        mon_kb_text(a, sizeof a, v->mem.cached_kb); mon_kb_text(t, sizeof t, v->mem.free_kb);
+        px_textf(c, x, y + 21, C_TEXT, w, "CACHE %s FREE %s", a, t);
+        mon_kb_text(a, sizeof a, v->mem.swap_used_kb); mon_kb_text(t, sizeof t, v->mem.swap_total_kb);
+        px_textf(c, x, y + 32, C_TEXT, w, "SWAP %s/%s", a, t);
+    } else {
+        px_text(c, x, y, "RAM N/A", C_DIM, 1, w);
+        px_text(c, x, y + 21, "CACHE N/A", C_DIM, 1, w);
+        px_text(c, x, y + 32, "SWAP N/A", C_DIM, 1, w);
+    }
+    if (v->self_rss_kb > 0) { mon_kb_text(a, sizeof a, (unsigned long long)v->self_rss_kb); px_textf(c, x, y + 43, C_TEXT, w, "APP RSS %s", a); }
+    else px_text(c, x, y + 43, "APP RSS N/A", C_DIM, 1, w);
+    if (v->app.emu_kb > 0) { mon_kb_text(a, sizeof a, (unsigned long long)v->app.emu_kb); px_textf(c, x, y + 54, C_TEXT, w, "EMU BUFFERS %s", a); }
+    else px_text(c, x, y + 54, "EMU BUFFERS NONE", C_DIM, 1, w);
+    if (v->has_card) {
+        int lv = mon_level(TH_CARD, v->card_free_pct);
+        mon_kb_text(a, sizeof a, v->card_free_mb * 1024);
+        px_textf(c, x, y + 65, px_lv_col(lv), w, "CARD %s FREE %d%%%c", a, v->card_free_pct, mon_glyph(lv));
+    } else px_text(c, x, y + 65, "CARD N/A", C_DIM, 1, w);
+}
+
+static inline void px_mon_app(uint32_t *c, PxRect b, const MonView *v) {
+    int x = b.x + 8, y = b.y + 10, w = b.w - 16;
+    const MonApp *p = &v->app;
+    px_box(c, b, "THIS APP");
+    if (p->speed_pct >= 0) { int lv = mon_level(TH_SPEED, p->speed_pct); px_textf(c, x, y, px_lv_col(lv), w, "SPEED %d.%02dX%c", p->speed_pct / 100, p->speed_pct % 100, mon_glyph(lv)); }
+    else px_text(c, x, y, "SPEED -  (NOT RUNNING)", C_DIM, 1, w);
+    px_textf(c, x, y + 11, C_TEXT, w, "JIT %s  AUDIO %d/S", p->jit ? "ON" : "OFF", p->cb_per_s);
+    px_textf(c, x, y + 22, p->late_cb ? C_ERR : C_TEXT, w, "LATE BUFFERS %d%s", p->late_cb, p->late_cb ? "!" : "");
+    int fl = mon_level(TH_FRAME, p->frame_ms);
+    px_textf(c, x, y + 33, px_lv_col(fl), w, "FRAME %dMS%c MAX %d", p->frame_ms, mon_glyph(fl), p->frame_max_ms);
+    if (p->job[0]) px_textf(c, x, y + 44, C_HEAD, w, "JOB %s %d%%", p->job, p->job_pct < 0 ? 0 : p->job_pct); else px_text(c, x, y + 44, "JOB NONE", C_DIM, 1, w);
+    px_textf(c, x, y + 55, p->fw[0] ? C_TEXT : C_DIM, w, "FW %s", p->fw[0] ? p->fw : "NONE");
+    if (v->app_cpu_x10 >= 0) { int pc = v->app_cpu_x10 / 10; px_textf(c, x, y + 66, px_lv_col(mon_level(TH_CPU, pc)), w, "APP CPU %d.%d%%%c", v->app_cpu_x10 / 10, v->app_cpu_x10 % 10, mon_glyph(mon_level(TH_CPU, pc))); }
+    else px_text(c, x, y + 66, "APP CPU -", C_DIM, 1, w);
+    px_textf(c, x, y + 77, C_DIM, w, "PANEL %d.%02d%% %dUS", v->share_x100 / 100, v->share_x100 % 100, v->sample_us);
+}
+
+static inline int px_mon_dev_h(int narrow) { return narrow ? 10 + 11 * 11 + 6 : 10 + 5 * 11 + 6; }
+static inline void px_mon_dev(uint32_t *c, PxRect b, const MonView *v, int narrow) {
+    int x = b.x + 8, y = b.y + 10, w = b.w - 16, x2 = narrow ? x : x + 196, w2 = narrow ? w : 184;
+    int r2 = narrow ? 4 : 0;                         /* the second column's first row: below the first column's in Zoomed, beside it in Standard */
+    px_box(c, b, "DEVICE");
+    if (v->bat.has) {
+        int lv = mon_level(TH_BATT, v->bat.pct);
+        px_textf(c, x, y, v->bat.pct < 0 ? C_DIM : px_lv_col(lv), w, "BATTERY %d%%%c", v->bat.pct, mon_glyph(lv));
+        px_text(c, x, y + 11, v->bat.status[0] ? v->bat.status : "STATE -", C_TEXT, 1, w);
+        if (v->bat.mw >= 0) px_textf(c, x, y + 22, C_TEXT, w, "DRAW %d MW", v->bat.mw); else px_text(c, x, y + 22, "DRAW -", C_DIM, 1, w);
+    } else {
+        px_text(c, x, y, "BATTERY N/A", C_DIM, 1, w);
+        px_text(c, x, y + 11, "STATE N/A", C_DIM, 1, w);
+        px_text(c, x, y + 22, "DRAW N/A", C_DIM, 1, w);
+    }
+    if (v->wake_ps >= 0) px_textf(c, x, y + 33, C_TEXT, w, "WAKE-UPS %d/S", v->wake_ps); else px_text(c, x, y + 33, "WAKE-UPS -", C_DIM, 1, w);
+    int y2 = y + r2 * 11;
+    px_textf(c, x2, y2, C_TEXT, w2, "PADS %d", v->app.njoy);
+    px_textf(c, x2, y2 + 11, v->app.midi[0] ? C_TEXT : C_DIM, w2, "MIDI %s", v->app.midi[0] ? v->app.midi : "NONE");
+    px_textf(c, x2, y2 + 22, v->net[0] ? C_TEXT : C_DIM, w2, "NET %s", v->net[0] ? v->net : "N/A");
+    int nh = narrow ? 3 : 2;                         /* the hot-plug history, newest first */
+    if (narrow) px_text(c, x2, y2 + 33, "HOT-PLUG:", C_HEAD, 1, w2);
+    for (int i = 0; i < nh; i++) {
+        int hy = narrow ? y2 + 44 + i * 11 : y2 + 33 + i * 11;
+        if (v->app.hot[i][0]) px_text(c, x2, hy, v->app.hot[i], i ? C_DIM : C_TEXT, 1, w2);
+        else if (i == 0) px_text(c, x2, hy, narrow ? "NONE YET" : "HOT-PLUG: NONE YET", C_DIM, 1, w2);
+    }
+}
+
+static inline void px_mon_procs(uint32_t *c, PxRect b, const MonView *v, int narrow, int page_in_procs) {
+    int rows = narrow ? MON_ROWS_NARROW : MON_ROWS_STD, x = b.x + 8, y = b.y + 10, w = b.w - 16;
+    static const char *const sortn[MON_SORTS] = {"CPU", "MEM", "PID"};
+    char s[64];
+    px_box(c, b, "PROCESSES");
+    if (!v->procs_read) { px_text(c, x, y, "READING...", C_WARN, 1, w); return; }
+    if (narrow) snprintf(s, sizeof s, "%d TASKS  SORT %s", v->nproc_total, sortn[v->sort % MON_SORTS]);
+    else snprintf(s, sizeof s, "%d TASKS%s  SORT %s   (%%CPU OF ONE CORE)", v->nproc_total, v->proc_capped ? " (FIRST 192 READ)" : "", sortn[v->sort % MON_SORTS]);
+    px_text(c, x, y, s, C_DIM, 1, w);
+    if (!v->platform) { px_text(c, x, y + 13, "N/A: NO HOST SOURCE", C_DIM, 1, w); return; }
+    if (narrow) px_text(c, x, y + 11, "PID   NAME   CPU  RSS", C_HEAD, 1, w);
+    else { px_text(c, x, y + 11, "PID", C_HEAD, 1, 0); px_text(c, x + 42, y + 11, "NAME", C_HEAD, 1, 0); px_text(c, x + 134, y + 11, "CPU", C_HEAD, 1, 0); px_text(c, x + 288, y + 11, "RSS", C_HEAD, 1, 0); }
+    for (int i = 0; i < rows; i++) {
+        int idx = page_in_procs * rows + i;
+        if (idx >= v->nprocs) break;
+        const MonProc *p = &v->procs[idx];
+        int ry = y + 22 + i * 11, pc = p->cpu_x10 / 10 > 100 ? 100 : p->cpu_x10 / 10, lv = mon_level(TH_CPU, pc);
+        uint32_t col = p->pid == v->self_pid ? C_HEAD : C_TEXT;
+        char rss[16];
+        mon_kb_text(rss, sizeof rss, (unsigned long long)p->rss_kb);
+        if (narrow) {
+            px_textf(c, x, ry, col, 0, "%-5d %-6.6s", p->pid, p->name);
+            px_textf(c, x + 78, ry, px_lv_col(lv), 0, "%d%%%c", p->cpu_x10 / 10, mon_glyph(lv));
+            px_text(c, x + 112, ry, rss, col, 1, 0);
+        } else {
+            px_textf(c, x, ry, col, 0, "%-6d %-14.14s", p->pid, p->name);
+            px_textf(c, x + 134, ry, px_lv_col(lv), 0, "%d.%d%%%c", p->cpu_x10 / 10, p->cpu_x10 % 10, mon_glyph(lv));
+            px_meter(c, (PxRect){x + 182, ry, 100, 8}, pc, px_lv_col(lv));
+            px_text(c, x + 288, ry, rss, col, 1, 0);
+        }
+    }
+}
+static inline void px_mon_threads(uint32_t *c, PxRect b, const MonView *v, int narrow) {
+    int x = b.x + 8, y = b.y + 10, w = b.w - 16;
+    px_box(c, b, "THIS APP'S THREADS");
+    if (!v->nthr) { px_text(c, x, y, v->platform ? "NONE LISTED" : "N/A: NO HOST SOURCE", C_DIM, 1, w); return; }
+    for (int i = 0; i < v->nthr; i++) {
+        const MonThread *t = &v->thr[i];
+        int pc = t->cpu_x10 / 10 > 100 ? 100 : t->cpu_x10 / 10, lv = mon_level(TH_CPU, t->cpu_x10 < 0 ? -1 : pc);
+        px_textf(c, x, y + i * 11, C_TEXT, narrow ? 66 : 150, "%s", t->name);
+        if (t->cpu_x10 < 0) px_text(c, x + (narrow ? 70 : 154), y + i * 11, "-", C_DIM, 1, 0);
+        else px_textf(c, x + (narrow ? 70 : 154), y + i * 11, px_lv_col(lv), 0, "%d.%d%%%c", t->cpu_x10 / 10, t->cpu_x10 % 10, mon_glyph(lv));
+        if (!narrow && t->core >= 0) px_textf(c, x + 224, y + i * 11, C_DIM, 0, "CORE %d", t->core);
+    }
+}
+
+/* The data rain: the newest row at the top, each row led by the letter of its source (A audio out, M MIDI bytes, P LCD pixels, R emulated RAM). */
+static inline void px_mon_rain(uint32_t *c, PxRect b, const UiState *u, int narrow) {
+    px_box(c, b, u->rain_still ? "DATA IN FLIGHT (STILL)" : "DATA IN FLIGHT");
+    int cols = (b.w - 32) / 18, rows = (b.h - 16) / 10;
+    if (cols > RAIN_COLS) cols = RAIN_COLS;
+    if (narrow && cols > 7) cols = 7;
+    for (int i = 0; i < rows; i++) {
+        char tag = '?';
+        const uint8_t *r = rain_row(&u->rain, i, &tag);
+        if (!r) break;
+        int ry = b.y + 10 + i * 10;
+        px_textf(c, b.x + 8, ry, C_DIM, 0, "%c", tag);
+        for (int col = 0; col < cols; col++) px_textf(c, b.x + 22 + col * 18, ry, i == 0 ? C_OK : C_DIM, 0, "%02X", r[col]);
+    }
+}
+
+/* Draws the panel; returns the lowest y of any box it drew (the self-test checks it stays above the foot: the page line and the hint). */
+static inline int px_panel_monitor(uint32_t *c, PxRect r, const UiState *u, int narrow) {
+    const MonView *v = &u->mon;
+    int pages = mon_pages(narrow, v->nprocs), page = u->mon_page < 0 ? 0 : u->mon_page >= pages ? pages - 1 : u->mon_page;
+    int foot = r.y + r.h - 26, lx = r.x + 4, bw = r.w - 8;
+    if (u->rain_on && u->rain_full) {             /* after a stretch of no input: the whole panel is the rain; any key ends it */
+        px_mon_rain(c, (PxRect){lx, r.y + 8, bw, r.h - 40}, u, narrow);
+        px_text(c, r.x + 10, foot, "ANY KEY ENDS THIS", C_DIM, 1, r.w - 20);
+        return r.y + r.h - 32;
+    }
+    int free_y = r.y + 8, bottom = r.y + 8;
+    if (narrow) {
+        if (page == 0) {
+            int h = px_mon_cpu_h(v, 1);
+            px_mon_cpu(c, (PxRect){lx, r.y + 8, bw, h}, v, 1);
+            px_mon_mem(c, (PxRect){lx, r.y + 8 + h + 8, bw, 90}, v);
+            free_y = r.y + 8 + h + 8 + 90 + 8; bottom = free_y - 8;
+        } else if (page == 1) {
+            px_mon_app(c, (PxRect){lx, r.y + 8, bw, 100}, v);
+            int th = 14 + (v->nthr ? v->nthr : 1) * 11;
+            px_mon_threads(c, (PxRect){lx, r.y + 116, bw, th}, v, 1);
+            int dy = r.y + 116 + th + 8;
+            px_mon_dev(c, (PxRect){lx, dy, bw, px_mon_dev_h(1)}, v, 1);
+            free_y = dy + px_mon_dev_h(1) + 8; bottom = free_y - 8;
+        } else { px_mon_procs(c, (PxRect){lx, r.y + 8, bw, 22 + MON_ROWS_NARROW * 11 + 14}, v, 1, page - 2); bottom = r.y + 8 + 22 + MON_ROWS_NARROW * 11 + 14; }
+    } else {
+        if (page == 0) {
+            int h = px_mon_cpu_h(v, 0), y = r.y + 8;
+            px_mon_cpu(c, (PxRect){lx, y, bw, h}, v, 0);
+            y += h + 8;
+            px_mon_mem(c, (PxRect){lx, y, bw / 2 - 2, 100}, v);
+            px_mon_app(c, (PxRect){lx + bw / 2 + 2, y, bw / 2 - 2, 100}, v);
+            y += 108;
+            px_mon_dev(c, (PxRect){lx, y, bw, px_mon_dev_h(0)}, v, 0);
+            free_y = y + px_mon_dev_h(0) + 8; bottom = free_y - 8;
+        } else {
+            px_mon_procs(c, (PxRect){lx, r.y + 8, bw, 22 + MON_ROWS_STD * 11 + 14}, v, 0, page - 1);
+            int ty = r.y + 8 + 22 + MON_ROWS_STD * 11 + 14 + 8;
+            px_mon_threads(c, (PxRect){lx, ty, bw, 14 + (v->nthr ? v->nthr : 1) * 11}, v, 0);
+            bottom = ty + 14 + (v->nthr ? v->nthr : 1) * 11;
+        }
+    }
+    if (u->rain_on && foot - free_y >= 40 && (narrow ? page <= 1 : page == 0))          /* "if there is space": whatever the page left free */
+        px_mon_rain(c, (PxRect){lx, free_y, bw, foot - free_y - 2}, u, narrow);
+    char s[64];
+    snprintf(s, sizeof s, "%s PAGE %d/%d%s", v->platform == MON_PLAT_LINUX ? "LINUX" : v->platform == MON_PLAT_MAC ? "MACOS" : "NO HOST SOURCE", page + 1, pages, u->mon_paused ? "  FROZEN" : "");
+    px_text(c, r.x + 10, foot + 4, s, u->mon_paused ? C_WARN : C_DIM, 1, r.w - 20);
+    return bottom;
+}
+
 static inline void px_panel_tools(uint32_t *c, PxRect r, const UiState *u, int narrow) {
     int x = r.x + 10, w = r.w - 20;
     int page = 0;
@@ -606,6 +860,7 @@ static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
     case PANEL_CONSOLE: px_panel_console(c, cr, u, narrow); break;
     case PANEL_MIDI: px_panel_midi(c, cr, u, narrow); break;
     case PANEL_SOUND: px_panel_sound(c, cr, u, narrow); break;
+    case PANEL_MONITOR: px_panel_monitor(c, cr, u, narrow); break;
     default: px_panel_tools(c, cr, u, narrow); break;
     }
     if (u->confirm[0]) px_confirm(c, cr, u->confirm);

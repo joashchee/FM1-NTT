@@ -36,7 +36,7 @@ The FM-1's 240 x 240 screen is drawn **pixel for pixel, flush top left**; the re
 | | Standard | Zoomed |
 |---|---|---|
 | FM-1 screen | 1x, (0,0)-(239,239) | 2x, each pixel a 2 x 2 block, (0,0)-(479,479) |
-| Panels | right, x 240-639 the full height (machine, buttons, keys, encoders and pot, sound, log); below the screen, x 0-239, y 240-479 (controls) | right, x 480-639 (state, sound, keys, buttons, log) |
+| Panels | right, x 240-639 the full height (machine, buttons, keys, encoders and pot, sound, the host monitor, log); below the screen, x 0-239, y 240-479 (controls) | right, x 480-639 (state, sound, keys, buttons, log) |
 
 `host/pix.h` holds the layout (`px_screen_rect`, `px_panel_rects`) and the drawing; the self-test checks, **on every panel in both modes**,
 that the screen lands exactly (1x and 2x), that the panels and the screen tile the window with no overlap, that every printable character has a
