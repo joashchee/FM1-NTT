@@ -2008,6 +2008,33 @@ static int mon_selftest(const char *root, App *app) {
     return bad;
 }
 
+/* How fast is this CPU at the emulator? The self-test's real showcase runs, workers and demo playback take about a minute natively and many minutes under qemu-user (CI's arm64
+ * package job, an x86_64 runner whose container says `uname -m` aarch64, so the architecture cannot tell): below 15 million emulated instructions a second (a Mac and native arm64 Linux manage 25 to 35 million; qemu-user a few) the self-test is light.
+ * $FM1NTT_SELFTEST_LIGHT=1 forces light, $FM1NTT_SELFTEST_FULL=1 forces everything. */
+static double emu_speed_ips(void) {
+    fm1ntt_machine *m = fm1ntt_new();
+    static uint8_t img[1 << 16];
+    static int16_t buf[1024];
+    size_t n = fm1ntt_bench_image(img, sizeof img);
+    if (!m || !n || fm1ntt_load_raw(m, img, n, FM1_ENTRY_FELUCCA) != 0) { if (m) fm1ntt_free(m); return 1e12; }
+    double t0 = mon_now_ms();
+    while (mon_now_ms() - t0 < 300.0) fm1ntt_render(m, buf, 512, 2000000);
+    double dt = mon_now_ms() - t0;
+    Fm1Cpu c;
+    double ips = fm1ntt_cpu(m, 0, &c) && dt > 0 ? (double)c.insns * 1000.0 / dt : 1e12;
+    fm1ntt_free(m);
+    return ips;
+}
+static int selftest_light(void) {
+    static int v = -1;
+    if (v < 0) {
+        if (getenv("FM1NTT_SELFTEST_FULL")) v = 0;
+        else if (getenv("FM1NTT_SELFTEST_LIGHT")) v = 1;
+        else { double ips = emu_speed_ips(); v = ips < 15e6; fprintf(stderr, "  selftest: the emulator runs %.0f million instructions a second here: %s\n", ips / 1e6, v ? "light run" : "full run"); }
+    }
+    return v;
+}
+
 /* ---- the firmware showcase's tests (host/showcase.h) -------------------------------------------------------------------------------- */
 static unsigned long long show_tree_hash(const char *dir) {                 /* FNV-1a over every file's name and bytes, in name order */
     DIR *d = opendir(dir);
@@ -2123,10 +2150,11 @@ static int show_selftest(const char *root) {
     SCHECK(showcase_run(junkfw, 0, FM1_ENTRY_FELUCCA, 0, base, 0, res, sizeof res) == 1 && strstr(res, "failed: cannot load"));
     { char sh[65], d[460], b2[64]; (void)b2; size_t n = 0, w2[1]; (void)w2; char why[64]; uint8_t *bb = read_file(junkfw, &n, why, sizeof why); fm1ntt_sha256_hex(bb, n, sh); free(bb); show_dir(d, sizeof d, base, sh);
       ShowState st; show_state_read(d, &st); SCHECK(st.have && !strcmp(st.state, "failed") && strstr(st.reason, "cannot load") && !show_needed(&st)); }
+    { struct sigaction cur; sigaction(SIGTERM, NULL, &cur); SCHECK(cur.sa_handler != show_on_term); sigaction(SIGINT, NULL, &cur); SCHECK(cur.sa_handler != show_on_term); }   /* a finished run puts the signals back: `timeout` still ends a process that goes on */
     SCHECK(showcase_run("/nonexistent/fw.fwsc", 0, 0, 0, base, 0, res, sizeof res) == 2);
     char empty[460]; snprintf(empty, sizeof empty, "%s/empty.fwsc", root); { FILE *f = fopen(empty, "wb"); if (f) fclose(f); }
     SCHECK(showcase_run(empty, 0, 0, 0, base, 0, res, sizeof res) == 2);
-    if (getenv("FM1NTT_SELFTEST_LIGHT")) { fprintf(stderr, "  showcase: light run (an emulated CPU): the real runs, the worker and the cancel are left to the native run\n"); return fails; }
+    if (selftest_light()) { fprintf(stderr, "  showcase: light run (a slow CPU): the real runs, the worker and the cancel are left to a fast one\n"); return fails; }
     char dflt[300];
     { char *sv = getenv("FM1NTT_BUNDLED") ? strdup(getenv("FM1NTT_BUNDLED")) : NULL; unsetenv("FM1NTT_BUNDLED"); default_firmware(dflt, sizeof dflt); if (sv) { setenv("FM1NTT_BUNDLED", sv, 1); free(sv); } }
     if (!dflt[0]) { fprintf(stderr, "  showcase: no bundled firmware here, the runs are skipped\n"); return fails; }
@@ -2213,7 +2241,7 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     a->last_input_ms = 1000;
     a->job = (SDL_Thread *)(uintptr_t)1; ACHECK(show_may_run(a, 100000.0) == 0); a->job = NULL;
     a->sw_low = 1; ACHECK(show_may_run(a, 100000.0) == 0); a->sw_low = 0;
-    if (getenv("FM1NTT_SELFTEST_LIGHT")) goto draw_tests;                                         /* an emulated CPU: no real worker, no real demo to play */
+    if (selftest_light()) goto draw_tests;                                         /* an emulated CPU: no real worker, no real demo to play */
     /* the queue starts nothing while it is off, and no more than one worker; a worker is cancelled and leaves nothing */
     a->bg_demos = 0; a->sw_next_ms = 0; a->sw_cursor = 0; a->paused = 1;
     show_queue(a, 100000.0); ACHECK(a->sw_pid == 0);

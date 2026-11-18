@@ -307,7 +307,7 @@ static int show_fail(const char *dir, ShowState *st, const char *why, char *resu
 }
 
 /* Makes the showcase of `fw` under `base`/demos/<sha>/. `budget_s`: the wall-time budget (0: 900 s). `jit`: the native JIT (faster on a slow unit). See the top. */
-static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const char *base, double budget_s, char *result, size_t rn) {
+static int showcase_run_inner(const char *fw, int raw, uint32_t entry, int jit, const char *base, double budget_s, char *result, size_t rn) {
     char why[64];
     size_t fn = 0;
     uint8_t *bytes = read_file(fw, &fn, why, sizeof why);
@@ -324,11 +324,6 @@ static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const 
     if (mkdir_p(p) != 0 || mkdir_p(dir) != 0) { free(bytes); snprintf(result, rn, "cannot make %.180s", dir); return 2; }
     snprintf(st.state, sizeof st.state, "recording");
     show_state_write(dir, &st);
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = show_on_term;
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGINT, &sa, NULL);
     g_show_cancel = 0;
 
     fm1ntt_machine *m = fm1ntt_new();
@@ -395,6 +390,20 @@ static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const 
     remove(p);
     snprintf(result, rn, "ready: %d pictures, %.0f s, in demos/%.12s", shots, (double)SHOW_TICKS / SHOW_FPS, sha);
     return 0;
+}
+
+/* The run, with SIGTERM and SIGINT meaning "stop and clean up" only while it runs: the handlers are put back afterwards, so a process that makes a showcase and goes on
+ * (the self-test) is still ended by `timeout`'s SIGTERM instead of swallowing it as a cancel. */
+static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const char *base, double budget_s, char *result, size_t rn) {
+    struct sigaction sa, old_term, old_int;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = show_on_term;
+    sigaction(SIGTERM, &sa, &old_term);
+    sigaction(SIGINT, &sa, &old_int);
+    int rc = showcase_run_inner(fw, raw, entry, jit, base, budget_s, result, rn);
+    sigaction(SIGTERM, &old_term, NULL);
+    sigaction(SIGINT, &old_int, NULL);
+    return rc;
 }
 
 #endif
