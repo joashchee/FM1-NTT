@@ -111,7 +111,7 @@ fn main() -> ExitCode {
     let Ok(mut m) = Machine::from_package(&bytes) else { eprintln!("not a package"); return ExitCode::from(1) };
     m.set_jit(true);
     let mut rec: Vec<f64> = Vec::new();
-    let mut run = |m: &mut Machine, secs: f64, rec: Option<&mut Vec<f64>>| {
+    let run = |m: &mut Machine, secs: f64, rec: Option<&mut Vec<f64>>| {
         let target = m.ms() + (secs * 1000.0) as u64;
         let mut out = vec![0i16; 2 * 1024];
         let mut keep = rec;
