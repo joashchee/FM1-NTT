@@ -11,6 +11,7 @@ pub mod bench;
 pub mod capi;
 pub mod capi_inst;
 pub mod capi_sound;
+pub mod catalog;
 pub mod devices;
 pub mod engine;
 pub mod evq;
