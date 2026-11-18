@@ -1425,7 +1425,14 @@ static void info_open(App *a, int i) {
     memset(&a->info_rec, 0, sizeof a->info_rec);
     file_sha(a, i);
     const char *dir = a->fbundled[i] == 1 ? a->bdir : a->fbundled[i] == 2 ? a->pdir : "";
-    if (dir[0] && show_sha_ok(a->fsha[i])) a->info_rec.found = manifest_find(dir, a->fsha[i], a->info_rec.licence, sizeof a->info_rec.licence, a->info_rec.source, sizeof a->info_rec.source, a->info_rec.name, sizeof a->info_rec.name);
+    if (dir[0] && show_sha_ok(a->fsha[i])) {
+        /* beside the firmware (the repository), else in the installed package's doc folder (usr/share/doc/..., two levels up from usr/share/fm1ntt/firmware) */
+        const char *docs = a->fbundled[i] == 1 ? "doc/fm1ntt/bundled" : "doc/fm1ntt-firmware-pack";
+        char alt[460];
+        snprintf(alt, sizeof alt, "%s/../../%s", dir, docs);
+        for (int k = 0; k < 2 && !a->info_rec.found; k++)
+            a->info_rec.found = manifest_find(k ? alt : dir, a->fsha[i], a->info_rec.licence, sizeof a->info_rec.licence, a->info_rec.source, sizeof a->info_rec.source, a->info_rec.name, sizeof a->info_rec.name);
+    }
     a->info_on = 1;
     a->info_i = i;
 }
