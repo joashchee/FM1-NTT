@@ -166,6 +166,21 @@ def ntt_problems(root, hint, skip_pack_repo=True):
     return problems
 
 
+def demo_problems(root, hint, skip_pack_repo=True):
+    """A firmware's showcase demo (`demos/<sha256>/`, docs/SHOWCASE.md) is made on the person's device from a file they hold: local output, never shipped. A `demos/` folder, or a
+    showcase sidecar (`state.txt` beside `audio.wav`), in the repository or a build is an error."""
+    problems = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not (skip_pack_repo and d == PACK_REPO_NAME)]
+        rel = os.path.relpath(dirpath, root)
+        if os.path.basename(dirpath) == "demos" and rel != ".":
+            problems.append("%s: a demos folder holds a firmware's recorded demo, which is local output (%s)" % (rel, hint))
+            dirnames[:] = []
+        elif "state.txt" in filenames and "audio.wav" in filenames:
+            problems.append("%s: a firmware showcase demo (%s)" % (rel, hint))
+    return problems
+
+
 def check(repo):
     """The MIT app's repository: the permissive tier, no copyleft pack inside, no stray firmware."""
     problems, listed = [], set()
@@ -176,6 +191,7 @@ def check(repo):
         problems.append("MANIFEST.tsv at the root: that is a pack manifest; this repository holds only bundled-firmware/")
     stray_firmware(repo, listed, problems, "bring-your-own firmware belongs outside the repository; copyleft firmware belongs in the FM1-NTT Firmware Pack repository")
     problems += ntt_problems(repo, "a port of copyleft firmware belongs in the FM1-NTT Firmware Pack repository")
+    problems += demo_problems(repo, "demos are made on a device and are never committed")
     if os.path.isdir(os.path.join(repo, PACK_REPO_NAME)):
         print("check-bundled: WARNING: %s/ is inside this repository: it is a separate repository; move it out (mv %s ..)" % (PACK_REPO_NAME, PACK_REPO_NAME), file=sys.stderr)
     return problems
@@ -215,6 +231,7 @@ def check_no_pack(repo, target, pack_manifest=None):
                 if len(cells) == len(BASE_COLUMNS):
                     allowed_fw.add(cells[1])
     problems += ntt_problems(target, "no copyleft port in a permissive-only build", skip_pack_repo=False)
+    problems += demo_problems(target, "demos are never shipped in a build", skip_pack_repo=False)
     for dirpath, _, filenames in os.walk(target):
         for name in filenames:
             p = os.path.join(dirpath, name)

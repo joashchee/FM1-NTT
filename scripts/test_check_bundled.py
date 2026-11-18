@@ -186,6 +186,23 @@ class Separation(unittest.TestCase):
         open(os.path.join(build, "x.fm1i"), "w").write("fm1i = 1\nlicence = LGPL-2.1-only\n")
         self.assertTrue(any("not permissive" in p for p in cb.check_no_pack(self.repo, build, None)))
 
+    def test_a_recorded_demo_is_refused_in_the_repository_and_in_a_build(self):
+        self.assertEqual(cb.check(self.repo), [])
+        d = os.path.join(self.repo, "demos", "ab" * 32)
+        os.makedirs(d)
+        self.assertTrue(any("demos folder" in p for p in cb.check(self.repo)))
+        shutil.rmtree(os.path.join(self.repo, "demos"))
+        side = os.path.join(self.repo, "x", "y")
+        os.makedirs(side)
+        open(os.path.join(side, "state.txt"), "w").write("ready\n")
+        self.assertEqual(cb.check(self.repo), [])                                                    # a state file alone is not a demo
+        open(os.path.join(side, "audio.wav"), "wb").write(b"RIFF")
+        self.assertTrue(any("showcase demo" in p for p in cb.check(self.repo)))
+        build = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, build)
+        os.makedirs(os.path.join(build, "Resources", "demos"))
+        self.assertTrue(any("demos folder" in p for p in cb.check_no_pack(self.repo, build, None)))
+
     def test_a_mac_app_store_build_may_hold_no_pack_file(self):
         manifest = os.path.join(self.repo, "pack-manifest.tsv")
         src = b"source archive"
