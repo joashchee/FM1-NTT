@@ -409,7 +409,7 @@ static int rec_demo_run(unsigned mask, const char *firmware, int firmware_raw, i
     App *a = &r->app;
     a->m = fm1ntt_new();
     mon_init(&a->mon, NULL);                   /* the tour never samples the host: the MONITOR frame is the same every time (a recording stays deterministic) */
-    a->budget = g_demo_budget;
+    a->budget = g_demo_budget ? g_demo_budget : 64000000u;      /* offline: never reach the cap (at 8 million instructions a buffer the core pads the sound with silence: gaps in the demo's audio) */
     a->midi_note = 60; a->midi_vel = 100; a->slot = 1; a->mode = MODE_STANDARD;
     say(a, 0, "Pick a firmware in FILES", NULL);
     scan_files(a);

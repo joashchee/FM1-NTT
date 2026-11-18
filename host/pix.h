@@ -214,7 +214,10 @@ typedef struct {
     int info_on;                        /* the page of the picked firmware replaces the list */
     char info_name[PX_NAME], info_tier[40], info_licence[104], info_source[124], info_sha[65], info_demo[104];
     int info_demo_kind, info_pct, info_busy, info_can_play;   /* kind: 0 none yet, 1 being made, 2 ready, 3 failed; busy: a demo of THIS firmware is being made */
-    int playing;
+    int playing;                        /* a demo is playing: the whole window is the player (the picture at 2x, flush top left, and this column) */
+    int pl_tick, pl_ticks, pl_idx, pl_nf;
+    char pl_step[32], pl_name[PX_NAME], pl_tier[40], pl_licence[104];
+    uint64_t pl_keys;                   /* the matrix bits the tour holds now */
     char app_root[128], app_root_why[64];   /* the app's folder (where everything is written) and which rule chose it */
 } UiState;
 
@@ -895,8 +898,47 @@ static inline void px_confirm(uint32_t *c, PxRect r, const char *q) {
     px_text(c, b.x + 8, b.y + b.h - 14, "A  YES      B  NO", C_HEAD, 1, b.w - 16);
 }
 
+/* The player's column (160 x 480 at the right of the 2x picture): whose demo, how far, what the tour is doing, which keys, the sound, and what it is. */
+static inline void px_panel_player(uint32_t *c, PxRect r, const UiState *u) {
+    int x = r.x + 8, w = r.w - 16;
+    char line[64];
+    px_box(c, (PxRect){r.x + 2, r.y + 8, r.w - 4, 96}, "DEMO");
+    px_wrap(c, x, r.y + 20, u->pl_name, C_TEXT, w, 2);
+    px_wrap(c, x, r.y + 42, u->pl_tier, C_HEAD, w, 2);
+    px_wrap(c, x, r.y + 64, u->pl_licence[0] ? u->pl_licence : "-", C_DIM, w, 4);
+    px_box(c, (PxRect){r.x + 2, r.y + 114, r.w - 4, 82}, "NOW");
+    px_wrap(c, x, r.y + 126, u->pl_step, C_OK, w, 2);
+    int total = u->pl_ticks > 0 ? u->pl_ticks : 1, pct = u->pl_tick * 100 / total;
+    px_meter(c, (PxRect){x, r.y + 148, w, 8}, pct > 100 ? 100 : pct, C_HEAD);
+    snprintf(line, sizeof line, "%d:%02d / %d:%02d", u->pl_tick / 30 / 60, u->pl_tick / 30 % 60, u->pl_ticks / 30 / 60, u->pl_ticks / 30 % 60);
+    px_text(c, x, r.y + 162, line, C_TEXT, 1, w);
+    snprintf(line, sizeof line, "PICTURE %d OF %d", u->pl_idx + 1, u->pl_nf);
+    px_text(c, x, r.y + 174, line, C_DIM, 1, w);
+    px_box(c, (PxRect){r.x + 2, r.y + 206, r.w - 4, 52}, "KEYS HELD");
+    px_keyboard(c, (PxRect){x, r.y + 218, w, 32}, u->pl_keys);
+    px_box(c, (PxRect){r.x + 2, r.y + 268, r.w - 4, 92}, "SOUND");
+    PxRect sc = {x, r.y + 280, w, 48};
+    px_rect(c, sc, C_BG);
+    px_rect(c, (PxRect){sc.x, sc.y + sc.h / 2, sc.w, 1}, C_FRAME);
+    int prev = sc.h / 2;
+    for (int i = 0; i < sc.w; i++) {
+        int v = u->scope[i * PX_SCOPE / sc.w], y = sc.h / 2 - v * (sc.h / 2 - 1) / 32768;
+        int lo = y < prev ? y : prev, hi = y < prev ? prev : y;
+        px_rect(c, (PxRect){sc.x + i, sc.y + lo, 1, hi - lo + 1}, C_OK);
+        prev = y;
+    }
+    px_text(c, x, r.y + 333, "L", C_DIM, 1, 0);
+    px_meter(c, (PxRect){x + 10, r.y + 332, w - 10, 7}, u->level_l, C_OK);
+    px_text(c, x, r.y + 345, "R", C_DIM, 1, 0);
+    px_meter(c, (PxRect){x + 10, r.y + 344, w - 10, 7}, u->level_r, C_OK);
+    px_box(c, (PxRect){r.x + 2, r.y + 370, r.w - 4, 80}, "WHAT THIS IS");
+    px_wrap(c, x, r.y + 382, "A 15 S TOUR THE APP PLAYED ON THIS FIRMWARE: BOOT, THREE NOTES, A CHORD, ONE TURN OF THE SELECT KNOB. ITS OWN SCREEN AT 2X.", C_DIM, w, 6);
+    px_text(c, x, r.y + 460, "ANY KEY STOPS", C_HEAD, 1, w);
+}
+
 /* Draws the whole window into c (PX_W x PX_H ARGB): the FM-1's screen first, then the carousel and the current panel around it. */
 static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
+    if (u->playing) mode = MODE_ZOOMED;                          /* a demo plays at 2x whatever the layout was */
     for (int i = 0; i < PX_W * PX_H; i++) c[i] = C_BG;
     /* the FM-1's screen, pixel accurate: 1x copies, 2x makes each pixel a 2x2 block (no smoothing) */
     int s = px_scale(mode);
@@ -907,6 +949,7 @@ static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
                 for (int dx = 0; dx < s; dx++) c[(y * s + dy) * PX_W + x * s + dx] = v;
         }
     if (!u->fb_valid) px_text(c, 8, 8, "NO SIGNAL", C_DIM, 1, 0);
+    if (u->playing) { PxRect pp[2]; px_panel_rects(MODE_ZOOMED, pp); px_rect(c, pp[0], C_BG); px_panel_player(c, pp[0], u); return; }
     int narrow = mode == MODE_ZOOMED, p = u->panel >= 0 && u->panel < PANEL_COUNT ? u->panel : 0;
     PxRect pr[2], cr = px_content_rect(mode);
     px_panel_rects(mode, pr);

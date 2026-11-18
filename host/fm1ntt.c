@@ -146,7 +146,7 @@ typedef struct {
     double sw_start_ms, sw_next_ms, sw_batt_ms, sw_cancel_ms;
     char fsha[PX_MAX_FILES][65];        /* each firmware's SHA-256 ("" not yet taken, "-" unreadable): the key of its demo folder */
     struct { int found; char licence[96], source[120], name[48]; } info_rec;
-    struct { volatile int on; int16_t *pcm; size_t frames; volatile size_t pos; int nf, total_ms, cur; int ms[400]; char dir[420]; } pl;
+    struct { volatile int on; int16_t *pcm; size_t frames; volatile size_t pos; int nf, total_ms, cur; int ms[400]; char dir[420], name[PX_NAME], tier[40], licence[104]; } pl;
     uint32_t pl_pic[240 * 240];
     /* MONITOR (monitor.h, docs/MONITOR.md) */
     Mon mon;
@@ -1538,6 +1538,9 @@ static int player_start(App *a, int i) {
     snprintf(wp, sizeof wp, "%s/audio.wav", dir);
     if (nf < 1 || show_wav_read(wp, &pcm, &fr) != 0) { free(pcm); say(a, 3, "The demo's files cannot be read", NULL); return -1; }
     snprintf(a->pl.dir, sizeof a->pl.dir, "%s", dir);
+    snprintf(a->pl.name, sizeof a->pl.name, "%s", a->files[i]);
+    snprintf(a->pl.tier, sizeof a->pl.tier, "%s", a->fbundled[i] == 1 ? "BUNDLED (PERMISSIVE)" : a->fbundled[i] == 2 ? "THE GPL PACK (COPYLEFT)" : "YOUR OWN FILE");
+    snprintf(a->pl.licence, sizeof a->pl.licence, "%s", a->info_on && a->info_i == i && a->info_rec.found ? a->info_rec.licence : "");
     a->pl.nf = nf; a->pl.total_ms = total; a->pl.cur = -1; a->pl.pos = 0;
     lock(a);
     a->pl.pcm = pcm; a->pl.frames = fr; a->pl.on = 1;
@@ -1608,6 +1611,16 @@ static void ui_showcase(App *a, UiState *u) {
         if (a->pl.cur >= 0) { memcpy(u->fb, a->pl_pic, sizeof u->fb); u->fb_valid = 1; }
         u->run_state = "DEMO";
         u->playing = 1;
+        u->pl_tick = (int)((unsigned long long)a->pl.pos * SHOW_FPS / FM1_SAMPLE_RATE);
+        u->pl_ticks = SHOW_TICKS; u->pl_idx = a->pl.cur >= 0 ? a->pl.cur : 0; u->pl_nf = a->pl.nf;
+        snprintf(u->pl_step, sizeof u->pl_step, "%s", show_step(u->pl_tick));
+        snprintf(u->pl_name, sizeof u->pl_name, "%s", a->pl.name); snprintf(u->pl_tier, sizeof u->pl_tier, "%s", a->pl.tier); snprintf(u->pl_licence, sizeof u->pl_licence, "%s", a->pl.licence);
+        u->pl_keys = show_keys_at(u->pl_tick);
+        size_t pos = a->pl.pos < a->pl.frames ? a->pl.pos : a->pl.frames;           /* the sound just played: the scope (the last 960 frames, mono) and the peak of the last 1470 */
+        for (int k = 0; k < PX_SCOPE; k++) { size_t f = pos > 960 ? pos - 960 + (size_t)k * 4 : (size_t)k * 4; u->scope[k] = f < a->pl.frames ? (int16_t)((a->pl.pcm[f * 2] + a->pl.pcm[f * 2 + 1]) / 2) : 0; }
+        int pl_ = 0, pr_ = 0;
+        for (size_t f = pos > 1470 ? pos - 1470 : 0; f < pos; f++) { int l = abs(a->pl.pcm[f * 2]), r = abs(a->pl.pcm[f * 2 + 1]); if (l > pl_) pl_ = l; if (r > pr_) pr_ = r; }
+        u->level_l = pl_ * 100 / 32768; u->level_r = pr_ * 100 / 32768;
     }
 }
 
@@ -2020,21 +2033,38 @@ static int show_selftest(const char *root) {
 #define SCHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL (showcase): %s (line %d)\n", #c, __LINE__); fails++; } } while (0)
     /* the sidecar's rules */
     ShowState s;
-    show_state_parse("state=ready\nreason=\ntour=1\nframes=140\nms=15000\nattempts=1\njit=0\n", &s);
+    { char t[160]; snprintf(t, sizeof t, "state=ready\nreason=\ntour=%d\nframes=140\nms=15000\nattempts=1\njit=0\n", SHOW_TOUR); show_state_parse(t, &s); }
     SCHECK(s.have && !strcmp(s.state, "ready") && s.tour == SHOW_TOUR && s.frames == 140 && s.ms == 15000 && !show_needed(&s));
-    show_state_parse("state=failed\nreason=the screen stayed blank\ntour=1\nattempts=1\n", &s);
+    { char t[160]; snprintf(t, sizeof t, "state=failed\nreason=the screen stayed blank\ntour=%d\nattempts=1\n", SHOW_TOUR); show_state_parse(t, &s); }
     SCHECK(s.have && !show_needed(&s) && !strcmp(s.reason, "the screen stayed blank"));         /* a failure is not retried */
-    show_state_parse("state=failed\ntour=0\n", &s);
+    show_state_parse("state=failed\ntour=1\n", &s);   /* an older tour */
     SCHECK(show_needed(&s));                                                                      /* ... until the tour is a newer one */
-    show_state_parse("state=recording\ntour=1\nattempts=1\n", &s);
+    { char t[160]; snprintf(t, sizeof t, "state=recording\ntour=%d\nattempts=1\n", SHOW_TOUR); show_state_parse(t, &s); }
     SCHECK(show_needed(&s));                                                                      /* a run that was killed: once more */
-    show_state_parse("state=recording\ntour=1\nattempts=2\n", &s);
+    { char t[160]; snprintf(t, sizeof t, "state=recording\ntour=%d\nattempts=2\n", SHOW_TOUR); show_state_parse(t, &s); }
     SCHECK(!show_needed(&s));                                                                     /* ... and then it counts as failed */
     show_state_parse("", &s); SCHECK(!s.have && show_needed(&s));
-    show_state_parse("state=banana\ntour=1\n", &s); SCHECK(!s.have && show_needed(&s));
+    show_state_parse("state=banana\ntour=2\n", &s); SCHECK(!s.have && show_needed(&s));
     show_state_parse("garbage\n\xff\x01=\n=state\nstate", &s); SCHECK(!s.have);
     show_state_parse("state=ready\ntour=99999999999999999999\nframes=-4\n", &s); SCHECK(s.have && s.tour != SHOW_TOUR && show_needed(&s));
     char dir[420], base[400], res[240];
+    /* the tour as data: the keys and the step the player shows are what the script does, tick by tick */
+    { fm1ntt_machine *tm = fm1ntt_new();
+      static uint8_t bimg[1 << 16];
+      size_t bn = fm1ntt_bench_image(bimg, sizeof bimg);
+      SCHECK(tm && bn > 0 && fm1ntt_load_raw(tm, bimg, bn, FM1_ENTRY_FELUCCA) == 0);          /* a machine that takes keys (the benchmark's own image) */
+      int agree = 1, steps_seen = 0;
+      const char *last = "";
+      for (int t = 0; t < SHOW_TICKS && tm; t++) {
+          show_script(tm, t);
+          if ((fm1ntt_keys_down(tm) >> 14) != (show_keys_at(t) >> 14)) { if (agree) fprintf(stderr, "  tour keys differ at tick %d: machine %llx table %llx\n", t, (unsigned long long)fm1ntt_keys_down(tm), (unsigned long long)show_keys_at(t)); agree = 0; }
+          const char *st = show_step(t);
+          if (strcmp(st, last)) { steps_seen++; last = st; }
+      }
+      SCHECK(tm && agree);
+      SCHECK(!strcmp(show_step(0), "BOOTING") && !strcmp(show_step(100), "NOTE 1") && !strcmp(show_step(230), "A CHORD") && !strcmp(show_step(305), "SELECT KNOB TURNED") && !strcmp(show_step(SHOW_TICKS - 1), "THE TAIL"));
+      SCHECK(steps_seen >= 10 && show_keys_at(0) == 0 && show_keys_at(SHOW_TICKS - 1) == 0 && show_keys_at(250) != 0);
+      if (tm) fm1ntt_free(tm); }
     snprintf(base, sizeof base, "%s/showbase", root);
     SCHECK(show_dir(dir, sizeof dir, base, "../../etc/passwd") != 0 && show_dir(dir, sizeof dir, base, "ABCDEF") != 0 && show_dir(dir, sizeof dir, base, NULL) != 0);
     char sha64[65];
@@ -2122,7 +2152,12 @@ static int show_selftest(const char *root) {
     SCHECK(show_tree_hash(da) == show_tree_hash(db));
     ShowState st;
     show_state_read(da, &st);
-    SCHECK(!strcmp(st.state, "ready") && st.frames > 20 && st.frames <= SHOW_FRAMES_MAX && st.ms == 15000 && st.tour == SHOW_TOUR && !show_needed(&st));
+    { char pf[480]; int16_t *pcm = NULL; size_t fr = 0; snprintf(pf, sizeof pf, "%s/audio.wav", da);
+      SCHECK(show_wav_read(pf, &pcm, &fr) == 0);
+      int gaps = 0, run = 0, started = 0;                                                        /* silence in the middle of the sound: a buffer the core had to pad */
+      for (size_t i = (size_t)3 * FM1_SAMPLE_RATE; pcm && i < fr; i++) { if (pcm[i * 2] || pcm[i * 2 + 1]) { if (started && run >= 40) gaps++; started = 1; run = 0; } else run++; }
+      SCHECK(started && gaps == 0); free(pcm); }
+    SCHECK(!strcmp(st.state, "ready") && st.shorts == 0 && st.frames > 20 && st.frames <= SHOW_FRAMES_MAX && st.ms == 15000 && st.tour == SHOW_TOUR && !show_needed(&st));
     static int fms[SHOW_FRAMES_MAX]; int ftotal = 0;
     int nf = show_frames_read(da, fms, SHOW_FRAMES_MAX, &ftotal);
     SCHECK(nf == st.frames && ftotal == 15000);
@@ -2227,7 +2262,7 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     a->info_on = 1; a->info_i = 1; fill_ui(a, ui, 0);
     ACHECK(ui->info_demo_kind == 3 && strstr(ui->info_demo, "FAILED: the worker could not run"));
     /* the player: the demo's sound and pictures, a press ends it, the end ends it, and the machine's own screen is back */
-    a->info_on = 1; a->info_i = 0;
+    info_open(a, 0);
     act(a, A_X);
     ACHECK(a->pl.on && a->pl.nf > 20 && a->pl.frames == (size_t)SHOW_TICKS * SHOW_AUDIO);
     int16_t buf[1470 * 2];
@@ -2236,6 +2271,22 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     for (int k = 1; k < 100; k++) audio_step(a, buf, 1470);                                         /* 3.3 s in: the first notes */
     fill_ui(a, ui, 0);
     ACHECK(ui->playing && ui->fb_valid && !strcmp(ui->run_state, "DEMO"));
+    ACHECK(ui->pl_ticks == SHOW_TICKS && ui->pl_tick == (int)((unsigned long long)a->pl.pos * SHOW_FPS / FM1_SAMPLE_RATE) && ui->pl_nf == a->pl.nf && !strcmp(ui->pl_name, a->files[0]) && !strcmp(ui->pl_tier, "BUNDLED (PERMISSIVE)") && strstr(ui->pl_licence, "MPL-2.0") && !strcmp(ui->pl_step, show_step(ui->pl_tick)) && ui->pl_keys == show_keys_at(ui->pl_tick));
+    { static uint32_t cvp[PX_W * PX_H], cvq[PX_W * PX_H];
+      for (int md = 0; md < 2; md++) {
+          a->mode = md;                                                                         /* whatever layout the app was in: a demo plays at 2x, flush top left, with its own column */
+          px_draw(cvp, md, ui); px_draw(cvq, md, ui);
+          int okp = !memcmp(cvp, cvq, sizeof cvp);
+          for (int y = 0; y < 480 && okp; y++) for (int x = 0; x < 480; x++) if (cvp[y * PX_W + x] != (0xFF000000u | ui->fb[(y / 2) * FM_W + x / 2])) { okp = 0; break; }
+          ACHECK(okp);
+          long lit = 0, below = 0;
+          for (int y = 0; y < PX_H; y++) for (int x = 480; x < PX_W; x++) lit += cvp[y * PX_W + x] != C_BG;
+          ACHECK(lit > 3000);
+          for (int y = 472; y < PX_H; y++) for (int x = 480; x < PX_W; x++) below += cvp[y * PX_W + x] != C_BG;
+          ACHECK(below < 400);                                                                  /* the last line is the one-line hint, nothing runs past it */
+      }
+      a->mode = MODE_STANDARD;
+      if (getenv("FM1NTT_MON_SHOTS")) { char fn[420]; snprintf(fn, sizeof fn, "%s/player.bmp", getenv("FM1NTT_MON_SHOTS")); mon_dump_bmp(fn, cvp); } }
     { static uint32_t want[FM_W * FM_H]; char pf[480]; int t = (int)((unsigned long long)a->pl.pos * 1000 / FM1_SAMPLE_RATE), idx = 0; for (int k = 0; k < a->pl.nf; k++) if (a->pl.ms[k] <= t) idx = k;
       snprintf(pf, sizeof pf, "%s/%04d.png", d0, idx); ACHECK(show_png_read(pf, want, FM_W, FM_H) == 0 && !memcmp(want, ui->fb, sizeof want)); }
     { int loud = 0; for (int k = 0; k < 40; k++) { audio_step(a, buf, 1470); for (int i = 0; i < 1470 * 2; i++) loud |= abs(buf[i]) > 200; } ACHECK(loud); }

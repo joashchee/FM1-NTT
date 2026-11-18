@@ -17,13 +17,26 @@ tour give the same bytes (the self-test runs it twice and compares every file). 
 | `state.txt` | `state` (recording, ready, failed), `reason`, `tour`, `frames`, `ms`, `attempts`, `jit`; written first as recording and last as ready or failed |
 | `progress.txt` | `pct=N` while it runs |
 
-The tour (`SHOW_TOUR 1`, generic): 3 s of boot, three single notes, a chord, one turn of the SELECT encoder, a note, a rest: 15 s. UNTRUE STEP gives 140 pictures and
+The tour (`SHOW_TOUR 2`, generic): 3 s of boot, three single notes, a chord, one turn of the SELECT encoder, a note, a rest: 15 s. UNTRUE STEP gives 140 pictures and
 11 MB; the same tour in uncompressed RGB was 34 MB, which is why the palette. A per-family script (Felucca, Jangada) is not written. Bump `SHOW_TOUR` when the tour
 changes: every demo made with an older one is made again.
 
 The mp4 is not made here (decided 2026-11-18: the unit may have no ffmpeg, and playing frames needs no encode); the manual Rec demo still makes one.
 **Deviation from the brief:** the brief asked for a headless run byte-identical to the foreground Rec demo of the same firmware. The showcase is its own tour,
 not the Rec demo's, so the guard is two headless runs being identical to each other (and the Rec demo's own two runs staying identical, as before).
+
+**The audio must not have gaps (fixed 2026-11-18, tour 2).** `fm1ntt_render` runs the machine until it has made the frames asked for or an instruction budget runs out,
+and pads what is missing with silence. At 8 million instructions a tick the budget ran out in 46% of the ticks (heavy ones: a note-on burst), so tour 1's sound had a gap
+of silence in nearly every other tick: the stutter and distortion heard on playback. A tick may now spend 64 million (`SHOW_BUDGET`; the core stops there so a hostile
+firmware still ends), no tick came near it on the five bundled firmwares, `state.txt` records `shorts=N` (ticks that were padded) and the self-test fails on a gap of
+40 or more silent samples after the boot. Demos made with tour 1 are made again. The Rec demo had the same cap: its tour had 538 such gaps and has 4 (the pauses of the
+music) since its budget was raised the same way; the Rec demo's self-test run still uses a tiny budget on purpose (to be quick), so it does not check gaps.
+**A steady rushing sound is not a fault:** HALF-LIGHT and MIDNIGHT ROUTE have a "bed" (rain, crackle, hiss, wind, room; their own documents), audible before any note.
+
+**More cores.** The time of one demo is the emulation, one host thread: the machine's two cores are stepped in turn by one thread, and each step needs the one before.
+Writing the pictures was 0.1 s of 21.6 s with the interpreter (and 0.09 s of 3.1 s with the JIT, which is 7 times faster here), so handing it to another core gains nothing.
+Several firmwares could be made at once, one worker each; that finishes a backlog sooner but not one demo, and costs battery and heat: not built. The mp4 encode is the one step
+that already uses every core (x264's own threads, when ffmpeg exists).
 
 ## Change detection, failure, cancel (the sidecar is `state.txt`)
 
@@ -51,9 +64,13 @@ the GPL pack, or your own file), the licence and source from the manifest of its
 
 ## The player (X on a page with a ready demo)
 
-The demo's sound goes through the app's audio device and its pictures take the FM-1's screen (the state reads `DEMO`); the machine waits while it plays. Any key or
-button ends it and is used up (no stray note), as does the end of the sound. Our own PNGs are read back by a decoder that takes only what the writer makes (stored blocks,
-RGB or paletted, filter 0): anything else is refused, never read past its end (the self-test cuts and damages files).
+The whole window becomes the player, whatever layout the app was in: the demo's picture at **2x (480 x 480) flush top left**, and in the 160 px column at the right
+(`px_panel_player`): **DEMO** (the firmware, its tier, its licence), **NOW** (what the tour is doing: BOOTING, NOTE 1, A CHORD, SELECT KNOB TURNED, THE TAIL; a bar,
+m:ss of 0:15, the picture number), **KEYS HELD** (the keyboard with the keys the tour holds lit), **SOUND** (the scope and the L and R levels of the sound being played),
+**WHAT THIS IS** (one sentence) and `ANY KEY STOPS`. The tour is a table (`SHOW_NOTES`) that both the recorder's script and the player read, so the keys and steps shown are
+what was played (the self-test steps the script on a machine and compares the held keys at every tick). The sound goes through the app's audio device; the machine waits while
+it plays. Any key or button ends it and is used up (no stray note), as does the end of the sound. Our own PNGs are read back by a decoder that takes only what the writer
+makes (stored blocks, RGB or paletted, filter 0): anything else is refused, never read past its end (the self-test cuts and damages files).
 
 ## Not done
 

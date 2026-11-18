@@ -9,7 +9,7 @@
  *   frames.txt    "NNNN <ms>" for each picture and "end <ms>"
  *   state.txt     key=value: state (recording, ready, failed), reason, tour, frames, ms, attempts, jit; written first as recording and last as ready or failed
  *   progress.txt  pct=N while it runs
- * The tour (SHOW_TOUR 1) is generic: 3 s of boot, three single notes, a chord, one turn of the SELECT encoder, a note, and a rest: 15 s. Bump SHOW_TOUR when it changes:
+ * The tour (SHOW_TOUR 2: tour 1's audio had gaps of silence, see SHOW_BUDGET) is generic: 3 s of boot, three single notes, a chord, one turn of the SELECT encoder, a note, and a rest: 15 s. Bump SHOW_TOUR when it changes:
  * every demo made with an older one is made again.
  *
  * Change detection is the state file: a firmware with none is needed; ready and failed are not made again (a failure is never retried in a loop: rule 5) unless
@@ -20,14 +20,15 @@
 #ifndef FM1NTT_SHOWCASE_H
 #define FM1NTT_SHOWCASE_H
 
-#define SHOW_TOUR 1
+#define SHOW_TOUR 2
 #define SHOW_FPS 30
 #define SHOW_AUDIO (FM1_SAMPLE_RATE / SHOW_FPS)
 #define SHOW_TICKS 450
 #define SHOW_FRAMES_MAX 400
+#define SHOW_BUDGET 64000000u            /* instructions a tick may spend: the core stops there and pads the audio with silence, so it must never be reached (8 million was, in 46% of the ticks) */
 #define SHOW_MIN_GAP 3                  /* ticks between pictures: at most 10 a second */
 
-typedef struct { int have; char state[12], reason[96]; int tour, frames, ms, attempts, jit; } ShowState;
+typedef struct { int have; char state[12], reason[96]; int tour, frames, ms, attempts, jit, shorts; } ShowState;
 
 static int show_sha_ok(const char *s) {                    /* a path is built from it: exactly 64 lowercase hex characters */
     if (!s || strlen(s) != 64) return 0;
@@ -59,6 +60,7 @@ static void show_state_parse(const char *text, ShowState *s) {
             else if (kn == 2 && !strncmp(line, "ms", 2)) s->ms = atoi(v);
             else if (kn == 8 && !strncmp(line, "attempts", 8)) s->attempts = atoi(v);
             else if (kn == 3 && !strncmp(line, "jit", 3)) s->jit = atoi(v);
+            else if (kn == 6 && !strncmp(line, "shorts", 6)) s->shorts = atoi(v);
         }
         line = next ? next + 1 : NULL;
     }
@@ -76,7 +78,7 @@ static void show_state_read(const char *dir, ShowState *s) {
 static int show_state_write(const char *dir, const ShowState *s) {
     char p[420], t[512];
     snprintf(p, sizeof p, "%s/state.txt", dir);
-    int n = snprintf(t, sizeof t, "state=%s\nreason=%s\ntour=%d\nframes=%d\nms=%d\nattempts=%d\njit=%d\n", s->state, s->reason, s->tour, s->frames, s->ms, s->attempts, s->jit);
+    int n = snprintf(t, sizeof t, "state=%s\nreason=%s\ntour=%d\nframes=%d\nms=%d\nattempts=%d\njit=%d\nshorts=%d\n", s->state, s->reason, s->tour, s->frames, s->ms, s->attempts, s->jit, s->shorts);
     return n > 0 && (size_t)n < sizeof t ? write_atomic(p, t, (size_t)n) : -1;
 }
 /* Is a demo to be made? (the sidecar's rule, above) */
@@ -262,18 +264,34 @@ static int show_wav_read(const char *path, int16_t **pcm, size_t *frames) {
 }
 
 /* ---- the tour ------------------------------------------------------------------------------------------------------------------ */
-/* What the person does at tick t (30 a second): note keys are matrix ids 14 + k. */
+/* The tour as data, so what the player shows (which keys, which step) is what was played: notes are matrix ids 14 + k, pressed at `down` and released at `up` (ticks, 30 a second). */
+typedef struct { int down, up, n, key[3]; const char *label; } ShowNote;
+static const ShowNote SHOW_NOTES[] = {
+    {90, 120, 1, {14 + 11}, "NOTE 1"}, {135, 165, 1, {14 + 14}, "NOTE 2"}, {180, 210, 1, {14 + 18}, "NOTE 3"},
+    {225, 285, 3, {14 + 11, 14 + 15, 14 + 18}, "A CHORD"}, {315, 345, 1, {14 + 14}, "NOTE 2 AGAIN"},
+};
+#define SHOW_NNOTES ((int)(sizeof SHOW_NOTES / sizeof SHOW_NOTES[0]))
+#define SHOW_ENC_TICK 300                                   /* one click of the SELECT encoder (the next preset) */
+/* What the person does at tick t: applied before that tick's sound is made. */
 static void show_script(fm1ntt_machine *m, int t) {
-    static const int single[3] = {14 + 11, 14 + 14, 14 + 18}, chord[3] = {14 + 11, 14 + 15, 14 + 18};
-    for (int i = 0; i < 3; i++) {
-        if (t == 90 + i * 45) fm1ntt_key(m, single[i], 1);
-        if (t == 120 + i * 45) fm1ntt_key(m, single[i], 0);
+    for (int i = 0; i < SHOW_NNOTES; i++) {
+        if (t == SHOW_NOTES[i].down) for (int k = 0; k < SHOW_NOTES[i].n; k++) fm1ntt_key(m, SHOW_NOTES[i].key[k], 1);
+        if (t == SHOW_NOTES[i].up) for (int k = 0; k < SHOW_NOTES[i].n; k++) fm1ntt_key(m, SHOW_NOTES[i].key[k], 0);
     }
-    if (t == 225) for (int i = 0; i < 3; i++) fm1ntt_key(m, chord[i], 1);
-    if (t == 285) for (int i = 0; i < 3; i++) fm1ntt_key(m, chord[i], 0);
-    if (t == 300) fm1ntt_encoder(m, 0, 1);
-    if (t == 315) fm1ntt_key(m, single[1], 1);
-    if (t == 345) fm1ntt_key(m, single[1], 0);
+    if (t == SHOW_ENC_TICK) fm1ntt_encoder(m, 0, 1);
+}
+/* The matrix bits held at tick t, after its script (bit n is id n), and what the tour is doing then. */
+static uint64_t show_keys_at(int t) {
+    uint64_t bits = 0;
+    for (int i = 0; i < SHOW_NNOTES; i++) if (t >= SHOW_NOTES[i].down && t < SHOW_NOTES[i].up) for (int k = 0; k < SHOW_NOTES[i].n; k++) bits |= 1ULL << SHOW_NOTES[i].key[k];
+    return bits;
+}
+static const char *show_step(int t) {
+    for (int i = 0; i < SHOW_NNOTES; i++) if (t >= SHOW_NOTES[i].down && t < SHOW_NOTES[i].up) return SHOW_NOTES[i].label;
+    if (t < SHOW_NOTES[0].down) return "BOOTING";
+    if (t >= SHOW_ENC_TICK && t < SHOW_NOTES[SHOW_NNOTES - 1].down) return "SELECT KNOB TURNED";
+    if (t >= SHOW_NOTES[SHOW_NNOTES - 1].up) return "THE TAIL";
+    return "LISTENING";
 }
 
 static volatile sig_atomic_t g_show_cancel;
@@ -324,7 +342,7 @@ static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const 
     char *ftxt = malloc(SHOW_FRAMES_MAX * 20 + 64);
     if (!pcm || !scr || !ftxt) { free(pcm); free(scr); free(ftxt); fm1ntt_free(m); return show_fail(dir, &st, "out of memory", result, rn); }
     size_t ft = 0;
-    int shots = 0, last_tick = -10, pending = 0, halted_at = -1;
+    int shorts = 0, shots = 0, last_tick = -10, pending = 0, halted_at = -1;
     uint32_t last_rev = 0xFFFFFFFFu;
     double t0 = mon_now_ms(), budget = budget_s > 0 ? budget_s : 900.0;
     int outcome = 0;
@@ -333,7 +351,8 @@ static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const 
         if (g_show_cancel) { outcome = 3; break; }
         if (mon_now_ms() - t0 > budget * 1000.0) { snprintf(fail_why, sizeof fail_why, "time budget of %.0f s used up at %.1f s of the tour", budget, (double)t / SHOW_FPS); outcome = 1; break; }
         show_script(m, t);
-        size_t got = fm1ntt_render(m, pcm + (size_t)t * SHOW_AUDIO * 2, SHOW_AUDIO, 8000000u);
+        size_t got = fm1ntt_render(m, pcm + (size_t)t * SHOW_AUDIO * 2, SHOW_AUDIO, SHOW_BUDGET);
+        if (got < SHOW_AUDIO) shorts++;                                  /* the budget ran out before the sound was made: silence pads it (should not happen: SHOW_BUDGET) */
         if (got < SHOW_AUDIO) memset(pcm + ((size_t)t * SHOW_AUDIO + got) * 2, 0, (SHOW_AUDIO - got) * 4);
         if (fm1ntt_halted(m) && halted_at < 0) halted_at = t;
         uint32_t rev = fm1ntt_lcd_revision(m);
@@ -368,7 +387,7 @@ static int showcase_run(const char *fw, int raw, uint32_t entry, int jit, const 
     if (wav) { memcpy(wav, h, 44); memcpy(wav + 44, pcm, pcm_cap * sizeof(int16_t)); snprintf(p, sizeof p, "%s/audio.wav", dir); ok = ok && write_atomic(p, wav, wn) == 0; } else ok = 0;
     free(wav); free(pcm); free(scr); free(ftxt);
     if (!ok) return show_fail(dir, &st, "cannot write the sound or the table", result, rn);
-    st.frames = shots; st.ms = SHOW_TICKS * 1000 / SHOW_FPS;
+    st.frames = shots; st.ms = SHOW_TICKS * 1000 / SHOW_FPS; st.shorts = shorts;
     snprintf(st.state, sizeof st.state, "ready");
     st.reason[0] = 0;
     show_state_write(dir, &st);
