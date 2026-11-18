@@ -1,7 +1,7 @@
 //! `fm4fit FIRMWARE.fwsc [ACTION...] play:NOTE:VEL:HOLD`: drives a 4-operator firmware (OPERATOR) in the emulator with fwprobe's actions (`enc:NAME:CLICKS`,
 //! `key:NAME`, `wait:S`, `midi:HEX,...`, `shot:FILE.png`) and then `play:NOTE:VEL:HOLD`, which plays a MIDI note over the jack and prints what it
 //! sounded like: the level, the fundamental, and the first 12 partials in dB relative to the strongest (docs/PORTING.md). The firmware is read as data.
-use fm1ntt::{devices, machine::Machine};
+use fm1ntt::{devices, fm4, engine::Engine, fm4::Fm4, machine::Machine};
 use std::{f64::consts::PI, fs, process::ExitCode};
 
 fn fft(re: &mut [f64], im: &mut [f64]) {
@@ -156,19 +156,44 @@ fn main() -> ExitCode {
                 }
                 let _ = fs::write(f[1], s);
             }
-            "play" => {
-                let note: u8 = f[1].parse().unwrap_or(57);
-                let vel: u8 = f.get(2).and_then(|v| v.parse().ok()).unwrap_or(127);
-                let hold: f64 = f.get(3).and_then(|v| v.parse().ok()).unwrap_or(2.0);
+            "play" | "fm4" => {
+                let off = usize::from(f[0] == "fm4");
+                let note: u8 = f[1 + off].parse().unwrap_or(57);
+                let vel: u8 = f.get(2 + off).and_then(|v| v.parse().ok()).unwrap_or(127);
+                let hold: f64 = f.get(3 + off).and_then(|v| v.parse().ok()).unwrap_or(2.0);
                 rec.clear();
-                for b in [0x90, note, vel] {
-                    m.midi_in(b);
+                if f[0] == "fm4" {
+                    // `fm4:ALG:NOTE:VEL:HOLD` (ALG 1 to 11): our engine set up like OPERATOR with every operator open at full level and full sustain, for the same analysis
+                    let alg: i32 = f[1].parse().unwrap_or(1);
+                    let mut e = Fm4::new(44_100.0);
+                    e.set(fm4::P_ALGORITHM, alg - 1);
+                    e.set(fm4::P_LEVEL, 16);
+                    e.set(fm4::P_INDEX, 628);
+                    for op in 0..fm4::OPS {
+                        for (field, v) in [(fm4::O_ATTACK, 1), (fm4::O_DECAY, 998), (fm4::O_SUSTAIN, 99), (fm4::O_RELEASE, 399), (fm4::O_VELOCITY, 50), (fm4::O_LEVEL, 99)] {
+                            e.set(fm4::op_param(op, field), v);
+                        }
+                    }
+                    e.pitch_bend(2180); // OPERATOR sounds 146.8 cents flat here
+                    e.note_on(note, vel);
+                    let mut blk = vec![0i16; 441];
+                    for i in 0..((hold + 1.5) * 100.0) as usize {
+                        if i == (hold * 100.0) as usize {
+                            e.note_off(note);
+                        }
+                        e.render(&mut blk);
+                        rec.extend(blk.iter().map(|&v| v as f64 / 32768.0));
+                    }
+                } else {
+                    for b in [0x90, note, vel] {
+                        m.midi_in(b);
+                    }
+                    run(&mut m, hold, Some(&mut rec));
+                    for b in [0x80, note, 0] {
+                        m.midi_in(b);
+                    }
+                    run(&mut m, 1.5, Some(&mut rec));
                 }
-                run(&mut m, hold, Some(&mut rec));
-                for b in [0x80, note, 0] {
-                    m.midi_in(b);
-                }
-                run(&mut m, 1.5, Some(&mut rec));
                 let mut f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
                 let at = (0.6 * 44_100.0) as usize;
                 // the true fundamental: the strongest peak in 0.5x to 2x of nominal, so a firmware's tuning offset does not hide it

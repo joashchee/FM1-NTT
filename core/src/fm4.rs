@@ -1,7 +1,7 @@
 //! `fm4`: a 4-operator FM engine, written fresh for FM1-NTT (docs/PORTING.md; the engine the OPERATOR / Mighty Arp family needs).
 //!
-//! Four sine operators, eight algorithms (how they modulate each other and which are heard), feedback on operator 4, a ratio, a fine detune, a level, a
-//! velocity sensitivity and an attack / decay / sustain / release envelope for each. Eight voices, oldest stolen. Floating point, deterministic on one
+//! Four sine operators, OPERATOR's eleven algorithms (how they modulate each other and which are heard), self-feedback on each operator, a ratio, a fine
+//! detune, a level, a velocity sensitivity and an attack / decay / sustain / release envelope for each. Eight voices, oldest stolen. Floating point, deterministic on one
 //! platform, no allocation after `new`. **Fitted to no firmware** (OPERATOR and Mighty Arp boot in the emulator but their sound has not been compared).
 
 use crate::engine::{Engine, ParamDesc};
@@ -13,13 +13,14 @@ pub const OPS: usize = 4;
 const ENV_DB: f64 = 64.0;
 
 pub const P_ALGORITHM: u16 = 0;
+/// The self-feedback phase swing at 100 %, in hundredths of a radian (OPERATOR 0.7: about 310, a two-sample average as the DX7 does it).
 pub const P_FEEDBACK: u16 = 1;
 pub const P_LEVEL: u16 = 2;
-/// The phase swing of a modulator at full level, in tenths of a radian (OPERATOR 0.7: 4, so 0.4; the generic default is 4 radians).
+/// The phase swing of a modulator at full level, in hundredths of a radian (OPERATOR 0.7: 628, one whole cycle; the generic default is 4 radians).
 pub const P_INDEX: u16 = 3;
 /// Operator `n` (0 to 3, shown as OP1 to OP4) has `OP_PARAMS` parameters from `OP_BASE + n * OP_PARAMS`.
 pub const OP_BASE: u16 = 10;
-pub const OP_PARAMS: u16 = 10;
+pub const OP_PARAMS: u16 = 11;
 pub const O_RATIO: u16 = 0;
 pub const O_FINE: u16 = 1;
 pub const O_DETUNE: u16 = 2;
@@ -30,6 +31,7 @@ pub const O_SUSTAIN: u16 = 6;
 pub const O_RELEASE: u16 = 7;
 pub const O_VELOCITY: u16 = 8;
 pub const O_KEYSCALE: u16 = 9;
+pub const O_FEEDBACK: u16 = 10;
 pub const P_COUNT: usize = OP_BASE as usize + OPS * OP_PARAMS as usize;
 
 /// Parameter id of operator `op` (0 to 3), field `field` (`O_*`).
@@ -38,7 +40,7 @@ pub const fn op_param(op: usize, field: u16) -> u16 {
 }
 
 /// name, min, max, default, unit
-const GLOBAL: [(&str, i32, i32, i32, &str); 4] = [("ALGORITHM (1-8)", 0, 7, 0, ""), ("FEEDBACK (OP4)", 0, 7, 0, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.1 RAD)", 1, 200, 40, "")];
+const GLOBAL: [(&str, i32, i32, i32, &str); 4] = [("ALGORITHM (1-11)", 0, 10, 0, ""), ("FEEDBACK AT 100% (0.01 RAD)", 0, 1000, 310, ""), ("LEVEL", 0, 100, 70, "%"), ("MOD INDEX (0.01 RAD)", 1, 2000, 400, "")];
 const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
     ("RATIO (0 = 0.5)", 0, 31, 1, ""),
     ("FINE RATIO", 0, 99, 0, "%"),
@@ -50,6 +52,7 @@ const PER_OP: [(&str, i32, i32, i32, &str); OP_PARAMS as usize] = [
     ("RELEASE", 1, 5000, 250, "ms"),
     ("VELOCITY SENS", 0, 100, 50, "%"),
     ("KEY SCALING", 0, 7, 0, ""),
+    ("FEEDBACK", 0, 100, 0, "%"),
 ];
 
 fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
@@ -85,15 +88,20 @@ const fn m(ops: &[usize]) -> u8 {
     v
 }
 
-const ALGORITHMS: [Algorithm; 8] = [
-    Algorithm { modulators: [m(&[1]), m(&[2]), m(&[3]), 0], carriers: m(&[0]) },       // 4 > 3 > 2 > 1
-    Algorithm { modulators: [m(&[1]), m(&[2, 3]), 0, 0], carriers: m(&[0]) },          // (4 + 3) > 2 > 1
-    Algorithm { modulators: [m(&[1, 2]), 0, m(&[3]), 0], carriers: m(&[0]) },          // (4 > 3) + 2 > 1
-    Algorithm { modulators: [m(&[1]), 0, m(&[3]), 0], carriers: m(&[0, 2]) },          // 4 > 3 and 2 > 1, both pairs heard
-    Algorithm { modulators: [m(&[3]), m(&[3]), m(&[3]), 0], carriers: m(&[0, 1, 2]) }, // 4 > 1, 2, 3
-    Algorithm { modulators: [0, m(&[2]), m(&[3]), 0], carriers: m(&[0, 1]) },          // 4 > 3 > 2, and 1 alone
-    Algorithm { modulators: [0, 0, m(&[3]), 0], carriers: m(&[0, 1, 2]) },             // 4 > 3, with 2 and 1 alone
-    Algorithm { modulators: [0, 0, 0, 0], carriers: m(&[0, 1, 2, 3]) },                // all four alone (additive)
+/// OPERATOR 0.7's eleven algorithms, read off its panel's diagrams (2026-11-18; A is OP1, D is OP4; algorithms 1 and 2 are confirmed by their sound, the rest
+/// by the drawing and, where `fm4fit` was run, by the spectrum, docs/PORTING.md).
+const ALGORITHMS: [Algorithm; 11] = [
+    Algorithm { modulators: [m(&[1]), m(&[2]), m(&[3]), 0], carriers: m(&[0]) },       //  1: D > C > B > A
+    Algorithm { modulators: [m(&[1]), m(&[2, 3]), 0, 0], carriers: m(&[0]) },          //  2: (C + D) > B > A
+    Algorithm { modulators: [m(&[1, 3]), m(&[2]), 0, 0], carriers: m(&[0]) },          //  3: C > B > A, D > A
+    Algorithm { modulators: [m(&[1, 2]), 0, m(&[3]), 0], carriers: m(&[0]) },          //  4: D > C > A, B > A
+    Algorithm { modulators: [m(&[1, 2]), m(&[3]), m(&[3]), 0], carriers: m(&[0]) },    //  5: D > B > A, D > C > A
+    Algorithm { modulators: [m(&[1, 2, 3]), 0, 0, 0], carriers: m(&[0]) },             //  6: B + C + D > A
+    Algorithm { modulators: [m(&[1]), 0, m(&[3]), 0], carriers: m(&[0, 2]) },          //  7: B > A and D > C
+    Algorithm { modulators: [0, m(&[2]), m(&[3]), 0], carriers: m(&[0, 1]) },          //  8: D > C > B, A alone
+    Algorithm { modulators: [m(&[3]), m(&[3]), m(&[3]), 0], carriers: m(&[0, 1, 2]) }, //  9: D > A, B, C
+    Algorithm { modulators: [0, 0, m(&[3]), 0], carriers: m(&[0, 1, 2]) },             // 10: D > C, A and B alone
+    Algorithm { modulators: [0, 0, 0, 0], carriers: m(&[0, 1, 2, 3]) },                // 11: all four alone
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -121,11 +129,11 @@ struct Voice {
     f0: f64,
     vel: f64,
     ops: [Op; OPS],
-    fb: [f64; 2],
+    fb: [[f64; 2]; OPS],
 }
 
 const IDLE_OP: Op = Op { stage: Stage::Idle, ph: 0.0, env: 0.0, out: 0.0 };
-const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [0.0; 2] };
+const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS] };
 
 pub struct Fm4 {
     rate: f64,
@@ -257,14 +265,18 @@ impl Engine for Fm4 {
             vsens[op] = self.op(op, O_VELOCITY) as f64 / 100.0;
             kscale[op] = self.op(op, O_KEYSCALE) as f64 / 7.0;
         }
-        let alg = &ALGORITHMS[self.p[P_ALGORITHM as usize].clamp(0, 7) as usize];
-        // feedback: the operator-4 output fed back into its phase, 0 to about 3 radians
-        let fb = self.p[P_FEEDBACK as usize] as f64 / 7.0 * 3.0;
+        let alg = &ALGORITHMS[self.p[P_ALGORITHM as usize].clamp(0, 10) as usize];
+        // feedback: each operator's own output (level and envelope included) fed back into its phase, the mean of the last two samples, up to P_FEEDBACK at 100 %
+        let fb_max = self.p[P_FEEDBACK as usize] as f64 / 100.0;
+        let mut fb = [0.0; OPS];
+        for (op, f) in fb.iter_mut().enumerate() {
+            *f = self.op(op, O_FEEDBACK) as f64 / 100.0 * fb_max;
+        }
         let master = self.p[P_LEVEL as usize] as f64 / 100.0 * 0.3;
         let live = self.voices.iter().filter(|v| v.active).count().max(1);
         let poly = if live > 4 { (4.0 / live as f64).sqrt() } else { 1.0 };
         let bend = self.bend;
-        let index = self.p[P_INDEX as usize] as f64 / 10.0; // the phase swing (radians) of a modulator at full level
+        let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
         for o in out.iter_mut() {
             let mut acc = 0.0;
             for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -290,9 +302,7 @@ impl Engine for Fm4 {
                         }
                     }
                     let s = &mut v.ops[op];
-                    if op == OPS - 1 {
-                        pm += fb * 0.5 * (v.fb[0] + v.fb[1]);
-                    }
+                    pm += fb[op] * 0.5 * (v.fb[op][0] + v.fb[op][1]);
                     let inc = v.f0 * bend * ratio[op] / rate;
                     s.ph += inc;
                     s.ph -= s.ph.floor();
@@ -301,10 +311,8 @@ impl Engine for Fm4 {
                     let key = 1.0 - kscale[op] * ((v.note as f64 - 36.0) / 91.0).clamp(0.0, 1.0) * 0.75;
                     let amp = level[op] * s.env * vel.max(0.05) * key;
                     s.out = (TAU * (s.ph) + pm).sin() * amp;
-                    if op == OPS - 1 {
-                        v.fb[1] = v.fb[0];
-                        v.fb[0] = s.out;
-                    }
+                    v.fb[op][1] = v.fb[op][0];
+                    v.fb[op][0] = s.out;
                     if alg.carriers >> op & 1 == 1 {
                         heard += s.out;
                     }
@@ -339,7 +347,7 @@ mod tests {
     /// A patch of one audible sine: algorithm 8 (all alone), only OP1 open.
     fn sine() -> Fm4 {
         let mut e = Fm4::new(44_100.0);
-        e.set(P_ALGORITHM, 7);
+        e.set(P_ALGORITHM, 10);
         e.set(op_param(0, O_ATTACK), 1);
         e.set(op_param(0, O_SUSTAIN), 99);
         e
@@ -403,7 +411,7 @@ mod tests {
     #[test]
     fn every_algorithm_sounds_and_the_algorithms_differ() {
         let mut shapes = Vec::new();
-        for alg in 0..8 {
+        for alg in 0..11 {
             let mut e = Fm4::new(44_100.0);
             e.set(P_ALGORITHM, alg);
             for op in 0..OPS {
@@ -417,8 +425,8 @@ mod tests {
             assert!(peak(&buf) > 300, "algorithm {} is silent", alg + 1);
             shapes.push(buf);
         }
-        for i in 0..8 {
-            for j in i + 1..8 {
+        for i in 0..11 {
+            for j in i + 1..11 {
                 assert_ne!(shapes[i], shapes[j], "algorithms {} and {} sound the same", i + 1, j + 1);
             }
         }
@@ -428,16 +436,16 @@ mod tests {
     fn feedback_changes_the_tone_and_stays_bounded() {
         let run = |fb: i32| {
             let mut e = Fm4::new(44_100.0);
-            e.set(P_ALGORITHM, 7);
+            e.set(P_ALGORITHM, 10);
             e.set(op_param(3, O_LEVEL), 99);
             e.set(op_param(0, O_LEVEL), 0);
-            e.set(P_FEEDBACK, fb);
+            e.set(op_param(3, O_FEEDBACK), fb);
             e.note_on(48, 127);
             let mut buf = vec![0i16; 8820];
             e.render(&mut buf);
             buf
         };
-        let (clean, fed) = (run(0), run(7));
+        let (clean, fed) = (run(0), run(100));
         assert_ne!(clean, fed);
         let step = |b: &[i16]| b[2000..].windows(2).map(|w| (w[1] as f64 - w[0] as f64).abs()).sum::<f64>();
         assert!(step(&fed) > step(&clean));
@@ -526,14 +534,13 @@ mod tests {
         c.hypot(s) / (n as f64 / 4.0)
     }
 
-    /// The numbers measured on OPERATOR 0.7 in the emulator (docs/PORTING.md, 2026-11-18): algorithm 1 with B open at 0 dB and A at 0 dB, note 57 at velocity
-    /// 127: A alone 0.0484 peak (-26.3 dBFS), harmonic 2 at -13.7 dB and harmonic 3 at -33.9 dB under the fundamental (a modulation index of 0.42 at 0 dB, linear in
-    /// the level's amplitude), amplitude linear in velocity down to half at velocity 0, and a 399 ms release that falls 16 dB every 100 ms.
+    /// The numbers measured on OPERATOR 0.7 in the emulator (docs/PORTING.md, 2026-11-18): algorithm 1, note 57 at velocity 127: A alone
+    /// 0.0484 peak (-26.3 dBFS), a modulator at full level a whole cycle (6.28 radians) of phase, linear in the level's amplitude, amplitude linear in velocity down to half at velocity 0, and a 399 ms release that falls 16 dB every 100 ms.
     fn operator() -> Fm4 {
         let mut e = Fm4::new(44_100.0);
         e.set(P_ALGORITHM, 0);
         e.set(P_LEVEL, 16);
-        e.set(P_INDEX, 4);
+        e.set(P_INDEX, 628);
         for op in 0..OPS {
             e.set(op_param(op, O_ATTACK), 1);
             e.set(op_param(op, O_DECAY), 998);
@@ -565,25 +572,60 @@ mod tests {
     #[test]
     fn fitted_to_operator_the_modulation_index() {
         let f0 = 440.0 * 2f64.powf((57.0 - 69.0) / 12.0);
+        let spectrum = |e: &mut Fm4| {
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let seg = &b[10_000..10_000 + 32_768];
+            let h1 = tone(seg, f0);
+            (h1, (2..=8).map(|h| 20.0 * (tone(seg, f0 * h as f64) / h1).log10()).collect::<Vec<f64>>())
+        };
+        // B (OP2) into A at full level and full sustain: OPERATOR's fundamental is 0.0245 of A's 0.0484, harmonics 2 to 8 at these dB under it
         let mut e = operator();
         e.set(op_param(1, O_LEVEL), 99);
-        e.note_on(57, 127);
-        let mut b = vec![0i16; 44_100];
-        e.render(&mut b);
-        let seg = &b[10_000..10_000 + 32_768];
-        let h1 = tone(seg, f0);
-        let db = |h: f64| 20.0 * (tone(seg, f0 * h) / h1).log10();
-        assert!((db(2.0) + 13.7).abs() < 0.6, "harmonic 2 at {:.1} dB, OPERATOR -13.7", db(2.0));
-        assert!((db(3.0) + 33.9).abs() < 2.0, "harmonic 3 at {:.1} dB, OPERATOR -33.9", db(3.0));
-        // linear in the modulator's amplitude: 12 dB down in level (99 -> about 75: 0.75 dB a step is 18 dB, so 3 steps short of a factor 4) is a quarter of the index
+        let (h1, db) = spectrum(&mut e);
+        assert!((h1 / 0.0245 - 1.0).abs() < 0.08, "the fundamental is {h1}, OPERATOR 0.0245");
+        for (h, want) in [(2, -8.9), (3, 1.4), (4, -2.3), (6, -0.2), (7, -8.7), (8, -9.8)] {
+            assert!((db[h - 2] - want).abs() < 1.2, "harmonic {h} at {:.1} dB, OPERATOR {want}", db[h - 2]);
+        }
+        // a small index, from the level scan: B at -54 dB with its sustain at -24 dB (levels 27 and 6) had harmonic 2 at -67.7 dB
         let mut q = operator();
-        q.set(op_param(1, O_LEVEL), 99 - 16); // 12 dB down
-        q.note_on(57, 127);
-        let mut c = vec![0i16; 44_100];
-        q.render(&mut c);
-        let seg2 = &c[10_000..10_000 + 32_768];
-        let drop = 20.0 * (tone(seg2, f0 * 2.0) / tone(seg2, f0)).log10() - db(2.0);
-        assert!((drop + 12.0).abs() < 0.7, "the second harmonic fell {drop:.1} dB for a 12 dB lower modulator");
+        q.set(op_param(1, O_LEVEL), 27);
+        q.set(op_param(1, O_SUSTAIN), 6);
+        let (_, small) = spectrum(&mut q);
+        assert!((small[0] + 67.7).abs() < 2.5, "harmonic 2 at {:.1} dB, OPERATOR -67.7", small[0]);
+    }
+
+    /// OPERATOR's self-feedback (2026-11-18, operators B, C and D; A showed none): alone, at 13 %, 61 % and 100 %, its fundamental was 0.977, 0.64 and 0.452 of the
+    /// feedback-free level, with harmonics 2 and 3 at -14.2/-25.0, -6.9/-11.0 and -6.5/-10.4 dB: the mean of the last two outputs times 3.1 radians at 100 %.
+    #[test]
+    fn fitted_to_operator_the_self_feedback() {
+        // OPERATOR sounds 146.8 cents flat here (a 48 kHz engine at 44.1 kHz, docs/PORTING.md): bend this engine the same, so a feedback loop of one or two samples spans as many
+        // samples of the period as it does there
+        let f0 = 440.0 * 2f64.powf((57.0 - 69.0) / 12.0) * 44_100.0 / 48_000.0;
+        let run = |pct: i32| {
+            let mut e = operator();
+            e.set(P_ALGORITHM, 10);
+            e.set(op_param(0, O_LEVEL), 0);
+            e.set(op_param(1, O_LEVEL), 99);
+            e.set(op_param(1, O_FEEDBACK), pct);
+            e.set(P_FEEDBACK, 310);
+            e.pitch_bend(2180);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let seg = &b[10_000..10_000 + 32_768];
+            let h1 = tone(seg, f0);
+            (h1, 20.0 * (tone(seg, f0 * 2.0) / h1).log10(), 20.0 * (tone(seg, f0 * 3.0) / h1).log10())
+        };
+        let clean = run(0).0;
+        for (pct, rel, h2, h3) in [(13, 0.977, -14.2, -25.0), (61, 0.64, -6.9, -11.0), (100, 0.452, -6.5, -10.4)] {
+            let (h1, a, b) = run(pct);
+            assert!((h1 / clean / rel - 1.0).abs() < 0.06, "{pct} %: the fundamental is {:.3} of clean, OPERATOR {rel}", h1 / clean);
+            // at 100 % harmonic 2 is 2 dB higher here than there (-4.5 against -6.5; harmonic 3 and the fundamental agree): the top of OPERATOR's knob is not quite this law
+            let slack = if pct == 100 { 2.3 } else { 1.0 };
+            assert!((a - h2).abs() < slack && (b - h3).abs() < 1.5, "{pct} %: harmonics 2 and 3 at {a:.1} and {b:.1}, OPERATOR {h2} and {h3}");
+        }
     }
 
     #[test]
@@ -598,5 +640,47 @@ mod tests {
         e.render(&mut tail);
         let (a, c) = (rms(&tail[..4410]), rms(&tail[4410..8820]));
         assert!((a - c - 16.0).abs() < 2.0, "{a:.1} then {c:.1}: OPERATOR falls 16 dB in 100 ms");
+    }
+
+    /// OPERATOR's algorithms 2 to 11 (not 1: see the docs), each with all four operators at 0 dB and full sustain, note 57, as measured in the emulator: the fundamental's
+    /// amplitude and harmonics 2 to 4 in dB under it. Algorithms 3 and 4 (and 7 and 9) are the same shape with the letters swapped, so they sound alike when
+    /// the operators are equal, and the test cannot tell them apart; their diagrams do.
+    #[test]
+    fn fitted_to_operator_the_algorithms() {
+        let f0 = 440.0 * 2f64.powf((57.0 - 69.0) / 12.0) * 44_100.0 / 48_000.0;
+        let table: [(usize, f64, [f64; 3]); 9] = [
+            (2, 0.0185, [-24.2, -4.0, -16.3]),
+            (3, 0.0172, [-9.0, 1.6, -1.5]),
+            (5, 0.0214, [-15.6, -3.0, -4.4]),
+            (6, 0.0130, [-19.0, 1.2, -11.5]),
+            (7, 0.0490, [-8.9, 1.4, -2.3]),
+            (8, 0.0733, [-26.3, -13.4, -13.9]),
+            (9, 0.0735, [-8.9, 1.4, -2.3]),
+            (10, 0.1212, [-22.8, -12.5, -16.1]),
+            (11, 0.1933, [-120.0, -120.0, -120.0]),
+        ];
+        for (alg, h1_want, db_want) in table {
+            let mut e = operator();
+            e.set(P_ALGORITHM, alg as i32 - 1);
+            for op in 0..OPS {
+                e.set(op_param(op, O_LEVEL), 99);
+            }
+            e.pitch_bend(2180);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let seg = &b[10_000..10_000 + 32_768];
+            let h1 = tone(seg, f0);
+            assert!((h1 / h1_want - 1.0).abs() < 0.08, "algorithm {alg}: fundamental {h1:.4}, OPERATOR {h1_want}");
+            for (k, want) in db_want.iter().enumerate() {
+                let got = 20.0 * (tone(seg, f0 * (k + 2) as f64) / h1).log10();
+                if *want > -60.0 {
+                    let tol = if *want < -20.0 { 4.5 } else { 2.5 }; // a deep harmonic moves more with a small error in a modulator
+                    assert!((got - want).abs() < tol, "algorithm {alg}: harmonic {} at {got:.1} dB, OPERATOR {want}", k + 2);
+                } else {
+                    assert!(got < -60.0, "algorithm {alg}: harmonic {} at {got:.1} dB, OPERATOR has none", k + 2);
+                }
+            }
+        }
     }
 }
