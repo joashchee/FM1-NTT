@@ -159,6 +159,23 @@ pub unsafe extern "C" fn fm1ntt_fm6_sounding(h: *const Fm6Handle) -> usize {
     h.as_ref().map_or(0, |h| h.0.live_voices())
 }
 
+/// The built-in voices (`factory.rs`): up to `max` of them written to `out` (128 bytes each), the count. For the preview when a firmware has no banks of its own.
+///
+/// # Safety
+/// `out` is null or has room for `max` times 128 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_factory_voices(out: *mut u8, max: usize) -> usize {
+    if out.is_null() {
+        return 0;
+    }
+    let v = crate::factory::voices();
+    let n = v.len().min(max);
+    for (i, b) in v.iter().take(n).enumerate() {
+        std::ptr::copy_nonoverlapping(b.as_ptr(), out.add(i * 128), 128);
+    }
+    n
+}
+
 /// The packed voices (128 bytes each) in the banks of the `.fwsc` package at `pkg`, written one after another into `out`, at most `max` of them; the count (0 when it is not a package
 /// or holds no bank of 8 voices in a row: `fm1ntt_error` says which).
 ///

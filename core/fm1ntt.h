@@ -63,6 +63,7 @@ uint32_t fm1ntt_clock_mhz(void);                                                
 typedef struct Fm6Handle fm1ntt_fm6;
 typedef struct SamplerHandle fm1ntt_sampler;
 typedef struct KitHandle fm1ntt_kit;
+size_t fm1ntt_factory_voices(uint8_t *out, size_t max);                                             /* the built-in voices (128 bytes each), at most max; the count */
 size_t fm1ntt_package_voices(const uint8_t *pkg, size_t len, uint8_t *out, size_t max);    /* the packed DX7 voices (128 bytes each) in a .fwsc's banks, at most max; the count */
 fm1ntt_fm6 *fm1ntt_fm6_new(double sample_rate, const uint8_t *voice128);                    /* a packed DX7 voice (128 bytes) or NULL for a plain sine; NULL on failure */
 void fm1ntt_fm6_free(fm1ntt_fm6 *h);

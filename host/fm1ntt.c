@@ -124,6 +124,7 @@ typedef struct {
     /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
     fm1ntt_fm6 *pv;
     uint8_t pv_voices[PV_MAX][128];
+    int pv_factory;                     /* the voices are the built-in set (the firmware has none of its own, or none is loaded) */
     int pv_solo;                        /* the machine is not run, only the engine (R2): the live-play mode for a unit too slow to emulate the firmware */
     int pv_n, pv_sel, pv_on, pv_oct;    /* voices found, the chosen one, preview on, octave -2..2 */
     int pv_key[27], pv_pad[4];          /* the MIDI note each held key or pad button started (+1; 0 none), so its release matches */
@@ -163,7 +164,12 @@ static void pv_select(App *a, int sel) {
 static void pv_set(App *a, const uint8_t *voices, int n) {
     pv_notes_off(a);
     a->pv_n = n < 0 ? 0 : n > PV_MAX ? PV_MAX : n;
+    a->pv_factory = 0;
     if (a->pv_n) memcpy(a->pv_voices, voices, (size_t)a->pv_n * 128);
+    else {   /* none of the firmware's own: the built-in set, so the preview and Solo always have something to play (the bundled firmwares have no banks the extractor finds) */
+        a->pv_n = (int)fm1ntt_factory_voices(&a->pv_voices[0][0], PV_MAX);
+        a->pv_factory = a->pv_n > 0;
+    }
     a->pv_sel = 0;
     if (a->pv_n) pv_select(a, 0);
     else { lock(a); if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } unlock(a); a->pv_on = 0; }
@@ -185,11 +191,13 @@ static void pv_note(App *a, int *slot, int note, int down) {
 }
 static int pv_midi(const App *a, int key) { int n = 53 + key + 12 * a->pv_oct; return n < 0 ? 0 : n > 127 ? 127 : n; }
 static void pv_toggle(App *a) {
-    if (!a->pv_n) { say(a, 2, "No voices found in this firmware", NULL); return; }
+    if (!a->pv_n) { say(a, 2, "No voices to play", NULL); return; }
     a->pv_on = !a->pv_on;
-    if (!a->pv_on) a->pv_solo = 0;
+    lock(a);
+    a->pv_solo = a->pv_on && !fm1ntt_loaded(a->m);   /* no firmware: there is no machine to hear, so the engine plays alone */
+    unlock(a);
     pv_notes_off(a);
-    say(a, 0, a->pv_on ? "Preview on: the keys play the voice" : "Preview off", NULL);
+    say(a, 0, !a->pv_on ? "Preview off" : a->pv_solo ? "Preview on, no firmware: the engine plays alone" : a->pv_factory ? "Preview on: built-in voices (the firmware has none)" : "Preview on: the keys play the voice", NULL);
 }
 /* Leaving SOUND turns the preview off and lets its notes go. */
 static void pv_leave(App *a) { if (a->panel != PANEL_SOUND && (a->pv_on || a->pv_key[0] || a->pv)) { a->pv_on = 0; a->pv_solo = 0; pv_notes_off(a); } }
@@ -782,7 +790,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     memcpy(u->enc_turns, a->enc_turns, sizeof u->enc_turns);
     u->pot = a->pot;
     u->level_l = a->level_l; u->level_r = a->level_r; u->peak_l = a->peak_l; u->peak_r = a->peak_r;
-    u->pv_solo = a->pv_solo; u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
+    u->pv_factory = a->pv_factory; u->pv_solo = a->pv_solo; u->pv_on = a->pv_on; u->pv_n = a->pv_n; u->pv_sel = a->pv_sel; u->pv_oct = a->pv_oct;
     pv_name(a, u->pv_name, sizeof u->pv_name);
     u->msg = a->msg;
     u->msg_style = a->msg_style;
@@ -1433,8 +1441,11 @@ static int selftest(void) {
             memcpy(p + 118, v ? "SECOND    " : "FIRST     ", 10);
         }
         a.panel = PANEL_SOUND;
-        act(&a, A_L2); CHECK(!a.pv_on && a.msg_style == 2);                   /* no voices yet: it says so and stays off */
+        pv_set(&a, two, 0);                                                   /* none of the firmware's own: the built-in eight */
+        CHECK(a.pv_n == 8 && a.pv_factory && a.pv != NULL);
+        { char fn[16]; pv_name(&a, fn, sizeof fn); CHECK(!strcmp(fn, "SINE")); }
         pv_set(&a, two, 2);
+        CHECK(!a.pv_factory);
         CHECK(a.pv_n == 2 && a.pv_sel == 0 && a.pv != NULL);
         char nm[16]; pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "FIRST"));
         int16_t quiet[2 * 2048], loud[2 * 2048];
@@ -1473,7 +1484,7 @@ static int selftest(void) {
         }
         a.panel = PANEL_MIDI; pv_leave(&a);                                      /* leaving SOUND: off, every note released */
         CHECK(!a.pv_on && !a.pv_solo && a.pv_pad[3] == 0);
-        pv_set(&a, two, 0); CHECK(a.pv_n == 0 && a.pv == NULL && !a.pv_on);
+        pv_set(&a, two, 0); CHECK(a.pv_n == 8 && a.pv_factory && a.pv != NULL && !a.pv_on);
     }
     /* the recorder: the ring to a real WAV, header sizes right, renamed from .part, a quit while recording asks first */
     a.panel = PANEL_SOUND;
@@ -1927,6 +1938,7 @@ int main(int argc, char **argv) {
     if (shot) {                 /* one frame to a file: no window, no sound */
         if (SDL_Init(0) != 0) return 1;
         scan_files(&a);
+        pv_set(&a, NULL, 0);                    /* the built-in voices until a firmware brings its own */
         if (path && load_firmware(&a, path, raw, entry) == 0) {
             int16_t pcm[2048];
             for (int i = 0; i < 60; i++) fm1ntt_render(a.m, pcm, 1024, MAX_INSNS_PER_BUFFER);
@@ -1961,6 +1973,7 @@ int main(int argc, char **argv) {
     draw_splash(canvas, "READING THE FIRMWARE FOLDER", 40);
     present(ren, tex, canvas);
     scan_files(&a);
+    pv_set(&a, NULL, 0);                        /* the built-in voices until a firmware brings its own */
     if (path) {
         draw_splash(canvas, "LOADING THE FIRMWARE", 60);
         present(ren, tex, canvas);

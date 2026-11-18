@@ -141,6 +141,7 @@ The CPU emulation reaches 0.25x real time on the unit, so it cannot play live; t
 
 - [x] **Solo** (2026-11-18): R2 on SOUND with the preview on stops the machine and plays only fm6 (`audio_step` runs no instructions; self-test covers it).
 - [x] **The measurement** (2026-11-18): benchmark workload 3 `sound.fm6.voices{1,6,12}.load` and the Device report's `sound engine alone, 12 voices` (PASS under 50% of real time). M1: 0.07%, 0.35%, 0.68%.
+- [x] **Built-in voices** (2026-11-18, `core/src/factory.rs`): the bundled firmwares have no banks, so the preview said "no voices" and Solo could not start; eight original voices now fill in, and no firmware is needed. [ ] **Listen to them and tune** (written from FM recipes, never heard), and add a way to load a `.syx` or a bank file from the app's folder.
 - [ ] **Run the benchmark and Device report on the unit** and put the three loads here; then play Solo for a minute through the real audio path and listen for gaps (a callback that runs late is not in these numbers).
 - [ ] **A play screen of its own** (not a preview on a panel): the voice's name and algorithm, a patch list, and no firmware needed. Voices from any package or a `.syx` file; MIDI in on the unit (USB) and the pad and keyboard as now.
 - [ ] **The sampler and the kit in Solo** (X0X-style drums on channel 10, `docs/SAMPLER.md`), once the voice screen is there.

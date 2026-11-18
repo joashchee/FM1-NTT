@@ -10,6 +10,7 @@ pub mod capi;
 pub mod capi_sound;
 pub mod devices;
 pub mod extract;
+pub mod factory;
 pub mod firmware;
 pub mod fm6;
 pub mod machine;
