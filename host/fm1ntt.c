@@ -132,6 +132,8 @@ typedef struct {
     int pin, pinned;                    /* --pin: the audio (emulating) thread on the last core, the main thread on the first; pinned: the audio thread has done it */
     /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
     fm1ntt_fm6 *pv;
+    int mq_live;                        /* the audio callback is running: the machine's MIDI may go through mevq */
+    fm1ntt_evq *mevq;                   /* the machine's MIDI from the UI to the audio thread, the same way (NULL: the locked path; also used while paused, and by the Rec demo, which steps its own clock) */
     fm1ntt_evq *evq;                    /* the instrument's notes from the UI to the audio thread: timestamped, lock-free, each applied at its own frame (core/src/evq.rs); NULL means the locked path */
     fm1ntt_inst *inst;                  /* an instrument package (docs/PORTING.md) played instead of the fm6 preview: its notes, its program for the voice, its effects */
     uint8_t pv_voices[PV_MAX][128];
@@ -266,7 +268,7 @@ static void pv_solo_toggle(App *a) {
     unlock(a);
     say(a, 0, a->pv_solo ? "Solo: the machine is stopped, only the engine plays" : "Solo off: the machine runs again", NULL);
 }
-static void pv_free(App *a) { if (a->evq) { fm1ntt_evq_free(a->evq); a->evq = NULL; } if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } if (a->inst) { fm1ntt_inst_free(a->inst); a->inst = NULL; } }
+static void pv_free(App *a) { if (a->mevq) { fm1ntt_evq_free(a->mevq); a->mevq = NULL; } if (a->evq) { fm1ntt_evq_free(a->evq); a->evq = NULL; } if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL; } if (a->inst) { fm1ntt_inst_free(a->inst); a->inst = NULL; } }
 
 static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
 static int is_file(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISREG(st.st_mode); }
@@ -703,6 +705,7 @@ static void audio_step(App *a, int16_t *out, size_t frames) {
     int solo = a->pv_on && a->pv_solo && (a->pv || a->inst);      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
     if (a->paused || (!solo && !fm1ntt_loaded(a->m))) { memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
     if (solo) memset(out, 0, frames * 4);
+    else if (a->mevq) fm1ntt_render_events(a->m, a->mevq, now_us(), out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
     else fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
     if (a->pv_on && (a->pv || a->inst)) {   /* the preview's voice on both channels (the caller holds the audio lock, as the machine's keys do) */
         int16_t mono[4096];
@@ -775,9 +778,14 @@ static void pot(App *a, int by) {
     lock(a); fm1ntt_pot(a->m, a->pot); unlock(a);
 }
 static void midi_send(App *a, const uint8_t *b, int n, int log) {
-    lock(a);
-    for (int i = 0; i < n; i++) fm1ntt_midi_in(a->m, b[i]);
-    unlock(a);
+    if (a->mevq && a->mq_live && !a->paused && fm1ntt_loaded(a->m)) {          /* no lock: the callback puts each message into the jack at its own frame (core/src/evq.rs) */
+        uint64_t t = now_us();
+        for (int i = 0; i < n; i += 3) fm1ntt_evq_push(a->mevq, t, b + i, (size_t)(n - i < 3 ? n - i : 3));
+    } else {
+        lock(a);
+        for (int i = 0; i < n; i++) fm1ntt_midi_in(a->m, b[i]);
+        unlock(a);
+    }
     for (int i = 0; i < n && log; i++) {
         if (a->midi_log_n == PX_MIDI_LOG) { memmove(a->midi_log, a->midi_log + 1, PX_MIDI_LOG - 1); a->midi_log_n--; }
         a->midi_log[a->midi_log_n++] = b[i];
@@ -2820,6 +2828,18 @@ static int selftest(void) {
         char nm[16]; pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "FIRST"));
         int16_t quiet[2 * 2048], loud[2 * 2048];
         audio_step(&a, quiet, 2048);
+        {   /* the machine's MIDI through its queue: pushed without the lock, taken by the callback, none left; not while paused (that goes straight in) */
+            uint8_t on[3] = {0x90, 60, 100};
+            a.mevq = fm1ntt_evq_new(64); a.mq_live = 1;
+            midi_send(&a, on, 3, 0);
+            CHECK(fm1ntt_evq_len(a.mevq) == 1);
+            SDL_Delay(2);
+            audio_step(&a, loud, 2048);
+            CHECK(fm1ntt_evq_len(a.mevq) == 0 && fm1ntt_evq_dropped(a.mevq) == 0);
+            a.paused = 1; midi_send(&a, on, 3, 0); a.paused = 0;
+            CHECK(fm1ntt_evq_len(a.mevq) == 0);
+            fm1ntt_evq_free(a.mevq); a.mevq = NULL; a.mq_live = 0;
+        }
         act(&a, A_L2); CHECK(a.pv_on == 1);
         act(&a, A_DOWN); CHECK(a.pv_sel == 1); pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "SECOND"));
         act(&a, A_DOWN); CHECK(a.pv_sel == 0);
@@ -3396,6 +3416,8 @@ int main(int argc, char **argv) {
     if (!tex) { fprintf(stderr, "fm1ntt: texture: %s\n", SDL_GetError()); return 1; }
     for (int i = 0; i < SDL_NumJoysticks(); i++) SDL_JoystickOpen(i);
     a.evq = fm1ntt_evq_new(1024);
+    a.mevq = fm1ntt_evq_new(1024);
+    a.mq_live = a.dev != 0;
 
     draw_splash(canvas, "STARTING", 20);                 /* at once, before anything heavy */
     present(ren, tex, canvas);

@@ -74,6 +74,8 @@ pub struct Machine {
     identity: String,
     /// main-loop pacing, 0 (off) to `PACE_LEVELS`: see `set_pace`
     pace: u8,
+    /// where the queued MIDI of `render_events` falls in a buffer (evq.rs)
+    clock: crate::evq::Clock,
 }
 
 impl Machine {
@@ -96,7 +98,7 @@ impl Machine {
     fn boot(image: Vec<u8>, entry: u32, stock: Option<(Vec<u8>, fm1_soc::Board)>, identity: String) -> Machine {
         let boot = Boot { image, entry, stock };
         let (soc, cpu) = Machine::build(&boot);
-        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0 }
+        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0, clock: crate::evq::Clock::new() }
     }
 
     /// Back to power-on with the same firmware: the emulated flash returns to what the package carried, and the inputs are released.
@@ -211,6 +213,34 @@ impl Machine {
             *o = if i / 2 < have { self.audio.pop_front().unwrap_or(0) } else { 0 };
         }
         have
+    }
+
+    /// Like `render`, but the MIDI bytes of `q` (a lock-free queue of timestamped messages, `evq.rs`) that fall in this buffer are put into the MIDI IN jack at their own
+    /// frames: the machine renders up to a message's frame, the bytes go in, and it goes on. `now_us` is the host's monotonic microsecond clock at the call, the clock the
+    /// pusher stamped with. Messages stamped before the buffer are applied at its first frame, later ones stay queued. `max_insns` is the budget for the whole buffer.
+    /// The firmware has run up to one slice (20,000 instructions, about 3 frames) ahead of the frame a byte lands at, which is as exact as this machine can be.
+    pub fn render_events(&mut self, q: &crate::evq::EventQueue, now_us: u64, out: &mut [i16], max_insns: u32) -> usize {
+        let frames = out.len() / 2;
+        let (start, per_us) = self.clock.window(now_us, frames, f64::from(devices::SAMPLE_RATE));
+        let (mut at, mut real, mut left) = (0usize, 0usize, max_insns);
+        while let Some(m) = q.peek() {
+            let off = (m.ts_us as f64 - start) * per_us;
+            if off >= frames as f64 {
+                break;
+            }
+            q.pop();
+            let frame = (off.max(0.0) as usize).max(at).min(frames);
+            if frame > at {
+                let before = self.instructions;
+                real += self.render(&mut out[at * 2..frame * 2], left);
+                left = left.saturating_sub((self.instructions - before).min(u64::from(u32::MAX)) as u32);
+                at = frame;
+            }
+            for &b in &m.bytes[..usize::from(m.len)] {
+                self.midi_in(b);
+            }
+        }
+        real + self.render(&mut out[at * 2..], left)
     }
 
     /// Main-loop pacing, 0 (off, exact) to 3 (the most): the firmware's main loop is slowed to leave the host time, and nothing else is.
@@ -616,5 +646,72 @@ mod tests {
             });
             assert!(r.is_ok(), "entry {entry:#x}");
         }
+    }
+
+    /// MIDI that arrives through the queue reaches the firmware at its frame: the queue path equals the direct path (the same bytes after the same frames) up to the
+    /// rounding of the microsecond stamps, and is identical before the first message.
+    #[test]
+    fn queued_midi_equals_midi_sent_at_the_same_frame() {
+        use crate::evq::EventQueue;
+        // a firmware that answers MIDI (the bundled ones are generative and ignore it): the stock one if it is here, else Felucca from the Pack beside this repository
+        let candidates = [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/FM-1.fwsc"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../FM1-NTT-Firmware-Pack/felucca/felucca-1.8.2.fwsc"),
+        ];
+        let Some(pkg) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else {
+            eprintln!("skipped: neither the stock firmware nor the Pack's Felucca is here");
+            return;
+        };
+        // direct: 3000 frames, a note on, 3000 frames, a note off, 3000 frames
+        let warm = |m: &mut Machine| {
+            // past the firmware's boot, which ignores the jack
+            let mut w = vec![0i16; 2 * 44_100];
+            for _ in 0..3 {
+                m.render(&mut w, 400_000_000);
+            }
+        };
+        let mut a = Machine::from_package(&pkg).unwrap();
+        warm(&mut a);
+        let mut direct = vec![0i16; 2 * 9000];
+        a.render(&mut direct[..6000], 400_000_000);
+        for b in [0x90, 60, 100] {
+            a.midi_in(b);
+        }
+        a.render(&mut direct[6000..12_000], 400_000_000);
+        for b in [0x80, 60, 0] {
+            a.midi_in(b);
+        }
+        a.render(&mut direct[12_000..], 400_000_000);
+        // queued: one 9000-frame buffer with the two messages stamped at frames 3000 and 6000 of a window starting at 1_000_000 us
+        let mut b = Machine::from_package(&pkg).unwrap();
+        warm(&mut b);
+        let q = EventQueue::new(16);
+        let us = |frame: f64| 1_000_000 + (frame * 1e6 / 44_100.0).round() as u64;
+        q.push(us(3000.0), &[0x90, 60, 100]);
+        q.push(us(6000.0), &[0x80, 60, 0]);
+        let mut queued = vec![0i16; 2 * 9000];
+        let end = us(9000.0);
+        let n = b.render_events(&q, end, &mut queued, 1_200_000_000);
+        assert!(q.is_empty() && n > 8000, "rendered {n} real frames");
+        let differing = direct.iter().zip(&queued).filter(|(x, y)| x != y).count();
+        eprintln!("queued and direct differ in {differing} of 18000 samples");
+        // not vacuous: the MIDI changes the sound (a machine given none renders something else)
+        let mut none = Machine::from_package(&pkg).unwrap();
+        warm(&mut none);
+        let mut silent = vec![0i16; 2 * 9000];
+        none.render(&mut silent, 1_200_000_000);
+        let changed = silent.iter().zip(&queued).filter(|(x, y)| x != y).count();
+        assert!(changed > 1000, "the firmware ignored the MIDI ({changed} samples differ): this test needs one that answers it");
+        let early = direct[..5900].iter().zip(&queued[..5900]).filter(|(x, y)| x != y).count();
+        assert_eq!(early, 0, "before the first message the two are identical");
+        // late and future messages: a stalled one plays at frame 0, a future one waits
+        let mut c = Machine::from_package(&pkg).unwrap();
+        warm(&mut c);
+        q.push(1, &[0x90, 64, 90]);
+        q.push(end + 5_000_000, &[0x80, 64, 0]);
+        let mut o = vec![0i16; 2 * 512];
+        c.render_events(&q, end + 100_000, &mut o, 400_000_000);
+        assert_eq!(q.len(), 1, "the future message waits");
+        q.pop();
     }
 }

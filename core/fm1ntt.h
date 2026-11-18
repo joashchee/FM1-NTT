@@ -117,6 +117,7 @@ void fm1ntt_evq_free(fm1ntt_evq *q);
 int fm1ntt_evq_push(const fm1ntt_evq *q, uint64_t ts_us, const uint8_t *bytes, size_t len);  /* 1 to 3 bytes, stamped on the host's monotonic microsecond clock; 0 queued, -1 refused (counted) */
 size_t fm1ntt_evq_len(const fm1ntt_evq *q);
 uint64_t fm1ntt_evq_dropped(const fm1ntt_evq *q);
+size_t fm1ntt_render_events(fm1ntt_machine *m, const fm1ntt_evq *q, uint64_t now_us, int16_t *out, size_t frames, uint32_t max_insns);   /* fm1ntt_render, with the queue's MIDI bytes put into the jack at their own frames */
 size_t fm1ntt_inst_render_events(fm1ntt_inst *h, const fm1ntt_evq *q, uint64_t now_us, int16_t *out, size_t frames);   /* mono; applies each message at its own frame; no lock shared with the pusher */
 size_t fm1ntt_inst_arp_count(const fm1ntt_inst *h);                                        /* the arpeggiator's parameters (core/src/arp.rs): the same four calls */
 int fm1ntt_inst_arp_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);

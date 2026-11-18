@@ -64,7 +64,7 @@ pub unsafe extern "C" fn fm1ntt_loaded(h: *const Handle) -> c_int {
     h.as_ref().is_some_and(|h| h.0.is_some()) as c_int
 }
 
-fn with<R>(h: *mut Handle, default: R, f: impl FnOnce(&mut Machine) -> R) -> R {
+pub(crate) fn with<R>(h: *mut Handle, default: R, f: impl FnOnce(&mut Machine) -> R) -> R {
     // SAFETY: the callers' contract is a live handle or null.
     match unsafe { h.as_mut() }.and_then(|h| h.0.as_mut()) {
         Some(m) => f(m),

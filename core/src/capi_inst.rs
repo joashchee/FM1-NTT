@@ -64,6 +64,21 @@ pub unsafe extern "C" fn fm1ntt_evq_dropped(q: *const EvqHandle) -> u64 {
     q.as_ref().map_or(0, |q| q.0.dropped())
 }
 
+/// Like `fm1ntt_render` (stereo, `frames` frames, at most `max_insns` instructions; returns the real frames) with the MIDI bytes of `q` put into the machine's MIDI IN at their
+/// own frames. `now_us` is the host clock at the call, the clock the pusher stamped with. No lock is shared with the pusher.
+///
+/// # Safety
+/// `m` and `q` are live, `out` has room for `2 * frames` samples, and only the calling thread consumes `q`.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_render_events(m: *mut crate::capi::Handle, q: *const EvqHandle, now_us: u64, out: *mut i16, frames: usize, max_insns: u32) -> usize {
+    if out.is_null() || frames > 65_536 || q.is_null() {
+        return 0;
+    }
+    let buf = std::slice::from_raw_parts_mut(out, frames * 2);
+    buf.fill(0);
+    crate::capi::with(m, 0, |mach| mach.render_events(&(*q).0, now_us, buf, max_insns))
+}
+
 /// Mono, `frames` samples, with the messages of `q` that fall in this buffer applied at their own frames (`now_us` is the host clock at the call, the clock the producer
 /// stamped with). The audio callback calls this; no lock is shared with the pusher. The frames written (0 for more than 1 << 20 or a null).
 ///
@@ -465,6 +480,14 @@ mod tests {
             assert_eq!(fm1ntt_inst_render_events(h, q, 100_000, mono.as_mut_ptr(), 441), 441);
             assert!(mono[300..].iter().any(|&x| x != 0), "the queued note sounds (frame placement is tested in instrument.rs)");
             assert_eq!((fm1ntt_evq_len(q), fm1ntt_inst_render_events(std::ptr::null_mut(), q, 0, mono.as_mut_ptr(), 4), fm1ntt_evq_push(std::ptr::null(), 0, note.as_ptr(), 3)), (0, 0, -1));
+            // the machine's entry point tolerates nulls and an empty machine (nothing loaded renders silence)
+            let mut st = vec![1i16; 2 * 64];
+            assert_eq!(fm1ntt_render_events(std::ptr::null_mut(), q, 0, st.as_mut_ptr(), 64, 1000), 0);
+            assert_eq!(fm1ntt_render_events(std::ptr::null_mut(), std::ptr::null(), 0, st.as_mut_ptr(), 64, 1000), 0);
+            let mach = crate::capi::fm1ntt_new();
+            assert_eq!(fm1ntt_render_events(mach, q, 0, st.as_mut_ptr(), 64, 1000), 0);
+            assert!(st.iter().all(|&x| x == 0));
+            crate::capi::fm1ntt_free(mach);
             fm1ntt_evq_free(q);
             fm1ntt_evq_free(std::ptr::null_mut());
             assert_eq!(fm1ntt_inst_arp_count(h), 10);
