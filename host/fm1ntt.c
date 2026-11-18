@@ -862,26 +862,27 @@ static void midi_ok(App *a, int down) {
 }
 
 /* ---- the instrument editor: any engine's, the arpeggiator's and each effect's parameters, generic over what the core describes (core/src/engine.rs ParamDesc) ------------------ */
-/* groups: 0 the engine, 1 the arpeggiator, 2 the sequencer's settings, 3 the pattern being edited (its voice and steps), then one for each effect */
-enum { ED_FX0 = 4 };
+/* groups: 0 the engine, 1 the arpeggiator, 2 the sequencer's settings, 3 the pattern being edited (its voice and steps), 4 the global settings (channels, bend range, velocity, mono), then one for each effect */
+enum { ED_GLOBAL = 4, ED_FX0 = 5 };
 static int ed_groups(const App *a) { return ED_FX0 + (int)fm1ntt_inst_fx_count(a->inst); }
 static int ed_count(const App *a, int g) {
     if (!a->inst) return 0;
-    return (int)(g == 0 ? fm1ntt_inst_param_count(a->inst) : g == 1 ? fm1ntt_inst_arp_count(a->inst) : g < ED_FX0 ? fm1ntt_inst_seq_count(a->inst, (size_t)g - 2) : fm1ntt_inst_fx_param_count(a->inst, (size_t)g - ED_FX0));
+    return (int)(g == 0 ? fm1ntt_inst_param_count(a->inst) : g == 1 ? fm1ntt_inst_arp_count(a->inst) : g == ED_GLOBAL ? fm1ntt_inst_global_count(a->inst) : g < ED_FX0 ? fm1ntt_inst_seq_count(a->inst, (size_t)g - 2) : fm1ntt_inst_fx_param_count(a->inst, (size_t)g - ED_FX0));
 }
 /* Parameter i of group g: { id, min, max, default } and its name; 0 ok. */
 static int ed_info(const App *a, int g, int i, int32_t info[4], char *name, size_t cap) {
     if (!a->inst || i < 0) return -1;
     return g == 0 ? fm1ntt_inst_param(a->inst, (size_t)i, info, name, cap) : g == 1 ? fm1ntt_inst_arp_param(a->inst, (size_t)i, info, name, cap)
-         : g < ED_FX0 ? fm1ntt_inst_seq_param(a->inst, (size_t)g - 2, (size_t)i, info, name, cap) : fm1ntt_inst_fx_param(a->inst, (size_t)g - ED_FX0, (size_t)i, info, name, cap);
+         : g == ED_GLOBAL ? fm1ntt_inst_global_param(a->inst, (size_t)i, info, name, cap) : g < ED_FX0 ? fm1ntt_inst_seq_param(a->inst, (size_t)g - 2, (size_t)i, info, name, cap) : fm1ntt_inst_fx_param(a->inst, (size_t)g - ED_FX0, (size_t)i, info, name, cap);
 }
 static int ed_get(const App *a, int g, int id) {
-    return g == 0 ? fm1ntt_inst_get(a->inst, id) : g == 1 ? fm1ntt_inst_arp_get(a->inst, id) : g < ED_FX0 ? fm1ntt_inst_seq_get(a->inst, id) : fm1ntt_inst_fx_get(a->inst, (size_t)g - ED_FX0, id);
+    return g == 0 ? fm1ntt_inst_get(a->inst, id) : g == 1 ? fm1ntt_inst_arp_get(a->inst, id) : g == ED_GLOBAL ? fm1ntt_inst_global_get(a->inst, id) : g < ED_FX0 ? fm1ntt_inst_seq_get(a->inst, id) : fm1ntt_inst_fx_get(a->inst, (size_t)g - ED_FX0, id);
 }
 static void ed_title(const App *a, int g, char *out, size_t n) {
     if (g == 0) { char k[16]; fm1ntt_inst_text(a->inst, 1, k, sizeof k); for (char *q = k; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "ENGINE %s", k); }
     else if (g == 1) snprintf(out, n, "ARPEGGIATOR");
     else if (g == 2) snprintf(out, n, "SEQUENCER");
+    else if (g == ED_GLOBAL) snprintf(out, n, "GLOBAL");
     else if (g == 3) { char pn[16]; snprintf(pn, sizeof pn, "%d", fm1ntt_inst_seq_get(a->inst, 7)); snprintf(out, n, "PATTERN %s", pn); }
     else { char f[24]; fm1ntt_inst_fx_name(a->inst, (size_t)g - ED_FX0, f, sizeof f); for (char *q = f; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "EFFECT %s", f); }
 }
@@ -889,6 +890,7 @@ static void ed_set(App *a, int g, int id, int v) {
     lock(a);
     if (g == 0) fm1ntt_inst_set(a->inst, id, v);
     else if (g == 1) fm1ntt_inst_arp_set(a->inst, id, v);
+    else if (g == ED_GLOBAL) fm1ntt_inst_global_set(a->inst, id, v);
     else if (g < ED_FX0) fm1ntt_inst_seq_set(a->inst, id, v);
     else fm1ntt_inst_fx_set(a->inst, (size_t)g - ED_FX0, id, v);
     unlock(a);
@@ -3115,7 +3117,7 @@ static int selftest(void) {
                     a.panel = PANEL_SOUND; a.pv_on = 0;
                     act(&a, A_BACK); CHECK(a.ed_on == 1);
                     fill_ui(&a, ui, 0);
-                    CHECK(ui->ed_on && ui->ed_total == 11 && ui->ed_n == 11 && ui->ed_groups == 4 && ui->ed_page == 0 && ui->ed_pages == 1 && !strcmp(ui->ed_title, "ENGINE ANALOG") && !strcmp(ui->ed_inst, "Selftest"));
+                    CHECK(ui->ed_on && ui->ed_total == 11 && ui->ed_n == 11 && ui->ed_groups == 5 && ui->ed_page == 0 && ui->ed_pages == 1 && !strcmp(ui->ed_title, "ENGINE ANALOG") && !strcmp(ui->ed_inst, "Selftest"));
                     a.ed_sel = 2;                                                              /* CUTOFF, 0 to 127 */
                     int c0 = fm1ntt_inst_get(a.inst, 2);
                     act(&a, A_RIGHT); CHECK(fm1ntt_inst_get(a.inst, 2) == c0 + 1 && a.ed_dirty);
@@ -3137,12 +3139,16 @@ static int selftest(void) {
                     CHECK(ui->ed_total == 33 && ui->ed_pages == 2 && !strcmp(ui->ed_title, "PATTERN 1"));
                     a.ed_sel = 1; act(&a, A_Y); CHECK(fm1ntt_inst_seq_get(a.inst, 101) == 12);   /* step 1's note: a big step (a tenth of 0 to 127) up from a rest */
                     a.ed_sel = 30; fill_ui(&a, ui, 0); CHECK(ui->ed_page == 1 && ui->ed_n == 9 && ui->ed_sel == 6);   /* the second page holds the last 9 rows */
+                    act(&a, A_R2); CHECK(a.ed_group == 4);                                       /* the global settings: channels, bend range, velocity, mono */
+                    fill_ui(&a, ui, 0);
+                    CHECK(ui->ed_total == 5 && !strcmp(ui->ed_title, "GLOBAL") && ui->ed_row[2].max == 24);
+                    a.ed_sel = 2; act(&a, A_RIGHT); CHECK(fm1ntt_inst_global_get(a.inst, 2) == 3 && a.ed_dirty);   /* BEND RANGE 2 to 3 */
                     a.ed_group = 3; a.ed_sel = 1; act(&a, A_X); CHECK(fm1ntt_inst_seq_get(a.inst, 101) == 0);
                     act(&a, A_L2); act(&a, A_L2); act(&a, A_L2); CHECK(a.ed_group == 0);
                     act(&a, A_OK);                                                               /* saved to instruments/selftest-edit.fm1i, not over the source */
                     char sp2[400]; sub_path(sp2, sizeof sp2, "instruments", "selftest-edit.fm1i");
                     CHECK(is_file(sp2) && a.msg_style == 1 && !a.ed_dirty && is_file(ip));
-                    CHECK(inst_load(&a, sp2) == 0 && fm1ntt_inst_get(a.inst, 2) == c1 && fm1ntt_inst_arp_get(a.inst, 0) == 1);   /* the edits came back */
+                    CHECK(inst_load(&a, sp2) == 0 && fm1ntt_inst_get(a.inst, 2) == c1 && fm1ntt_inst_arp_get(a.inst, 0) == 1 && fm1ntt_inst_global_get(a.inst, 2) == 3);   /* the edits came back */
                     /* it is in the FILES list and A plays it */
                     a.panel = PANEL_FILES; scan_files(&a);
                     int fi = -1; for (int i = 0; i < a.nfiles; i++) if (!strcmp(a.files[i], "selftest-edit.fm1i")) fi = i;

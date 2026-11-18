@@ -145,6 +145,8 @@ pub struct Fm4 {
     voices: [Voice; VOICES],
     clock: u64,
     bend: f64,
+    bend_raw: i32,
+    bend_semis: f64,
 }
 
 /// The amplitude of a level 0 to 99: 0.75 dB a step down from 99 (a DX-like law), and silence at 0.
@@ -169,7 +171,7 @@ impl Fm4 {
                 *v = d.3;
             }
         }
-        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0 }
+        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0 }
     }
 
     fn op(&self, op: usize, field: u16) -> i32 {
@@ -251,8 +253,14 @@ impl Engine for Fm4 {
         }
     }
 
+    fn bend_range(&mut self, semitones: i32) {
+        self.bend_semis = f64::from(semitones.clamp(0, 24));
+        self.bend = 2f64.powf(f64::from(self.bend_raw - 8192) / 8192.0 * self.bend_semis / 12.0);
+    }
+
     fn pitch_bend(&mut self, value: i32) {
-        self.bend = 2f64.powf((value.clamp(0, 16383) - 8192) as f64 / 8192.0 * 2.0 / 12.0);
+        self.bend_raw = value.clamp(0, 16383);
+        self.bend = 2f64.powf(f64::from(self.bend_raw - 8192) / 8192.0 * self.bend_semis / 12.0);
     }
 
     fn render(&mut self, out: &mut [i16]) {

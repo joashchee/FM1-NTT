@@ -37,6 +37,8 @@ pub trait Engine {
     fn all_off(&mut self);
     /// 0 to 16383, centre 8192.
     fn pitch_bend(&mut self, _value: i32) {}
+    /// The wheel's range in semitones either way (the instrument's BEND RANGE); engines that cannot change it keep their own.
+    fn bend_range(&mut self, _semitones: i32) {}
     /// Replaces `out` with mono samples.
     fn render(&mut self, out: &mut [i16]);
     fn sounding(&self) -> usize;
@@ -96,14 +98,20 @@ pub struct Fm6Engine {
     output: i32,
     tuning: i32,
     dtun: i32,
+    bend_raw: i32,
+    bend_scale: f64,
 }
 
 impl Fm6Engine {
     pub fn new(sample_rate: f64, voice: &[u8; 128]) -> Result<Fm6Engine> {
         let synth = fm6::Synth::new(sample_rate, voice).map_err(|e| Error::BadImage(format!("fm6: {e}")))?;
-        let mut e = Fm6Engine { synth, patch: fm6::unpack_patch(voice), pot: 900, output: 0, tuning: 0, dtun: 0 };
+        let mut e = Fm6Engine { synth, patch: fm6::unpack_patch(voice), pot: 900, output: 0, tuning: 0, dtun: 0, bend_raw: 8192, bend_scale: 1.0 };
         e.apply_model();
         Ok(e)
+    }
+
+    fn apply_bend(&mut self) {
+        self.synth.set_pitch_bend(8192 + (f64::from(self.bend_raw - 8192) * self.bend_scale).round() as i32);
     }
 
     fn apply_model(&mut self) {
@@ -192,7 +200,14 @@ impl Engine for Fm6Engine {
     }
 
     fn pitch_bend(&mut self, value: i32) {
-        self.synth.set_pitch_bend(value);
+        self.bend_raw = value.clamp(0, 16383);
+        self.apply_bend();
+    }
+
+    /// The synth's wheel is 3 semitones (as msfa fixes it): a smaller range scales it, a larger one stops at 3.
+    fn bend_range(&mut self, semitones: i32) {
+        self.bend_scale = (f64::from(semitones.clamp(0, 24)) / 3.0).min(1.0);
+        self.apply_bend();
     }
 
     fn render(&mut self, out: &mut [i16]) {

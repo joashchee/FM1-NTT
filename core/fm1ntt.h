@@ -127,6 +127,15 @@ size_t fm1ntt_inst_arp_count(const fm1ntt_inst *h);                             
 int fm1ntt_inst_arp_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
 int32_t fm1ntt_inst_arp_get(const fm1ntt_inst *h, int id);
 int fm1ntt_inst_arp_set(fm1ntt_inst *h, int id, int value);                                 /* off releases the held note */
+size_t fm1ntt_inst_global_count(const fm1ntt_inst *h);                                     /* the global settings (core/src/globals.rs): MIDI channel, effect channel, bend range, fixed velocity, mono; the same four calls */
+int fm1ntt_inst_global_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
+int32_t fm1ntt_inst_global_get(const fm1ntt_inst *h, int id);
+int fm1ntt_inst_global_set(fm1ntt_inst *h, int id, int value);                             /* the bend range reaches the engine at once; mono on or off lets go of every note */
+int fm1ntt_inst_fx_move(fm1ntt_inst *h, size_t from, size_t to);                           /* reorder the effect chain (the controller map follows); 0 ok, -1 out of range */
+size_t fm1ntt_inst_bank_count(const fm1ntt_inst *h);                                       /* banks of 32 voices the instrument's voices fill */
+size_t fm1ntt_inst_bank(const fm1ntt_inst *h);                                             /* the bank the program is in */
+int fm1ntt_inst_bank_set(fm1ntt_inst *h, size_t bank);                                     /* same slot in another bank; 0 ok, -1 no such bank */
+int fm1ntt_inst_bank_name(const fm1ntt_inst *h, size_t bank, char *out, size_t cap);       /* a package's name for it, else "BANK n" */
 size_t fm1ntt_inst_seq_count(const fm1ntt_inst *h, size_t group);                           /* the step sequencer (core/src/seq.rs): group 0 its settings, 1 the pattern being edited */
 int fm1ntt_inst_seq_param(const fm1ntt_inst *h, size_t group, size_t index, int32_t info[4], char *name, size_t cap);
 int32_t fm1ntt_inst_seq_get(const fm1ntt_inst *h, int id);

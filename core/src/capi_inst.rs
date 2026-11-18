@@ -576,6 +576,123 @@ pub unsafe extern "C" fn fm1ntt_inst_fx_set(h: *mut InstHandle, fx: usize, id: c
     }
 }
 
+/// The global settings (`globals.rs`): the count, then `index`'s { id, min, max, default } and name (0 ok, -1 out of range).
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_global_count(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.global_params().len())
+}
+
+/// Global setting `index`: `info` gets { id, min, max, default }; 0 ok, -1 out of range.
+///
+/// # Safety
+/// `info` has room for 4 values; `name` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_global_param(h: *const InstHandle, index: usize, info: *mut i32, name: *mut c_char, cap: usize) -> c_int {
+    let (Some(h), false) = (h.as_ref(), info.is_null()) else { return -1 };
+    let p = h.0.global_params();
+    let Some(d) = p.get(index) else { return -1 };
+    *info = d.id as i32;
+    *info.add(1) = d.min;
+    *info.add(2) = d.max;
+    *info.add(3) = d.default;
+    put_str(&d.name, name, cap);
+    0
+}
+
+/// The value of global setting `id`, or `i32::MIN`.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_global_get(h: *const InstHandle, id: c_int) -> i32 {
+    h.as_ref().and_then(|h| h.0.get_global(id.clamp(0, 65535) as u16)).unwrap_or(i32::MIN)
+}
+
+/// Sets global setting `id` (clamped); 0 ok, -1 no such setting.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_global_set(h: *mut InstHandle, id: c_int, value: c_int) -> c_int {
+    let Some(h) = h.as_mut() else { return -1 };
+    if (0..=65535).contains(&id) && h.0.set_global(id as u16, value) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Moves effect `from` to place `to` in the chain (the controller map follows); 0 ok, -1 out of range.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_fx_move(h: *mut InstHandle, from: usize, to: usize) -> c_int {
+    match h.as_mut() {
+        Some(h) => {
+            if h.0.move_fx(from, to) {
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
+}
+
+/// Banks of 32 voices: how many there are (the voices fill), the bank the program is in, and a switch to bank `b` (same slot; 0 ok, -1 no such bank).
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_bank_count(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.bank_count())
+}
+
+/// The bank the program is in.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_bank(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.bank())
+}
+
+/// Goes to bank `b`; 0 ok, -1 no such bank.
+///
+/// # Safety
+/// `h` is null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_bank_set(h: *mut InstHandle, b: usize) -> c_int {
+    match h.as_mut() {
+        Some(h) => {
+            if h.0.set_bank(b) {
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
+}
+
+/// Bank `b`'s name into `out` (NUL-terminated, cut to `cap`); 0 ok, -1 no such bank.
+///
+/// # Safety
+/// `out` is null or has room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_bank_name(h: *const InstHandle, b: usize, out: *mut c_char, cap: usize) -> c_int {
+    let Some(h) = h.as_ref() else { return -1 };
+    if b >= crate::package::MAX_BANKS {
+        return -1;
+    }
+    put_str(&h.0.bank_name(b), out, cap);
+    0
+}
+
 /// The instrument as package text (the edits included), written to `out` up to `cap` bytes (not NUL-terminated); the full length. `source` is the file it came from.
 ///
 /// # Safety
@@ -658,6 +775,21 @@ mod tests {
             assert_eq!((fm1ntt_inst_seq_set(h, 101, 62), fm1ntt_inst_seq_get(h, 101)), (0, 62));
             assert_eq!((fm1ntt_inst_seq_set(h, 55, 1), fm1ntt_inst_seq_get(h, 55)), (-1, i32::MIN));
             assert_eq!(fm1ntt_inst_seq_set(h, 101, 0), 0);
+            assert_eq!(fm1ntt_inst_global_count(h), 5);
+            let mut gi = [0i32; 4];
+            let mut gn = [0 as c_char; 40];
+            assert_eq!(fm1ntt_inst_global_param(h, 2, gi.as_mut_ptr(), gn.as_mut_ptr(), 40), 0);
+            assert_eq!(gi, [2, 0, 24, 2]);
+            assert_eq!((fm1ntt_inst_global_set(h, 2, 99), fm1ntt_inst_global_get(h, 2)), (0, 24));
+            assert_eq!((fm1ntt_inst_global_set(h, 77, 1), fm1ntt_inst_global_get(h, 77)), (-1, i32::MIN));
+            assert_eq!(fm1ntt_inst_global_set(h, 2, 2), 0);
+            assert_eq!((fm1ntt_inst_bank_count(h), fm1ntt_inst_bank(h), fm1ntt_inst_bank_set(h, 5)), (1, 0, -1)); // the eight built-in voices fill one bank
+            assert_eq!(fm1ntt_inst_bank_set(h, 0), 0);
+            let mut bn = [0 as c_char; 16];
+            assert_eq!(fm1ntt_inst_bank_name(h, 0, bn.as_mut_ptr(), 16), 0);
+            assert_eq!(fm1ntt_inst_bank_name(h, 8, bn.as_mut_ptr(), 16), -1);
+            assert_eq!(fm1ntt_inst_fx_move(h, 0, 1), -1);
+            assert_eq!((fm1ntt_inst_global_count(std::ptr::null()), fm1ntt_inst_fx_move(std::ptr::null_mut(), 0, 0)), (0, -1));
             assert_eq!(fm1ntt_inst_arp_count(h), 11);
             assert_eq!(fm1ntt_inst_arp_param(h, 3, info.as_mut_ptr(), pn.as_mut_ptr(), 40), 0);
             assert_eq!((CStr::from_ptr(pn.as_ptr()).to_str().unwrap(), info[1], info[2]), ("BPM", 30, 300));

@@ -14,6 +14,10 @@ pub const MAX_MAP: usize = 128;
 pub const MAX_PARAMS: usize = 1024;
 pub const MAX_ARP: usize = 32;
 pub const MAX_STEPS: usize = 256;
+pub const MAX_GLOBALS: usize = 16;
+/// banks of 32 voices: the FM-1's four, and up to eight for a package's 256 voices
+pub const MAX_BANKS: usize = 8;
+pub const BANK_SIZE: usize = 32;
 
 fn bad<T>(why: impl Into<String>) -> Result<T> {
     Err(Error::BadImage(format!("package: {}", why.into())))
@@ -164,6 +168,9 @@ pub struct Package {
     pub seq: Vec<(u16, i32)>,
     pub steps: Vec<(u8, u8, u8, u8)>,
     pub seq_voices: Vec<(u8, i32)>,
+    /// the global settings (`global N = V`, ids as in `globals.rs`) and the banks' names (`bank N = NAME`), format 2
+    pub globals: Vec<(u16, i32)>,
+    pub banks: Vec<(u8, String)>,
     pub samples: Vec<SampleRef>,
     pub fx: Vec<FxEntry>,
     pub map: Vec<MapEntry>,
@@ -186,6 +193,8 @@ impl Package {
             seq: Vec::new(),
             steps: Vec::new(),
             seq_voices: Vec::new(),
+            globals: Vec::new(),
+            banks: Vec::new(),
             samples: Vec::new(),
             fx: Vec::new(),
             map: Vec::new(),
@@ -203,7 +212,7 @@ impl Package {
     /// The package as text. Values are one line each (a line break in a value becomes a space).
     pub fn to_text(&self) -> String {
         let one = |s: &str| s.replace(['\n', '\r'], " ");
-        let mut t = String::from("fm1i = 1\n");
+        let mut t = String::from(if self.globals.is_empty() && self.banks.is_empty() { "fm1i = 1\n" } else { "fm1i = 2\n" });
         t += &format!("name = {}\nengine = {}\nlicence = {}\n", one(&self.name), one(&self.engine), one(&self.licence));
         if !self.source.is_empty() {
             t += &format!("source = {}\n", one(&self.source));
@@ -232,6 +241,12 @@ impl Package {
         }
         for (p, v) in &self.seq_voices {
             t += &format!("seqvoice {p} = {v}\n");
+        }
+        for (id, v) in &self.globals {
+            t += &format!("global {id} = {v}\n");
+        }
+        for (b, n) in &self.banks {
+            t += &format!("bank {b} = {}\n", one(n));
         }
         for s in &self.samples {
             t += &format!("sample {} = {}", s.note, one(&s.file));
@@ -282,8 +297,8 @@ impl Package {
             let key = kw.next().unwrap_or("");
             let num = |s: &str| -> Result<i32> { s.parse::<i32>().or_else(|_| bad(format!("line {at}: {s:?} is not a number"))) };
             if !seen_header {
-                if key != "fm1i" || v != "1" {
-                    return bad("the first line must be `fm1i = 1`");
+                if key != "fm1i" || (v != "1" && v != "2") {
+                    return bad("the first line must be `fm1i = 1` (or 2, with global settings and banks)");
                 }
                 seen_header = true;
                 continue;
@@ -349,6 +364,22 @@ impl Package {
                     let pat = kw.next().and_then(|s| s.parse::<u8>().ok());
                     let Some(pat) = pat else { return bad(format!("line {at}: seqvoice needs a pattern")) };
                     p.seq_voices.push((pat, num(v)?));
+                }
+                "global" => {
+                    if p.globals.len() >= MAX_GLOBALS {
+                        return bad("too many global settings");
+                    }
+                    let id = kw.next().and_then(|s| s.parse::<u16>().ok());
+                    let Some(id) = id else { return bad(format!("line {at}: global needs an id")) };
+                    p.globals.push((id, num(v)?));
+                }
+                "bank" => {
+                    let b = kw.next().and_then(|s| s.parse::<u8>().ok()).filter(|&b| usize::from(b) < MAX_BANKS);
+                    let Some(b) = b else { return bad(format!("line {at}: a bank is 0 to {}", MAX_BANKS - 1)) };
+                    if p.banks.len() >= MAX_BANKS || v.len() > 32 || !v.is_ascii() {
+                        return bad(format!("line {at}: a bank's name is up to 32 ASCII characters, at most {MAX_BANKS} banks"));
+                    }
+                    p.banks.push((b, v.into()));
                 }
                 "sample" => {
                     if p.samples.len() >= MAX_SAMPLES {
@@ -521,5 +552,26 @@ mod tests {
         }
         let many: String = (0..300).map(|i| format!("step {} {} = 60 100\n", i % 16, i % 16)).collect();
         assert!(Package::parse(&format!("fm1i = 1\nname = S\nengine = analog\nlicence = MIT\n{many}")).is_err(), "more than 256 steps");
+    }
+}
+
+#[cfg(test)]
+mod tests_v2 {
+    use super::*;
+
+    #[test]
+    fn globals_and_banks_round_trip_and_are_bounded() {
+        let t = "fm1i = 2\nname = G\nengine = analog\nlicence = MIT\nglobal 0 = 3\nglobal 4 = 1\nbank 0 = LEADS\nbank 3 = PADS\n";
+        let p = Package::parse(t).unwrap();
+        assert_eq!((p.globals.clone(), p.banks.clone()), (vec![(0, 3), (4, 1)], vec![(0, "LEADS".to_string()), (3, "PADS".to_string())]));
+        assert!(p.to_text().starts_with("fm1i = 2\n"));
+        assert_eq!(Package::parse(&p.to_text()).unwrap(), p);
+        assert!(Package::new("n", "analog", "MIT").to_text().starts_with("fm1i = 1\n"), "a package with none of it is still format 1");
+        let head = "fm1i = 2\nengine = analog\nlicence = MIT\n";
+        assert!(Package::parse(&format!("{head}bank 8 = X\n")).is_err());
+        assert!(Package::parse(&format!("{head}bank 0 = {}\n", "x".repeat(33))).is_err());
+        assert!(Package::parse(&format!("{head}global x = 1\n")).is_err());
+        assert!(Package::parse(&format!("{head}{}", "global 0 = 1\n".repeat(17))).is_err());
+        assert!(Package::parse("fm1i = 3\nengine = analog\nlicence = MIT\n").is_err());
     }
 }

@@ -12,6 +12,7 @@ use crate::{
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
     fx::{self, Effect, Limiter},
+    globals::{Globals, Route, G_BEND, G_MONO},
     package::{Package, Target},
     sampler::{parse_wav, Kit},
     Error, Result,
@@ -43,6 +44,10 @@ pub struct Instrument {
     last_tick: Option<u64>,
     tick_frames: f64,
     arp_events: Vec<(usize, Event)>,
+    globals: Globals,
+    bank_names: Vec<String>,
+    /// notes held in mono mode, in the order played (the last one sounds)
+    mono_stack: Vec<(u8, u8)>,
     // MIDI parser state
     status: u8,
     data: [u8; 2],
@@ -110,6 +115,9 @@ impl Instrument {
             last_tick: None,
             tick_frames: rate * 60.0 / 120.0 / 24.0,
             arp_events: Vec::with_capacity(64),
+            globals: Globals::new(),
+            bank_names: vec![String::new(); crate::package::MAX_BANKS],
+            mono_stack: Vec::with_capacity(16),
             status: 0,
             data: [0; 2],
             have: 0,
@@ -118,6 +126,16 @@ impl Instrument {
         for &(id, v) in &pkg.params {
             if !inst.engine.set(id, v) {
                 return fail(format!("the {} engine has no parameter {id}", pkg.engine));
+            }
+        }
+        for &(id, v) in &pkg.globals {
+            if !inst.set_global(id, v) {
+                return fail(format!("there is no global setting {id}"));
+            }
+        }
+        for (b, n) in &pkg.banks {
+            if let Some(slot) = inst.bank_names.get_mut(usize::from(*b)) {
+                *slot = n.clone();
             }
         }
         for &(id, v) in &pkg.arp {
@@ -212,6 +230,97 @@ impl Instrument {
         self.fx.get_mut(i).is_some_and(|f| f.set(id, v))
     }
 
+    /// Moves effect `from` to place `to` in the chain; the package's controller map follows the effects it points at. False when either is out of range.
+    pub fn move_fx(&mut self, from: usize, to: usize) -> bool {
+        let n = self.fx.len();
+        if from >= n || to >= n {
+            return false;
+        }
+        if from == to {
+            return true;
+        }
+        let e = self.fx.remove(from);
+        self.fx.insert(to, e);
+        let name = self.fx_names.remove(from);
+        self.fx_names.insert(to, name);
+        let place = |i: usize| -> usize {
+            if i == from {
+                to
+            } else if from < to && i > from && i <= to {
+                i - 1
+            } else if to < from && i >= to && i < from {
+                i + 1
+            } else {
+                i
+            }
+        };
+        for m in &mut self.map {
+            if let Target::Fx(i, id) = m.target {
+                m.target = Target::Fx(place(i), id);
+            }
+        }
+        true
+    }
+
+    /// The global settings (`globals.rs`), described like an engine's.
+    pub fn global_params(&self) -> Vec<ParamDesc> {
+        self.globals.params()
+    }
+
+    pub fn get_global(&self, id: u16) -> Option<i32> {
+        self.globals.get(id)
+    }
+
+    /// Sets a global setting. The bend range reaches the engine at once; mono on or off lets go of every note.
+    pub fn set_global(&mut self, id: u16, v: i32) -> bool {
+        if !self.globals.set(id, v) {
+            return false;
+        }
+        match id {
+            G_BEND => self.engine.bend_range(self.globals.get(G_BEND).unwrap_or(2)),
+            G_MONO => self.all_off(),
+            _ => {}
+        }
+        true
+    }
+
+    /// Banks of 32 voices: how many the voices fill, a bank's name (a default when the package names none), the bank the program is in.
+    pub fn bank_count(&self) -> usize {
+        self.voices.len().div_ceil(crate::package::BANK_SIZE)
+    }
+
+    pub fn bank_name(&self, b: usize) -> String {
+        match self.bank_names.get(b) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("BANK {}", b + 1),
+        }
+    }
+
+    pub fn set_bank_name(&mut self, b: usize, name: &str) -> bool {
+        let ok = name.len() <= 32 && name.is_ascii() && !name.contains(['\n', '\r']);
+        match self.bank_names.get_mut(b) {
+            Some(slot) if ok => {
+                *slot = name.into();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn bank(&self) -> usize {
+        self.program / crate::package::BANK_SIZE
+    }
+
+    /// Goes to bank `b`, to the same slot (or the last voice there is); false when the bank does not exist.
+    pub fn set_bank(&mut self, b: usize) -> bool {
+        if b >= self.bank_count() {
+            return false;
+        }
+        let at = (b * crate::package::BANK_SIZE + self.program % crate::package::BANK_SIZE).min(self.voices.len() - 1);
+        self.set_program(at);
+        true
+    }
+
     pub fn voice_count(&self) -> usize {
         self.voices.len()
     }
@@ -237,7 +346,18 @@ impl Instrument {
 
     /// A key goes down: to the arpeggiator when it is on (which plays the engine from its own clock), else straight to the engine.
     pub fn note_on(&mut self, note: u8, velocity: u8) {
-        if self.arp.on() {
+        let velocity = self.globals.velocity(velocity);
+        if self.globals.get(G_MONO) == Some(1) && !self.arp.on() && !self.seq.on() {
+            if let Some(&(top, _)) = self.mono_stack.last() {
+                self.engine.note_off(top);
+            }
+            self.mono_stack.retain(|&(n, _)| n != note);
+            if self.mono_stack.len() >= 16 {
+                self.mono_stack.remove(0);
+            }
+            self.mono_stack.push((note, velocity));
+            self.engine.note_on(note, velocity);
+        } else if self.arp.on() {
             self.arp.note_on(note, velocity);
         } else if self.seq.on() {
             self.seq.record_note(note, velocity); // when armed, into the step it is nearest to; either way it is played live over the sequence
@@ -250,12 +370,23 @@ impl Instrument {
     pub fn note_off(&mut self, note: u8) {
         if self.arp.on() {
             self.arp.note_off(note);
+        } else if self.globals.get(G_MONO) == Some(1) && !self.seq.on() {
+            // the sounding note let go goes back to the one before it, struck again; a note under it is just forgotten
+            let was_top = self.mono_stack.last().map(|&(n, _)| n) == Some(note);
+            self.mono_stack.retain(|&(n, _)| n != note);
+            if was_top {
+                self.engine.note_off(note);
+                if let Some(&(n, v)) = self.mono_stack.last() {
+                    self.engine.note_on(n, v);
+                }
+            }
         } else {
             self.engine.note_off(note);
         }
     }
 
     pub fn all_off(&mut self) {
+        self.mono_stack.clear();
         self.arp.all_off();
         self.seq.all_off();
         self.flush_arp();
@@ -382,6 +513,17 @@ impl Instrument {
         }
         self.have = 0;
         let (d0, d1) = (self.data[0], self.data[1]);
+        match self.globals.route(self.status & 0x0F) {
+            Route::None => return,
+            // the effect channel: controllers through the map, nothing that plays or selects
+            Route::Controllers => {
+                if self.status & 0xF0 == 0xB0 && d0 != 120 && d0 != 123 {
+                    self.cc(d0, d1);
+                }
+                return;
+            }
+            Route::All => {}
+        }
         match self.status & 0xF0 {
             0x80 => self.note_off(d0),
             0x90 => {
@@ -393,6 +535,10 @@ impl Instrument {
             }
             0xB0 => match d0 {
                 120 | 123 => self.all_off(),
+                // Bank Select picks a bank of 32 voices, keeping the slot, unless the package maps controller 0 to something
+                0 if !self.map.iter().any(|m| m.cc == 0) => {
+                    self.set_bank(usize::from(d1));
+                }
                 _ => {
                     self.cc(d0, d1);
                 }
@@ -540,6 +686,17 @@ impl Instrument {
                     p.verify = format!("{} (edited since)", p.verify);
                 }
                 *slot = v;
+            }
+        }
+        for d in self.globals.params() {
+            let v = self.globals.get(d.id).unwrap_or(d.default);
+            if v != d.default {
+                p.globals.push((d.id, v));
+            }
+        }
+        for (b, n) in self.bank_names.iter().enumerate() {
+            if !n.is_empty() {
+                p.banks.push((b as u8, n.clone()));
             }
         }
         for d in self.arp.params() {
@@ -922,5 +1079,184 @@ mod tests {
         let mut d = vec![0i16; 2000];
         m.render(&mut d);
         assert!(d.iter().any(|&x| x.abs() > 100), "a clock byte between a status and its data leaves the note whole");
+    }
+}
+
+#[cfg(test)]
+mod tests_globals {
+    use super::*;
+    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_VELOCITY};
+
+    fn none(_: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn analog() -> Instrument {
+        let mut p = Package::new("T", "analog", "MIT");
+        p.params = vec![(crate::analog::P_RELEASE, 1), (crate::analog::P_ATTACK, 1), (crate::analog::P_WAVE, 3)]; // a sine: one rising crossing a cycle
+        Instrument::from_package(&p, 44_100.0, &none).unwrap()
+    }
+    fn run(i: &mut Instrument, n: usize) -> Vec<i16> {
+        let mut o = vec![0i16; n];
+        i.render(&mut o);
+        o
+    }
+    fn peak(x: &[i16]) -> i32 {
+        x.iter().map(|&s| i32::from(s).abs()).max().unwrap_or(0)
+    }
+    /// zero crossings a second of a mono signal, by counting rising ones
+    fn freq(x: &[i16], rate: f64) -> f64 {
+        let n = x.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count();
+        n as f64 * rate / x.len() as f64
+    }
+
+    #[test]
+    fn channels_route_notes_and_controllers() {
+        let mut i = analog();
+        i.set_global(G_CHANNEL, 1);
+        i.midi_bytes(&[0x91, 60, 100]); // channel 2 is the effect channel: no note
+        i.midi_bytes(&[0x92, 60, 100]); // channel 3 is nothing
+        run(&mut i, 512);
+        assert_eq!(i.sounding(), 0);
+        i.midi_bytes(&[0x90, 60, 100]);
+        run(&mut i, 512);
+        assert_eq!(i.sounding(), 1);
+
+        let mut p = i.to_package("", "");
+        p.map = vec![crate::package::MapEntry { cc: 74, target: Target::Engine(crate::analog::P_CUTOFF), min: 0, max: 100 }];
+        let mut j = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        j.midi_bytes(&[0xB2, 74, 127]); // another channel: ignored
+        assert_ne!(j.get_param(crate::analog::P_CUTOFF), Some(100));
+        j.midi_bytes(&[0xB1, 74, 127]); // the effect channel: the map answers
+        assert_eq!(j.get_param(crate::analog::P_CUTOFF), Some(100));
+        j.set_global(G_FX_CHANNEL, 0);
+        j.midi_bytes(&[0xB1, 74, 0]);
+        assert_eq!(j.get_param(crate::analog::P_CUTOFF), Some(100), "no effect channel: nothing on it");
+        j.midi_bytes(&[0xB0, 74, 0]);
+        assert_eq!(j.get_param(crate::analog::P_CUTOFF), Some(0));
+    }
+
+    #[test]
+    fn fixed_velocity_is_louder_than_a_soft_touch() {
+        let (mut a, mut b) = (analog(), analog());
+        b.set_global(G_VELOCITY, 127);
+        a.midi_bytes(&[0x90, 60, 10]);
+        b.midi_bytes(&[0x90, 60, 10]);
+        assert!(peak(&run(&mut b, 4096)) > peak(&run(&mut a, 4096)) * 2);
+    }
+
+    #[test]
+    fn mono_plays_one_note_and_returns_to_the_one_before() {
+        let mut poly = analog();
+        poly.midi_bytes(&[0x90, 60, 100, 64, 100]);
+        run(&mut poly, 2048);
+        assert_eq!(poly.sounding(), 2);
+
+        let mut m = analog();
+        m.set_global(crate::globals::G_MONO, 1);
+        m.midi_bytes(&[0x90, 60, 100, 64, 100]);
+        run(&mut m, 2048);
+        assert_eq!(m.sounding(), 1, "the 60 let go when the 64 came");
+        m.midi_bytes(&[0x80, 64, 0]);
+        let back = run(&mut m, 8192);
+        assert_eq!(m.sounding(), 1, "the 60 is struck again");
+        let hz = freq(&back[2048..], 44_100.0);
+        assert!((hz - 261.6).abs() < 12.0, "the held C4 sounds again, got {hz} Hz");
+        m.midi_bytes(&[0x80, 60, 0]);
+        run(&mut m, 2048);
+        assert_eq!(m.sounding(), 0);
+        // letting go of a note under the top one changes nothing
+        m.midi_bytes(&[0x90, 60, 100, 64, 100, 0x80, 60, 0]);
+        run(&mut m, 2048);
+        assert_eq!(m.sounding(), 1);
+        m.midi_bytes(&[0x80, 64, 0]);
+        run(&mut m, 2048);
+        assert_eq!(m.sounding(), 0);
+    }
+
+    #[test]
+    fn bend_range_sets_the_wheel() {
+        let mut a = analog();
+        a.midi_bytes(&[0x90, 57, 100, 0xE0, 127, 127]); // A3 (220 Hz), the wheel up
+        let base = freq(&run(&mut a, 44_100)[2000..], 44_100.0);
+        let mut b = analog();
+        b.set_global(G_BEND, 12);
+        b.midi_bytes(&[0x90, 57, 100, 0xE0, 127, 127]);
+        let wide = freq(&run(&mut b, 44_100)[2000..], 44_100.0);
+        let ratio_a = base / 220.0;
+        let ratio_b = wide / 220.0;
+        assert!((ratio_a - 2f64.powf(2.0 / 12.0)).abs() < 0.03, "default: two semitones, got {ratio_a}");
+        assert!((ratio_b - 2.0).abs() < 0.04, "twelve semitones is an octave, got {ratio_b}");
+        let mut c = analog();
+        c.set_global(G_BEND, 0);
+        c.midi_bytes(&[0x90, 57, 100, 0xE0, 127, 127]);
+        let none_bent = freq(&run(&mut c, 44_100)[2000..], 44_100.0) / 220.0;
+        assert!((none_bent - 1.0).abs() < 0.02, "range 0 turns the wheel off, got {none_bent}");
+    }
+
+    #[test]
+    fn fm6_takes_a_bend_range() {
+        let mut i = Instrument::from_package(&factory_package(), 44_100.0, &none).unwrap();
+        assert!(i.set_global(G_BEND, 24) && i.set_global(G_BEND, 2));
+        assert_eq!(i.get_global(G_BEND), Some(2));
+    }
+
+    #[test]
+    fn effect_chain_reorders_and_the_map_follows() {
+        let mut p = Package::new("T", "analog", "MIT");
+        p.fx = ["delay", "chorus", "reverb"].iter().map(|n| crate::package::FxEntry { name: (*n).into(), params: Vec::new() }).collect();
+        p.map = vec![
+            crate::package::MapEntry { cc: 1, target: Target::Fx(0, 0), min: 0, max: 10 },
+            crate::package::MapEntry { cc: 2, target: Target::Fx(1, 0), min: 0, max: 10 },
+            crate::package::MapEntry { cc: 3, target: Target::Fx(2, 0), min: 0, max: 10 },
+        ];
+        let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        assert!(i.move_fx(0, 2));
+        assert_eq!((i.fx_name(0), i.fx_name(1), i.fx_name(2)), (Some("chorus"), Some("reverb"), Some("delay")));
+        let t: Vec<Target> = i.to_package("", "").map.iter().map(|m| m.target).collect();
+        assert_eq!(t, vec![Target::Fx(2, 0), Target::Fx(0, 0), Target::Fx(1, 0)], "each controller still reaches the effect it did");
+        assert!(i.move_fx(2, 0));
+        assert_eq!(i.fx_name(0), Some("delay"));
+        assert!(!i.move_fx(0, 3) && !i.move_fx(5, 0));
+        let back = Instrument::from_package(&i.to_package("", ""), 44_100.0, &none).unwrap();
+        assert_eq!((back.fx_name(0), back.fx_name(1), back.fx_name(2)), (Some("delay"), Some("chorus"), Some("reverb")));
+    }
+
+    #[test]
+    fn banks_and_bank_select() {
+        let mut p = factory_package();
+        let base = p.voices[0];
+        p.voices = vec![base; 70];
+        for (k, v) in p.voices.iter_mut().enumerate() {
+            v[0] = (k % 100) as u8; // distinguishable
+        }
+        p.banks = vec![(1, "PADS".into())];
+        let mut i = Instrument::from_package(&p, 44_100.0, &none).unwrap();
+        assert_eq!((i.bank_count(), i.bank(), i.bank_name(0), i.bank_name(1)), (3, 0, "BANK 1".to_string(), "PADS".to_string()));
+        i.set_program(5);
+        assert!(i.set_bank(1));
+        assert_eq!((i.program(), i.bank()), (37, 1), "the same slot in the next bank");
+        i.midi_bytes(&[0xB0, 0, 2]); // Bank Select
+        assert_eq!(i.program(), 69, "bank 3 has six voices: the last there is");
+        i.midi_bytes(&[0xB0, 0, 9]);
+        assert_eq!(i.program(), 69, "no such bank: nothing happens");
+        assert!(!i.set_bank(3));
+        i.midi_bytes(&[0xC0, 3]); // Program Change is absolute
+        assert_eq!(i.program(), 3);
+        assert!(i.set_bank_name(0, "LEADS") && !i.set_bank_name(8, "X") && !i.set_bank_name(0, &"x".repeat(33)));
+    }
+
+    #[test]
+    fn globals_and_banks_survive_a_package() {
+        let mut i = analog();
+        i.set_global(G_CHANNEL, 5);
+        i.set_global(crate::globals::G_MONO, 1);
+        i.set_global(G_BEND, 7);
+        let text = i.to_package("", "").to_text();
+        assert!(text.starts_with("fm1i = 2\n") && text.contains("global 0 = 5"));
+        let back = Instrument::from_package(&Package::parse(&text).unwrap(), 44_100.0, &none).unwrap();
+        assert_eq!((back.get_global(G_CHANNEL), back.get_global(crate::globals::G_MONO), back.get_global(G_BEND)), (Some(5), Some(1), Some(7)));
+        let mut p = Package::new("T", "analog", "MIT");
+        p.globals = vec![(99, 1)];
+        assert!(Instrument::from_package(&p, 44_100.0, &none).is_err());
     }
 }

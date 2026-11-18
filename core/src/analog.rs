@@ -69,6 +69,8 @@ pub struct Analog {
     voices: [Voice; VOICES],
     clock: u64,
     bend: f64,
+    bend_raw: i32,
+    bend_semis: f64,
 }
 
 fn poly_blep(t: f64, dt: f64) -> f64 {
@@ -90,7 +92,7 @@ impl Analog {
         for (i, d) in DESC.iter().enumerate() {
             p[i] = d.3;
         }
-        Analog { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0 }
+        Analog { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0 }
     }
 
     fn osc(&mut self, vi: usize, k: usize, ratio: f64) -> f64 {
@@ -178,9 +180,15 @@ impl Engine for Analog {
         }
     }
 
+    fn bend_range(&mut self, semitones: i32) {
+        self.bend_semis = f64::from(semitones.clamp(0, 24));
+        self.bend = 2f64.powf(f64::from(self.bend_raw - 8192) / 8192.0 * self.bend_semis / 12.0);
+    }
+
     fn pitch_bend(&mut self, value: i32) {
+        self.bend_raw = value.clamp(0, 16383);
         // two semitones either way
-        self.bend = 2f64.powf((value.clamp(0, 16383) - 8192) as f64 / 8192.0 * 2.0 / 12.0);
+        self.bend = 2f64.powf(f64::from(self.bend_raw - 8192) / 8192.0 * self.bend_semis / 12.0);
     }
 
     fn render(&mut self, out: &mut [i16]) {
