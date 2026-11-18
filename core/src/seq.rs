@@ -314,7 +314,7 @@ mod tests {
     fn off_by_default_and_silent() {
         let mut s = Seq::new(44_100.0);
         assert!(run(&mut s, 44_100, 512).is_empty());
-        assert!(!s.on() && s.get(P_PATTERN as u16) == Some(1));
+        assert!(!s.on() && s.get(P_PATTERN) == Some(1));
     }
 
     #[test]
