@@ -61,7 +61,7 @@ on a keyboard; it goes round. **L1 + R1** together open the menu (TOOLS) and clo
 
 Start pauses and resumes from any panel (the emulation stops; the sound goes quiet). A question (reset, restore, quit while recording) is
 answered with A or B and nothing else moves meanwhile. Nothing scrolls: a long list is whole pages. Files are written only under the app's
-folder (`$FM1NTT_DIR`, else `/roms/FM1-NTT` on the R36S, else `~/FM1-NTT`): `firmware/`, `slots/`, `recordings/`, `screenshots/`, each to a
+folder (`$FM1NTT_DIR`, else r3i6nos's choice (`$R3I6NOS_APP_DATA`, else `r3i6nos-appdata path FM1-NTT`: the data card's `/roms2/FM1-NTT` when a valid one is in, else `/roms/FM1-NTT`), else our own check of `/roms2` by the same rules when there is no engine, else `~/FM1-NTT`): `firmware/`, `slots/`, `recordings/`, `screenshots/`, each to a
 temporary name and then renamed. **The three reports** (TOOLS, and as flags for SSH): the **Device report** is r3i6nos's (what is wrong on this unit: PASS/FAIL against goals,
 the card, the sound callback, the power windows), the **Rec demo** records a deterministic tour with screenshots, a WAV and an mp4, and the
 **Benchmark** (`docs/BENCHMARKS.md`) is the file to collect from every platform and compare with `scripts/bench-compare.py`. A report or a

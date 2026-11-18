@@ -15,7 +15,7 @@
  * below) and Zoomed (2x, one narrow panel at the right; Tab or F1 on a keyboard). On the pad Fn turns the panel carousel and L1+R1 together
  * open and close the menu (TOOLS); Home and End turn the carousel on a keyboard; on MACHINE the pad plays, see the pad section below. The carousel is as TinyNTT's:
  * MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND MONITOR TOOLS. The audio device paces the emulation: SDL's callback asks the core for frames.
- * Files are only written under the app's folder ($FM1NTT_DIR, else /roms/FM1-NTT on the R36S, else ~/FM1-NTT), to a temporary name
+ * Files are only written under the app's folder ($FM1NTT_DIR, else r3i6nos's choice: the DATA card /roms2/FM1-NTT when a valid one is in, else /roms/FM1-NTT; else ~/FM1-NTT; see base_dir), to a temporary name
  * and then renamed. Nothing here has run on an R36S. */
 #define _GNU_SOURCE
 #include <math.h>
@@ -257,13 +257,89 @@ static void pv_free(App *a) { if (a->pv) { fm1ntt_fm6_free(a->pv); a->pv = NULL;
 static int is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
 static int is_file(const char *p) { struct stat st; return stat(p, &st) == 0 && S_ISREG(st.st_mode); }
 
-/* The app's folder: only here is anything written. */
+/* The app's folder: only here is anything written. Where it is, in order (docs/ARCHITECTURE.md, r3i6nos docs/APP-DATA.md):
+ *   $FM1NTT_DIR                        the person's override (tests and the Rec demo's temporary folder use it); never remembered
+ *   $R3I6NOS_APP_DATA                  r3i6nos already decided (a caller, a test)
+ *   r3i6nos-appdata path FM1-NTT       r3i6nos's engine: the DATA card (/roms2) when a valid one is in, else the system card (/roms); unattended: it asks and moves nothing
+ *   /roms2/FM1-NTT                     no engine (an old image, a laptop): our own check of the same rules says /roms2 is a valid data card
+ *   /roms/FM1-NTT, ~/FM1-NTT, FM1-NTT  the system card, the home folder, the current folder
+ * Resolved once per run (g_root) and exported as $R3I6NOS_APP_DATA for the worker and what else is started; root_why() says which rule chose it. */
+#define APP_FOLDER "FM1-NTT"
+static char g_root[300], g_root_why[64];
+static int g_root_need_mount = 1;        /* a data card is a mount of its own: the self-test, which has no mounts to make, turns this off */
+/* Is `dir` a valid data card? r3i6nos's four rules: a mount of its own (not the system card's folder), a filesystem that is not read-only, a probe file that can be
+ * written, synced and removed, and at least 64 MiB free. 1 when valid; else 0 and a short reason. */
+static int data_card_ok(const char *dir, int need_mount, char *why, size_t wn) {
+    struct stat st, up;
+    char p[400];
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) { snprintf(why, wn, "NO DATA CARD"); return 0; }
+    snprintf(p, sizeof p, "%s/..", dir);
+    if (need_mount && stat(p, &up) == 0 && up.st_dev == st.st_dev) { snprintf(why, wn, "NOT A SEPARATE CARD"); return 0; }
+    struct statvfs sv;
+    if (statvfs(dir, &sv) != 0) { snprintf(why, wn, "CANNOT READ ITS SPACE"); return 0; }
+#ifdef ST_RDONLY
+    if (sv.f_flag & ST_RDONLY) { snprintf(why, wn, "READ-ONLY"); return 0; }
+#endif
+    if ((double)sv.f_bavail * (double)sv.f_frsize < 64.0 * 1048576.0) { snprintf(why, wn, "FULL (UNDER 64 MIB)"); return 0; }
+    snprintf(p, sizeof p, "%s/.fm1ntt-probe", dir);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644), ok = fd >= 0 && write(fd, "x", 1) == 1 && fsync(fd) == 0;
+    if (fd >= 0) close(fd);
+    if (fd >= 0) unlink(p);
+    if (!ok) { snprintf(why, wn, "NOT WRITABLE"); return 0; }
+    return 1;
+}
+/* r3i6nos's engine: the folder it says to use, made. 1 when it answered with an absolute path that is a folder. */
+static int root_from_engine(char *out, size_t n) {
+    const char *eng = getenv("R3I6NOS_APPDATA");
+    if (!eng || !*eng) eng = "r3i6nos-appdata";
+    if (strchr(eng, '\'') || strlen(eng) > 200) return 0;
+    char cmd[300], line[400];
+    snprintf(cmd, sizeof cmd, "'%s' path " APP_FOLDER " --create 2>/dev/null", eng);
+    FILE *f = popen(cmd, "r");
+    if (!f) return 0;
+    char *got = fgets(line, sizeof line, f);
+    int rc = pclose(f);
+    if (!got || rc != 0) return 0;
+    line[strcspn(line, "\r\n")] = 0;
+    if (line[0] != '/' || strlen(line) >= n || strstr(line, "/../") || !is_dir(line)) return 0;
+    snprintf(out, n, "%s", line);
+    return 1;
+}
+/* The choice, with no side effects but what the engine does: `roms2` and `roms` are the two cards' mount points (tests give others). */
+static void root_pick(const char *roms2, const char *roms, char *out, size_t n, char *why, size_t wn) {
+    const char *pre = getenv("R3I6NOS_APP_DATA"), *h = getenv("HOME");
+    char dc[64] = "";
+    if (pre && *pre) { snprintf(out, n, "%s", pre); snprintf(why, wn, "SET BY R3I6NOS"); return; }
+    char eng[300];
+    if (root_from_engine(eng, sizeof eng)) {
+        snprintf(out, n, "%s", eng);
+        size_t k = strlen(roms2);
+        snprintf(why, wn, !strncmp(eng, roms2, k) && eng[k] == '/' ? "R3I6NOS: DATA CARD" : "R3I6NOS: SYSTEM CARD");
+        return;
+    }
+    if (data_card_ok(roms2, g_root_need_mount, dc, sizeof dc)) { snprintf(out, n, "%s/" APP_FOLDER, roms2); snprintf(why, wn, "DATA CARD (%s)", roms2); return; }
+    if (is_dir(roms)) {
+        snprintf(out, n, "%s/" APP_FOLDER, roms);
+        if (strcmp(dc, "NO DATA CARD")) snprintf(why, wn, "SYSTEM CARD: DATA CARD %.28s", dc); else snprintf(why, wn, "SYSTEM CARD (%s)", roms);
+        return;
+    }
+    if (h && *h) { snprintf(out, n, "%s/" APP_FOLDER, h); snprintf(why, wn, "HOME FOLDER"); }
+    else { snprintf(out, n, APP_FOLDER); snprintf(why, wn, "CURRENT FOLDER"); }
+}
 static void base_dir(char *out, size_t n) {
-    const char *e = getenv("FM1NTT_DIR"), *h = getenv("HOME");
-    if (e && *e) snprintf(out, n, "%s", e);
-    else if (is_dir("/roms")) snprintf(out, n, "/roms/FM1-NTT");
-    else if (h && *h) snprintf(out, n, "%s/FM1-NTT", h);
-    else snprintf(out, n, "FM1-NTT");
+    const char *e = getenv("FM1NTT_DIR");
+    if (e && *e) { snprintf(out, n, "%s", e); return; }
+    if (!g_root[0]) {
+        root_pick("/roms2", "/roms", g_root, sizeof g_root, g_root_why, sizeof g_root_why);
+        if (strncmp(g_root_why, "HOME", 4) && strncmp(g_root_why, "CURRENT", 7) && !getenv("R3I6NOS_APP_DATA")) setenv("R3I6NOS_APP_DATA", g_root, 1);   /* the worker and what else is started use the same folder */
+    }
+    snprintf(out, n, "%s", g_root);
+}
+/* The folder in use and why, for the screens (nothing is read: the choice was made once). */
+static void root_describe(char *root, size_t rn, char *why, size_t wn) {
+    base_dir(root, rn);
+    const char *e = getenv("FM1NTT_DIR");
+    snprintf(why, wn, "%s", e && *e ? "SET BY FM1NTT_DIR" : g_root_why);
 }
 static int mkdir_p(const char *path) {
     char buf[400];
@@ -949,12 +1025,14 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
         int loaded_now = fm1ntt_loaded(a->m);
         p->speed_pct = loaded_now && !a->paused && a->speed > 0 ? (int)(a->speed * 100.0 + 0.5) : MON_NA;
         p->jit = u->jit;
+        p->loaded = loaded_now; p->jit_pref = a->jit_pref; p->jit_avail = fm1ntt_jit_available();
         p->cb_per_s = a->cb_rate;
         p->late_cb = SDL_AtomicGet(&a->late_cb);
         p->frame_ms = (int)a->frame_ms; p->frame_max_ms = (int)a->frame_max_ms;
         if (a->job) { snprintf(p->job, sizeof p->job, "%s", a->job_kind == JOB_REPORT ? "REPORT" : "BENCHMARK"); p->job_pct = job_pct(a); } else p->job_pct = MON_NA;
         snprintf(p->fw, sizeof p->fw, "%s", a->file);
         p->njoy = a->njoy;
+        { char rr[300], rw[64]; root_describe(rr, sizeof rr, rw, sizeof rw); snprintf(p->root, sizeof p->root, "%s", rr); snprintf(p->root_why, sizeof p->root_why, "%s", rw); }
         memcpy(p->pad, a->padn, sizeof p->pad);
         p->jit_blocks = p->jit_given_up = MON_NA;
         if (loaded_now && u->jit) { char js[400]; if (use_lock) lock(a); size_t jn = fm1ntt_jit_report(a->m, js, sizeof js); if (use_lock) unlock(a); if (!jn || !mon_parse_jit(js, &p->jit_blocks, &p->jit_given_up)) p->jit_blocks = p->jit_given_up = MON_NA; }
@@ -966,6 +1044,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
         u->rain_still = a->reduced_motion;
         u->rain_full = a->rain_on && SDL_GetTicks() - a->last_input_ms >= RAIN_IDLE_MS && !a->job;
     }
+    root_describe(u->app_root, sizeof u->app_root, u->app_root_why, sizeof u->app_root_why);
     /* tools */
     char slotp[320];
     slot_path(a, slotp, sizeof slotp);
@@ -1882,6 +1961,7 @@ static int mon_selftest(const char *root, App *app) {
     fill_ui(app, ui, 0);
     MCHECK((int)g_mon_reads == reads_app && !ui->rain_on && ui->mon.ncores == 0);                      /* another panel: the monitor's data is not even copied */
     app->panel = PANEL_MONITOR; app->mon_page = 0;
+    fill_ui(app, ui, 0); MCHECK(ui->mon.app.loaded == fm1ntt_loaded(app->m) && ui->mon.app.jit_pref == app->jit_pref && ui->mon.app.jit_avail == fm1ntt_jit_available());   /* the setting reaches the panel, loaded or not */
     act(app, A_R2); MCHECK(app->mon_page == 1 && app->mon.force);
     act(app, A_R2); MCHECK(app->mon_page == 2 || mon_pages(0, app->mon.v.nprocs) == 2);
     for (int i = 0; i < 5; i++) act(app, A_L2);
@@ -2200,6 +2280,104 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     act(a, A_OK); ACHECK(a->bg_demos == 0); fill_ui(a, ui, 0); ACHECK(strstr(ui->tools[13], "BACKGROUND DEMOS: OFF"));
     a->panel = PANEL_MACHINE; a->info_on = 0; a->paused = was_paused; a->nfiles = 0;
 #undef ACHECK
+    return fails;
+}
+
+/* ---- where the app's folder is (base_dir, root_pick, data_card_ok) ----------------------------------------------------------------------------------------------------------- */
+static int root_selftest(const char *root, App *a, UiState *ui) {
+    int fails = 0;
+#define RCHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL (root): %s (line %d)\n", #c, __LINE__); fails++; } } while (0)
+    char why[64], out[300], dc[400], rm[400], eng[460];
+    snprintf(dc, sizeof dc, "%s/rt/roms2", root); snprintf(rm, sizeof rm, "%s/rt/roms", root);
+    mkdir_p(rm);
+    char *sv_pre = getenv("R3I6NOS_APP_DATA") ? strdup(getenv("R3I6NOS_APP_DATA")) : NULL, *sv_eng = getenv("R3I6NOS_APPDATA") ? strdup(getenv("R3I6NOS_APPDATA")) : NULL, *sv_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    unsetenv("R3I6NOS_APP_DATA");
+    setenv("R3I6NOS_APPDATA", "/nonexistent/r3i6nos-appdata", 1);                                    /* no engine */
+    int sv_need = g_root_need_mount;
+    /* the data card's own rules */
+    RCHECK(!data_card_ok(dc, 0, why, sizeof why) && !strcmp(why, "NO DATA CARD"));                      /* nothing there */
+    mkdir_p(dc);
+    RCHECK(data_card_ok(dc, 0, why, sizeof why));                                                     /* a writable folder with room */
+    RCHECK(!data_card_ok(dc, 1, why, sizeof why) && strstr(why, "NOT A SEPARATE CARD"));              /* ... but a folder on the system card's own filesystem is no card */
+    { char probe[460]; snprintf(probe, sizeof probe, "%s/.fm1ntt-probe", dc); RCHECK(!is_file(probe)); }  /* the probe is removed */
+    if (geteuid() != 0) { chmod(dc, 0555); RCHECK(!data_card_ok(dc, 0, why, sizeof why) && !strcmp(why, "NOT WRITABLE")); chmod(dc, 0755); }
+    RCHECK(!data_card_ok("/nonexistent/card", 1, why, sizeof why));
+    /* the order: a data card (our own check), else the system card, else home */
+    g_root_need_mount = 0;
+    root_pick(dc, rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strncmp(out, dc, strlen(dc)) && !strcmp(out + strlen(dc), "/FM1-NTT") && strstr(why, "DATA CARD"));
+    root_pick("/nonexistent/roms2", rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strncmp(out, rm, strlen(rm)) && !strcmp(out + strlen(rm), "/FM1-NTT") && strstr(why, "SYSTEM CARD") && !strstr(why, "DATA CARD"));   /* no card in: nothing said about one */
+    g_root_need_mount = 1;
+    root_pick(dc, rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strncmp(out, rm, strlen(rm)) && strstr(why, "SYSTEM CARD: DATA CARD NOT A SEPARATE CARD"));      /* a card that is not valid is not used, and the reason is kept */
+    g_root_need_mount = 0;
+    setenv("HOME", "/home/test", 1);
+    root_pick("/nonexistent/roms2", "/nonexistent/roms", out, sizeof out, why, sizeof why);
+    RCHECK(!strcmp(out, "/home/test/FM1-NTT") && !strcmp(why, "HOME FOLDER"));
+    unsetenv("HOME");
+    root_pick("/nonexistent/roms2", "/nonexistent/roms", out, sizeof out, why, sizeof why);
+    RCHECK(!strcmp(out, "FM1-NTT") && !strcmp(why, "CURRENT FOLDER"));
+    if (sv_home) setenv("HOME", sv_home, 1);
+    /* r3i6nos decided: its variable wins over everything else; its engine comes before our own check */
+    char want[460]; snprintf(want, sizeof want, "%s/rt/decided/FM1-NTT", root);
+    setenv("R3I6NOS_APP_DATA", want, 1);
+    root_pick(dc, rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strcmp(out, want) && !strcmp(why, "SET BY R3I6NOS"));
+    unsetenv("R3I6NOS_APP_DATA");
+    char dcard[460]; snprintf(dcard, sizeof dcard, "%s/rt/roms2/FM1-NTT", root);
+    snprintf(eng, sizeof eng, "%s/rt/engine-good.sh", root);
+    { char sh[600]; snprintf(sh, sizeof sh, "#!/bin/sh\n[ \"$1\" = path ] && [ \"$2\" = FM1-NTT ] && [ \"$3\" = --create ] || exit 3\nmkdir -p '%s'\necho '%s'\n", dcard, dcard); write_atomic(eng, sh, strlen(sh)); chmod(eng, 0755); }
+    setenv("R3I6NOS_APPDATA", eng, 1);
+    root_pick("/nonexistent/roms2", rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strcmp(out, dcard) && is_dir(dcard) && !strcmp(why, "R3I6NOS: SYSTEM CARD"));            /* the engine's word, even where we would have said otherwise */
+    root_pick(dc, rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strcmp(out, dcard) && !strcmp(why, "R3I6NOS: DATA CARD"));                                /* under the data card's mount: said so */
+    const char *bad_engines[] = {"echo relative/path", "echo /roms/../etc", "echo /nonexistent/folder/FM1-NTT", "echo", "echo /x; exit 1", "exit 1"};
+    for (unsigned i = 0; i < sizeof bad_engines / sizeof *bad_engines; i++) {
+        char sh[300];
+        snprintf(eng, sizeof eng, "%s/rt/engine-bad%u.sh", root, i);
+        snprintf(sh, sizeof sh, "#!/bin/sh\n%s\n", bad_engines[i]);
+        write_atomic(eng, sh, strlen(sh)); chmod(eng, 0755);
+        setenv("R3I6NOS_APPDATA", eng, 1);
+        root_pick(dc, rm, out, sizeof out, why, sizeof why);
+        RCHECK(!strncmp(out, dc, strlen(dc)) && strstr(why, "DATA CARD ("));                          /* an engine that fails or answers oddly: our own check decides */
+    }
+    setenv("R3I6NOS_APPDATA", "/tmp/it's-a-quote", 1);                                                 /* a name with a quote is not run */
+    root_pick("/nonexistent/roms2", rm, out, sizeof out, why, sizeof why);
+    RCHECK(!strncmp(out, rm, strlen(rm)));
+    /* the override is the person's, never remembered; the screens say where and why */
+    const char *sv_dir = getenv("FM1NTT_DIR");
+    char rr[300], rw[64], bd[300];
+    base_dir(bd, sizeof bd); RCHECK(sv_dir && !strcmp(bd, sv_dir));
+    root_describe(rr, sizeof rr, rw, sizeof rw); RCHECK(!strcmp(rr, sv_dir) && !strcmp(rw, "SET BY FM1NTT_DIR"));
+    a->panel = PANEL_TOOLS; fill_ui(a, ui, 0);
+    RCHECK(!strcmp(ui->app_root, sv_dir) && !strcmp(ui->app_root_why, "SET BY FM1NTT_DIR"));
+    a->panel = PANEL_MONITOR; fill_ui(a, ui, 0);
+    RCHECK(!strcmp(ui->mon.app.root, sv_dir) && !strcmp(ui->mon.app.root_why, "SET BY FM1NTT_DIR"));
+    a->panel = PANEL_MACHINE;
+    /* the screens, with a long path: nothing runs past the box */
+    static UiState u;
+    static uint32_t cv[PX_W * PX_H];
+    for (int mode = 0; mode < 2; mode++) for (int pn = 0; pn < 2; pn++) {
+        memset(&u, 0, sizeof u);
+        u.panel = pn ? PANEL_MONITOR : PANEL_TOOLS; u.ntools = 14; u.run_state = "RUN";
+        snprintf(u.app_root, sizeof u.app_root, "/roms2/FM1-NTT/with/a/very/long/path/that/goes/on/and/on/FM1-NTT");
+        snprintf(u.app_root_why, sizeof u.app_root_why, "R3I6NOS: DATA CARD");
+        u.mon.platform = MON_PLAT_LINUX;
+        snprintf(u.mon.app.root, sizeof u.mon.app.root, "%s", u.app_root); snprintf(u.mon.app.root_why, sizeof u.mon.app.root_why, "%s", u.app_root_why);
+        px_draw(cv, mode, &u);
+        PxRect cr = px_content_rect(mode);
+        long foot = 0;
+        for (int y = cr.y + cr.h - 12; y < cr.y + cr.h; y++) for (int x = cr.x + cr.w - 4; x < cr.x + cr.w; x++) foot += cv[y * PX_W + x] != C_BG;
+        RCHECK(foot == 0);
+        if (px_panel_monitor(cv, cr, &u, mode) > cr.y + cr.h - 26) RCHECK(0);
+    }
+    g_root_need_mount = sv_need;
+    if (sv_pre) { setenv("R3I6NOS_APP_DATA", sv_pre, 1); free(sv_pre); }
+    if (sv_eng) { setenv("R3I6NOS_APPDATA", sv_eng, 1); free(sv_eng); } else unsetenv("R3I6NOS_APPDATA");
+    free(sv_home);
+#undef RCHECK
     return fails;
 }
 
@@ -2811,6 +2989,7 @@ static int selftest(void) {
     /* a pause makes the audio callback silent without touching the machine */
     int16_t pcm[256];
     CHECK(fm1ntt_render(a.m, pcm, 128, 100000) <= 128);
+    CHECK(root_selftest(root, &a, ui) == 0);                          /* where the app's folder is: the order of the rules, r3i6nos's engine, a data card's own rules, what the screens say */
     CHECK(show_selftest(root) == 0);                                  /* the firmware showcase: its sidecar, its files, a cancel, a failure, two identical runs */
     CHECK(show_app_selftest(root, &a, ui) == 0);                      /* the showcase in the app: page, policy, a real worker, the queue, the player (uses a.m and ui: before they are freed) */
     CHECK(mon_selftest(root, &a) == 0);                               /* the MONITOR panel: parsers, maths, the fixture /proc, the cost rule, the layout, the keys (uses a.m: before it is freed) */

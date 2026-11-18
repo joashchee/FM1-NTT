@@ -559,6 +559,7 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
         if (bp) SDL_free(bp);
     }
     report_progress("card", 2, steps, r.path);
+    { char rw[64], rr[300]; root_describe(rr, sizeof rr, rw, sizeof rw); r3_report_section(&r, "data root"); r3_report_line(&r, R3_INFO, "data root", "%s (%s)", rr, rw); }
     r3_report_card(&r, base);
     int paused = a ? a->paused : 0;
     if (a) a->paused = 1;                                  /* the speed tests have the processor to themselves */

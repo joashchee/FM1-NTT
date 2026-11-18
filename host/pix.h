@@ -215,6 +215,7 @@ typedef struct {
     char info_name[PX_NAME], info_tier[40], info_licence[104], info_source[124], info_sha[65], info_demo[104];
     int info_demo_kind, info_pct, info_busy, info_can_play;   /* kind: 0 none yet, 1 being made, 2 ready, 3 failed; busy: a demo of THIS firmware is being made */
     int playing;
+    char app_root[128], app_root_why[64];   /* the app's folder (where everything is written) and which rule chose it */
 } UiState;
 
 static inline void px_box(uint32_t *c, PxRect r, const char *title) {
@@ -703,6 +704,8 @@ static inline void px_mon_mem(uint32_t *c, PxRect b, const MonView *v) {
         mon_kb_text(a, sizeof a, v->card_free_mb * 1024);
         px_textf(c, x, y + 65, px_lv_col(lv), w, "CARD %s FREE %d%%%c", a, v->card_free_pct, mon_glyph(lv));
     } else px_text(c, x, y + 65, "CARD N/A", C_DIM, 1, w);
+    px_textf(c, x, y + 76, C_HEAD, w, "ROOT %s", v->app.root[0] ? v->app.root : "-");
+    px_textf(c, x, y + 87, C_DIM, w, "%s", v->app.root_why[0] ? v->app.root_why : "-");
 }
 
 static inline void px_mon_app(uint32_t *c, PxRect b, const MonView *v) {
@@ -711,7 +714,8 @@ static inline void px_mon_app(uint32_t *c, PxRect b, const MonView *v) {
     px_box(c, b, "THIS APP");
     if (p->speed_pct >= 0) { int lv = mon_level(TH_SPEED, p->speed_pct); px_textf(c, x, y, px_lv_col(lv), w, "SPEED %d.%02dX%c", p->speed_pct / 100, p->speed_pct % 100, mon_glyph(lv)); }
     else px_text(c, x, y, "SPEED -  (NOT RUNNING)", C_DIM, 1, w);
-    if (p->jit && p->jit_blocks >= 0) px_textf(c, x, y + 11, C_TEXT, w, "JIT %d BLK%s AUDIO %d/S", p->jit_blocks, p->jit_given_up ? "!" : "", p->cb_per_s);
+    if (!p->loaded) px_textf(c, x, y + 11, C_TEXT, w, "JIT %s AUDIO %d/S", !p->jit_avail ? "N/A" : p->jit_pref ? "SET ON" : "SET OFF", p->cb_per_s);   /* nothing is emulated: the setting, not the machine */
+    else if (p->jit && p->jit_blocks >= 0) px_textf(c, x, y + 11, C_TEXT, w, "JIT %d BLK%s AUDIO %d/S", p->jit_blocks, p->jit_given_up ? "!" : "", p->cb_per_s);
     else px_textf(c, x, y + 11, C_TEXT, w, "JIT %s  AUDIO %d/S", p->jit ? "ON" : "OFF", p->cb_per_s);
     px_textf(c, x, y + 22, p->late_cb ? C_ERR : C_TEXT, w, "LATE BUFFERS %d%s", p->late_cb, p->late_cb ? "!" : "");
     int fl = mon_level(TH_FRAME, p->frame_ms);
@@ -834,8 +838,8 @@ static inline int px_panel_monitor(uint32_t *c, PxRect r, const UiState *u, int 
         if (page == 0) {
             int h = px_mon_cpu_h(v, 1);
             px_mon_cpu(c, (PxRect){lx, r.y + 8, bw, h}, v, 1);
-            px_mon_mem(c, (PxRect){lx, r.y + 8 + h + 8, bw, 90}, v);
-            free_y = r.y + 8 + h + 8 + 90 + 8; bottom = free_y - 8;
+            px_mon_mem(c, (PxRect){lx, r.y + 8 + h + 8, bw, 112}, v);
+            free_y = r.y + 8 + h + 8 + 112 + 8; bottom = free_y - 8;
         } else if (page == 1) {
             px_mon_app(c, (PxRect){lx, r.y + 8, bw, 100}, v);
             int th = 14 + (v->nthr ? v->nthr : 1) * 11;
@@ -849,9 +853,9 @@ static inline int px_panel_monitor(uint32_t *c, PxRect r, const UiState *u, int 
             int h = px_mon_cpu_h(v, 0), y = r.y + 8;
             px_mon_cpu(c, (PxRect){lx, y, bw, h}, v, 0);
             y += h + 8;
-            px_mon_mem(c, (PxRect){lx, y, bw / 2 - 2, 100}, v);
-            px_mon_app(c, (PxRect){lx + bw / 2 + 2, y, bw / 2 - 2, 100}, v);
-            y += 108;
+            px_mon_mem(c, (PxRect){lx, y, bw / 2 - 2, 122}, v);
+            px_mon_app(c, (PxRect){lx + bw / 2 + 2, y, bw / 2 - 2, 122}, v);
+            y += 130;
             px_mon_dev(c, (PxRect){lx, y, bw, px_mon_dev_h(0)}, v, 0);
             free_y = y + px_mon_dev_h(0) + 8; bottom = free_y - 8;
         } else {
@@ -877,6 +881,9 @@ static inline void px_panel_tools(uint32_t *c, PxRect r, const UiState *u, int n
     int ly = r.y + u->ntools * 12 + 30;
     px_box(c, (PxRect){r.x + 4, ly, r.w - 8, 70}, "LOG");
     px_wrap(c, x, ly + 12, u->msg ? u->msg : "", px_style(u->msg_style), w, narrow ? 5 : 5);
+    px_box(c, (PxRect){r.x + 4, ly + 78, r.w - 8, 62}, "APP FOLDER (WHERE EVERYTHING IS SAVED)");
+    px_wrap(c, x, ly + 90, u->app_root[0] ? u->app_root : "-", C_HEAD, w, 2);
+    px_wrap(c, x, ly + 112, u->app_root_why[0] ? u->app_root_why : "-", C_DIM, w, 2);
 }
 
 /* A question over the panel: A is yes, B is no. */

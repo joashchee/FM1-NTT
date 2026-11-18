@@ -29,7 +29,7 @@ firmwares (Felucca, SLOOP, Melodee, S1Vave and the rest) on a computer, in a bro
 scripts/check.sh              # core tests, host build + self-test, web test, shellcheck
 host/build.sh                 # build/fm1ntt (needs Rust and SDL2)
 build/fm1ntt FIRMWARE.fwsc    # a package; for a raw image: --entry 0x02000120 FILE. Or put files in the FILES panel's folder
-                              # (/roms/FM1-NTT/firmware on the R36S, else ~/FM1-NTT/firmware; FM1NTT_DIR overrides)
+                              # (on the R36S the DATA card's /roms2/FM1-NTT when a valid one is in, else /roms/FM1-NTT; else ~/FM1-NTT; FM1NTT_DIR overrides; the TOOLS and MONITOR panels say which and why)
 build/fm1ntt --screenshot out.bmp [--zoomed]   # one frame to a file
 build/fm1ntt --report [FIRMWARE]               # the Device report (r3i6nos rule 9) -> $BASE/r36s-report.txt
 build/fm1ntt --bench [--seconds N] [--fw FILE] # the Benchmark report -> $BASE/bench/ ; compare files with scripts/bench-compare.py

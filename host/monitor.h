@@ -74,7 +74,9 @@ typedef struct { int has, pct, mw; char status[16]; } MonBat;                   
 
 /* What the app itself knows (the host fills it: fm1ntt.c). */
 typedef struct {
+    int loaded, jit_pref, jit_avail;                                  /* a firmware is loaded; the JIT setting (TOOLS) and whether this build can run it */
     int jit_blocks, jit_given_up;                                      /* blocks compiled, blocks given up on (-1: no machine) */
+    char root[100], root_why[40];                                      /* the app's folder and which rule chose it */
     char pad[2][28];                                                   /* the first two pads' names, from SDL */
     int speed_pct, jit, cb_per_s, late_cb, frame_ms, frame_max_ms;      /* speed in percent of real time (-1: no firmware running) */
     char job[40];                                                      /* "" when none */
