@@ -1,6 +1,6 @@
 # The FM-1's own MIDI implementation (stock firmware)
 
-From M-VAVE's MIDI table (`docs/FM-1 MIDI EN.docx`, kept locally, not in the repository) and its manual, read 2026-11-18, restated in our own words. **It describes the stock firmware; a custom firmware may differ.** Not tried on a unit; the stock firmware boots in the core (`docs/HARDWARE.md`) but no MIDI was sent to it yet.
+From M-VAVE's MIDI table (`docs/FM-1 MIDI EN.docx`, kept locally, not in the repository) and its manual, read 2026-11-18, restated in our own words. **It describes the stock firmware; a custom firmware may differ.** Not tried on a unit; the stock firmware boots in the core (`docs/HARDWARE.md`) and **what was sent to it in the emulator is in "What was tried" at the end**.
 
 **Channels:** the **note channel** defaults to ALL (omni); the **effect channel** defaults to **2**; real-time messages carry no channel. Both are set in GLO page 1.
 **Warning in the table:** CC 1 sent on the effect channel is the filter type, not the mod wheel. Send mod wheel on another channel. Pitch bend works on any channel.
@@ -53,3 +53,15 @@ The manual's own ranges differ a little (it shows the filter's Q as 0-100 and th
 ## What the FM-1 sends
 
 Note On and Off with velocity, from the keyboard, the arpeggiator or the sequencer, on the interfaces below (all three work at the same time): **USB MIDI** (a standard class-compliant device), **BLE MIDI** (Windows, Mac, iOS, Android), and the **3.5 mm MIDI input** (31250 baud, a 3.5 mm to 5-pin adapter).
+
+## What was tried in the emulator (2026-11-18, stock firmware, a Mac; not a unit)
+
+Sent through the emulated 3.5 mm MIDI jack (`fwprobe midi:`), read off the screen and, for the effects, off the rendered audio compared sample by sample with a matched run (the emulator is deterministic: two identical runs differ by 0.0000).
+
+- **Program Change works, across all four banks.** `C0 05` showed `006 HonkyTonk1`, `C0 1F` `032 B-3 II`, `C0 20` `033 ROCK ORGAN`, `C0 7F` `128 155Sec.efx`, `C0 00` back to `001 PIANO 3`: value N is voice N+1, as the table says. So a preset can be reached by MIDI with no panel clicks, and the 128 names can be read by walking it.
+- **The effect CCs mostly did not change the sound.** On channel 2 (`B1`), one note held 1 s and released for 1 s, FX001:
+  - **Changed the sound:** CC 1 (filter type, 0 to 2: diff 0.19 to 0.20 of the signal), CC 7 (reverb mix) and CC 11 (delay mix) (both about 0.80 for 100 to 20).
+  - **Changed nothing audible:** the six switches (CC 0, 4, 8, 12, 16, 20, tried with 0, 1 and 127), the filter cutoff and Q (CC 2, 3), the other reverb, delay, distortion, chorus and phaser parameters, with all parameters set strongly. The same CCs on channel 1 changed nothing.
+  - **The effects do work in the emulator:** turning the filter on from the panel (FX, then KNOB 4) changed the sound by 1.27 of the signal, and CC 0, 2 and 3 on top of that still changed nothing.
+  - **Not known why:** the firmware may ignore those CCs, honour them only in a state this probe did not reach (the screen did not show the values change either), or scale them differently from the table; the probe is one note and a short time. **So the table's effect CCs are not confirmed**, and a port must not rely on them. Not tried: the SysEx parameter write, USB MIDI, a firmware other than stock.
+
