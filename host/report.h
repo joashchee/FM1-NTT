@@ -699,6 +699,8 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
         r3_report_power_end(&r, &p, "working", 95.0, 400.0, &work);                 /* first guesses: one core's worth, set before any measurement */
     } else r3_report_line(&r, R3_SKIP, "working", "no firmware is running (or the emulation is paused): load one and run the report again to measure it");
     r3_report_power_advice(&r, &idle, &work);
+    /* what the real machine does, from M-VAVE's manual, to read this unit's figures against (not measured here) */
+    r3_report_line(&r, R3_INFO, "FM-1 reference", "the FM-1 itself runs about 12 h on its battery, plays 12 voices at once and reads MIDI at 31250 baud (M-VAVE's manual); this unit's own time-left lines above are what it manages with this app");
     r3_report_section(&r, "memory");
     report_progress("memory", 9, steps, r.path);
     r3_report_memory(&r);
