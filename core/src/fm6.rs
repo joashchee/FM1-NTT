@@ -91,8 +91,8 @@ impl Tables {
         // frequency: Q24 octaves to a phase step
         let mut y = (1u64 << (24 + 20)) as f64 / sample_rate;
         let inc = 2f64.powf(1.0 / 1024.0);
-        for i in 0..1025 {
-            t.freq[i] = (y + 0.5).floor() as i32;
+        for slot in t.freq.iter_mut().take(1025) {
+            *slot = (y + 0.5).floor() as i32;
             y *= inc;
         }
         t.lfo_unit = ((64.0 * 25_190_424.0) / sample_rate + 0.5) as i32 as u32;

@@ -462,9 +462,9 @@ impl Engine for Fm4 {
                         Stage::Idle => {}
                     }
                     let mut pm = 0.0;
-                    for k in 0..OPS {
+                    for (k, o) in v.ops.iter().enumerate().take(OPS) {
                         if alg.modulators[op] >> k & 1 == 1 {
-                            pm += index * v.ops[k].out;
+                            pm += index * o.out;
                         }
                     }
                     let s = &mut v.ops[op];
@@ -498,8 +498,7 @@ impl Engine for Fm4 {
                 }
                 if f_on {
                     let c = &fco[vi];
-                    for st in 0..f_stages {
-                        let z = &mut v.fz[st];
+                    for z in v.fz.iter_mut().take(f_stages) {
                         let y = c[0] * heard + z[0];
                         z[0] = c[1] * heard - c[3] * y + z[1];
                         z[1] = c[2] * heard - c[4] * y;
