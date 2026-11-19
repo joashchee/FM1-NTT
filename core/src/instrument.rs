@@ -787,10 +787,28 @@ pub fn factory_package() -> Package {
     p
 }
 
+/// The built-in voices as the package file the app ships (`bundled-firmware/instruments/factory-voices.fm1i`): the project's own original voices, MIT, with
+/// no firmware behind them. `core/examples/factory_file.rs` prints it; a test keeps the shipped file equal to it.
+pub fn factory_file_text() -> String {
+    let mut p = factory_package();
+    p.source = "FM1-NTT core/src/factory.rs (original voices written for this project)".into();
+    p.to_text()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::package::{FxEntry, MapEntry};
+
+    #[test]
+    fn the_shipped_factory_file_is_what_the_code_writes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../bundled-firmware/instruments/factory-voices.fm1i");
+        let on_disk = std::fs::read_to_string(path).expect("bundled-firmware/instruments/factory-voices.fm1i: run `cargo run --example factory_file > ...`");
+        assert_eq!(on_disk, factory_file_text());
+        let pkg = Package::parse(&on_disk).unwrap();
+        assert_eq!(pkg.voices.len(), 8);
+        assert!(pkg.tier().is_ok());
+    }
 
     fn none(_: &str) -> Option<Vec<u8>> {
         None

@@ -79,8 +79,8 @@ mkdir -p "$pkg/usr/share/fm1ntt/firmware" "$pkg/usr/share/doc/fm1ntt/bundled"
 for fam in "$REPO"/bundled-firmware/*/; do
     n="$(basename "$fam")"
     mkdir -p "$pkg/usr/share/fm1ntt/firmware/$n" "$pkg/usr/share/doc/fm1ntt/bundled/$n"
-    find "$fam" -maxdepth 1 -type f -name '*.fwsc' -exec cp {} "$pkg/usr/share/fm1ntt/firmware/$n/" \;
-    find "$fam" -maxdepth 1 -type f ! -name '*.fwsc' ! -name '.*' -exec cp {} "$pkg/usr/share/doc/fm1ntt/bundled/$n/" \;
+    find "$fam" -maxdepth 1 -type f \( -name '*.fwsc' -o -name '*.fm1i' \) -exec cp {} "$pkg/usr/share/fm1ntt/firmware/$n/" \;
+    find "$fam" -maxdepth 1 -type f ! -name '*.fwsc' ! -name '*.fm1i' ! -name '.*' -exec cp {} "$pkg/usr/share/doc/fm1ntt/bundled/$n/" \;
     [ -d "$fam/docs" ] && cp -R "$fam/docs" "$pkg/usr/share/doc/fm1ntt/bundled/$n/docs"
     find "$pkg/usr/share" -name '.DS_Store' -delete
 done

@@ -149,7 +149,7 @@ static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", 
 static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
 
 enum { ED_ROWS = 24 };   /* the instrument editor's rows on a page */
-enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 15, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
+enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 16, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
 
 typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
 
@@ -167,12 +167,12 @@ typedef struct {
     int msg_style;                      /* 0 info, 1 ok, 2 warn, 3 error */
     uint32_t fb[FM_W * FM_H];           /* the FM-1's screen, 0x00RRGGBB */
     int fb_valid;
-    /* files: the firmware folder's entries, then Quit as the last */
+    /* files: the firmware folder's entries (Quit is a TOOLS row) */
     char file_dir[96];
     char bundled_dir[96];               /* where the bundled firmware is, "" when none */
     char pack_dir[96];                  /* where the copyleft pack is, "" when it is not installed */
     char files[PX_MAX_FILES + 1][PX_NAME];
-    int nfiles, file_sel;               /* nfiles includes the Quit row */
+    int nfiles, file_sel;               /* the files only */
     /* cpu */
     PxCpu cpu[2];
     int ncpu, cpu_sel;
@@ -318,7 +318,7 @@ static inline void px_carousel(uint32_t *c, int mode, int cur) {
 /* What the buttons do, per panel: the area below the FM-1's screen in Standard. */
 static const char *const PX_HINTS[PANEL_COUNT][9] = {
     {"PAD ON MACHINE", "D-PAD A B X Y  NOTES", "SELECT START  OCT- OCT+", "STICKS  KNOBS 1-4", "L1  OP1-6 PIT GLO MONO POLY", "L1 STICKS MASTER PRESETS...", "L2  FX HOME SAVE ENV ARP SEQ", "R2  GLO EDIT PLAY REC", "L1+R1  MENU   FN  PANELS"},
-    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "LAST ROW  QUIT", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO", "Y  MAKE OR STOP IT  B BACK"},
+    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO", "Y  MAKE OR STOP IT  B BACK", ""},
     {"BOTH CORES", "UP DOWN  CORE 0 1", "LEFT RIGHT  CORE 0 1", "", "", "", "", "", ""},
     {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
@@ -427,7 +427,7 @@ static inline void px_panel_files(uint32_t *c, PxRect r, const UiState *u, int n
     pages = px_list(c, lr, u->files, u->nfiles, u->file_sel, per, &page);
     snprintf(line, sizeof line, "PAGE %d/%d", page + 1, pages);
     px_text(c, r.x + r.w - 12 - px_text_w(line, 1), r.y + 39, line, C_HEAD, 1, 0);
-    if (u->nfiles <= 1) px_wrap(c, x, r.y + 60, "NO FIRMWARE FILES (.FWSC OR .BIN) HERE. COPY YOURS TO THE FOLDER, THEN X TO RESCAN.", C_WARN, w, 4);
+    if (u->nfiles == 0) px_wrap(c, x, r.y + 60, "NO FIRMWARE FILES (.FWSC OR .BIN) HERE. COPY YOURS TO THE FOLDER, THEN X TO RESCAN.", C_WARN, w, 4);
     {
         const char *foot = u->bundled_dir[0] || u->pack_dir[0]
             ? (narrow ? "B BUNDLED  G GPL PACK" : (u->pack_dir[0] ? "B = BUNDLED (MIT)   G = THE GPL PACK (SOURCE INCLUDED)" : "B = BUNDLED WITH THE APP: SEE NOTICE"))

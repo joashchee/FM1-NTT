@@ -187,7 +187,7 @@ static void rec_frame(Rec *r, int draw_ui) {
     }
     if (r->ff && fwrite(r->canvas, 4, (size_t)PX_W * PX_H, r->ff) != (size_t)PX_W * PX_H) { r->tour_failed = 1; pclose(r->ff); r->ff = NULL; }
     r->frames++;
-    if (r->frames % 10 == 0 && r->on_progress) {
+    if (r->on_progress) {                 /* every frame: on a slow unit a frame takes long, and the cancel hold must be seen within one */
         int pct = r->expected > 0 ? r->frames * 100 / r->expected : 0;
         if (r->on_progress(r, pct > 99 ? 99 : pct, "recording", r->ud) || g_cancel) r->cancelled = 1;
     }
@@ -222,6 +222,7 @@ static void rec_shot(Rec *r, const char *name) {
     if (png_write(p, r->canvas, PX_W, PX_H) != 0) r3_report_line(&r->log, R3_FAIL, "screenshot", "could not write %02d-%s.png", r->shots, name);
 }
 static void rec_cap(Rec *r, int hero, const char *text) {
+    if (r->cancelled || r->tour_failed) return;            /* a cancelled tour runs its remaining steps with no frames: they did not happen, so the log does not say they did */
     r->seen |= 1u << hero;
     r3_report_line(&r->log, R3_INFO, HEROES[hero].id, "t=%.1fs %s", rec_time(r), text);
 }
@@ -476,7 +477,8 @@ static int rec_demo_run(unsigned mask, const char *firmware, int firmware_raw, i
     if (!video) r3_report_line(&r->log, R3_SKIP, "video", "not asked for (--no-video)");
     else if (!have_ffmpeg) r3_report_line(&r->log, R3_FAIL, "video", "no ffmpeg in /usr/bin or on PATH: the screenshots and the sound are kept; run the same command on a computer with ffmpeg to make the video (the tour is deterministic)");
     else if (!vtmp[0]) r3_report_line(&r->log, R3_FAIL, "video", "could not start ffmpeg");
-    else if (!ff_ok || r->cancelled || r->tour_failed) r3_report_line(&r->log, R3_FAIL, "video", "ffmpeg did not finish (see %s/ffmpeg.log)", r->work);
+    else if (r->cancelled) r3_report_line(&r->log, R3_INFO, "video", "not made: the run was cancelled (the screenshots and the sound so far are kept)");
+    else if (!ff_ok || r->tour_failed) r3_report_line(&r->log, R3_FAIL, "video", "ffmpeg did not finish (see %s/ffmpeg.log)", r->work);
     else {
         char cmd[1300];
         snprintf(cmd, sizeof cmd, "'%s' -y -loglevel error -i '%s' -i '%s' -c:v copy -c:a aac -b:a 128k -shortest '%s' 2>>'%s/ffmpeg.log'", r->ffmpeg, vtmp, wavp, mp4, r->work);
@@ -529,7 +531,7 @@ static void draw_checklist(uint32_t *c, unsigned mask, int sel, int have_fw) {
     if (!have_fw) px_wrap(c, b.x + 18, b.y + 22 + NHERO * 24 + 6, "NO FIRMWARE IS LOADED OR BUNDLED HERE, SO THE LAST ONE IS SKIPPED. PUT ONE IN THE FIRMWARE FOLDER.", C_WARN, b.w - 36, 3);
     px_text(c, b.x + 18, b.y + b.h - 22, "UP DOWN PICK   A TICK   START BEGIN   B CANCEL", C_HEAD, 1, b.w - 36);
 }
-static void draw_demo_progress(uint32_t *c, int percent, const char *doing) {
+static void draw_demo_progress(uint32_t *c, int percent, const char *doing, int hold) {
     for (int i = 0; i < PX_W * PX_H; i++) c[i] = C_BG;
     px_text(c, 320 - px_text_w("REC DEMO", 3) / 2, 150, "REC DEMO", C_HEAD, 3, 0);
     px_text(c, 320 - px_text_w(doing, 1) / 2, 230, doing, C_TEXT, 1, 0);
@@ -538,9 +540,13 @@ static void draw_demo_progress(uint32_t *c, int percent, const char *doing) {
     snprintf(l, sizeof l, "%d%%", percent);
     px_text(c, 320 - px_text_w(l, 1) / 2, 272, l, C_DIM, 1, 0);
     px_text(c, 320 - px_text_w("THE UNIT IS BUSY WITH THIS ONLY. SELECT + START HELD: CANCEL", 1) / 2, 320, "THE UNIT IS BUSY WITH THIS ONLY. SELECT + START HELD: CANCEL", C_DIM, 1, 0);
+    if (hold > 0) {                                        /* the hold is being read: a bar fills in the hold's second, so the press is seen to count */
+        px_text(c, 320 - px_text_w("HOLD TO CANCEL", 1) / 2, 348, "HOLD TO CANCEL", C_TEXT, 1, 0);
+        px_meter(c, (PxRect){220, 362, 200, 10}, hold > 100 ? 100 : hold, C_HEAD);
+    }
 }
 
-typedef struct { SDL_Renderer *ren; SDL_Texture *tex; uint32_t *canvas; uint32_t both_since; } DemoWin;
+typedef struct { SDL_Renderer *ren; SDL_Texture *tex; uint32_t *canvas; uint32_t both_since; uint32_t drawn; int pct; } DemoWin;
 
 static int demo_win_progress(Rec *r, int percent, const char *doing, void *ud) {
     DemoWin *w = ud;
@@ -554,8 +560,12 @@ static int demo_win_progress(Rec *r, int percent, const char *doing, void *ud) {
     if (!both) w->both_since = 0;
     else if (!w->both_since) w->both_since = now ? now : 1;
     int cancel = both && now - w->both_since >= 1000;
-    draw_demo_progress(w->canvas, percent, doing);
-    present(w->ren, w->tex, w->canvas);
+    int hold = both ? (int)((now - w->both_since) / 10) : 0;      /* 0..100 over the hold's second */
+    if (hold > 0 || percent != w->pct || now - w->drawn >= 250) {   /* called every frame: the screen is drawn when it changes, the hold at once */
+        draw_demo_progress(w->canvas, percent, doing, hold);
+        present(w->ren, w->tex, w->canvas);
+        w->drawn = now; w->pct = percent;
+    }
     return cancel;
 }
 

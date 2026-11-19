@@ -66,7 +66,7 @@ pub fn voices() -> Vec<[u8; 128]> {
     let hold = [99, 99, 99, 0];
     vec![
         // a plain sine: one carrier
-        voice("SINE", 32, 0, 24, None, [op(sustain, hold, 90, 1, 0, 7, 0), OFF, OFF, OFF, OFF, OFF]),
+        voice("SINE", 32, 0, 24, None, [op(sustain, hold, 92, 1, 0, 7, 0), OFF, OFF, OFF, OFF, OFF]),
         // an electric piano: three carriers, each with a modulator; the tine one at 14 times, quick to fade
         voice("E.PIANO", 5, 3, 24, None, [
             op([96, 25, 25, 67], [99, 75, 0, 0], 99, 1, 0, 7, 2),
@@ -96,12 +96,12 @@ pub fn voices() -> Vec<[u8; 128]> {
         ]),
         // an organ: six carriers at the drawbar ratios, a flat envelope
         voice("ORGAN", 32, 0, 24, None, [
-            op([99, 99, 99, 85], hold, 70, 0, 0, 7, 0),
-            op([99, 99, 99, 85], hold, 74, 1, 0, 7, 0),
-            op([99, 99, 99, 85], hold, 68, 2, 0, 7, 0),
-            op([99, 99, 99, 85], hold, 60, 3, 0, 7, 0),
-            op([99, 99, 99, 85], hold, 54, 4, 0, 7, 0),
-            op([99, 99, 99, 85], hold, 48, 6, 0, 7, 0),
+            op([99, 99, 99, 85], hold, 85, 0, 0, 7, 0),
+            op([99, 99, 99, 85], hold, 89, 1, 0, 7, 0),
+            op([99, 99, 99, 85], hold, 83, 2, 0, 7, 0),
+            op([99, 99, 99, 85], hold, 75, 3, 0, 7, 0),
+            op([99, 99, 99, 85], hold, 69, 4, 0, 7, 0),
+            op([99, 99, 99, 85], hold, 63, 6, 0, 7, 0),
         ]),
         // a brass: a slow rise, the modulator brighter than the carrier, a little feedback
         voice("BRASS", 5, 4, 24, None, [
@@ -123,12 +123,12 @@ pub fn voices() -> Vec<[u8; 128]> {
         ]),
         // strings: six carriers in detuned pairs, a slow attack, a little vibrato
         voice("STRINGS", 32, 0, 24, Some((14, 3)), [
-            op([48, 40, 50, 40], [99, 99, 99, 0], 76, 1, 0, 7, 1),
-            op([48, 40, 50, 40], [99, 99, 99, 0], 76, 1, 0, 10, 1),
-            op([48, 40, 50, 40], [99, 99, 99, 0], 76, 1, 0, 4, 1),
-            op([46, 40, 50, 40], [99, 99, 99, 0], 66, 2, 0, 7, 1),
-            op([46, 40, 50, 40], [99, 99, 99, 0], 66, 2, 0, 11, 1),
-            op([46, 40, 50, 40], [99, 99, 99, 0], 66, 2, 0, 3, 1),
+            op([48, 40, 50, 40], [99, 99, 99, 0], 86, 1, 0, 7, 1),
+            op([48, 40, 50, 40], [99, 99, 99, 0], 86, 1, 0, 10, 1),
+            op([48, 40, 50, 40], [99, 99, 99, 0], 86, 1, 0, 4, 1),
+            op([46, 40, 50, 40], [99, 99, 99, 0], 76, 2, 0, 7, 1),
+            op([46, 40, 50, 40], [99, 99, 99, 0], 76, 2, 0, 11, 1),
+            op([46, 40, 50, 40], [99, 99, 99, 0], 76, 2, 0, 3, 1),
         ]),
     ]
 }

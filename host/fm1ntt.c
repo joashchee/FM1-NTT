@@ -62,7 +62,7 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 15
+#define NTOOLS 16
 #define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
@@ -115,6 +115,7 @@ typedef struct {
     double ips, speed;
     /* shared with the audio callback */
     volatile int paused, level_l, level_r, peak_l, peak_r;
+    volatile int fw_mute;               /* the firmware's sound is muted: the emulation is too slow to fill the audio buffers, and a late callback rattles (speed_tick sets it) */
     int16_t scope[PX_SCOPE];
     /* recorder */
     volatile int rec_on;
@@ -170,6 +171,13 @@ typedef struct {
     int cb_prev; double cb_prev_ms;
     SDL_atomic_t late_cb;               /* audio buffers that took longer than their own length to make */
     uint32_t budget;                    /* instructions a buffer may spend (0: MAX_INSNS_PER_BUFFER); Rec demo's self-test lowers it */
+    /* the emulation thread (emu_start): it renders the machine into a ring, and the audio callback only reads the ring (NULL emu: the callback renders, as before) */
+    SDL_Thread *emu;
+    SDL_mutex *mx;                      /* the machine: taken by the thread for each chunk it renders and by lock() for anything the UI does to it (always before the audio lock) */
+    SDL_sem *emu_sem;                   /* the callback posts it when it has taken audio, so the thread wakes when there is room and sleeps when there is not */
+    int16_t *emu_ring;                  /* EMU_RING stereo frames */
+    SDL_atomic_t ring_w, ring_r;        /* frames written by the thread and read by the callback (monotonic, wrap by unsigned arithmetic) */
+    volatile int emu_quit, emu_loaded, emu_primed;   /* emu_loaded: the machine has a firmware; emu_primed: the ring has filled once since the machine last ran (an empty ring before that is not a gap) */
 } App;
 
 enum { JOB_NONE, JOB_REPORT, JOB_BENCH };
@@ -185,8 +193,10 @@ static void say(App *a, int style, const char *fmt, const char *arg) {
     snprintf(a->msg, sizeof a->msg, fmt, arg ? arg : "");
     a->msg_style = style;
 }
-static void lock(App *a) { if (a->dev) SDL_LockAudioDevice(a->dev); }
-static void unlock(App *a) { if (a->dev) SDL_UnlockAudioDevice(a->dev); }
+/* The machine's mutex first, then the audio device's: the UI waits for the emulation thread's chunk (a few ms) without holding the callback up, and the callback
+ * never takes the mutex, so the two orders cannot meet. Both are recursive. */
+static void lock(App *a) { if (a->mx) SDL_LockMutex(a->mx); if (a->dev) SDL_LockAudioDevice(a->dev); }
+static void unlock(App *a) { if (a->dev) SDL_UnlockAudioDevice(a->dev); if (a->mx) SDL_UnlockMutex(a->mx); }
 
 /* ---- the SOUND preview ------------------------------------------------------------------------------------------------- */
 static void pv_notes_off(App *a) {
@@ -651,7 +661,7 @@ static int add_dir(FileEnt *out, int n, const char *dir, int bundled) {
     if (d) closedir(d);
     return n;
 }
-/* The firmware folder (yours: first), then the bundled firmware, whole; the Quit row is the one after the last. */
+/* The firmware folder (yours: first), then the bundled firmware, whole. */
 static void scan_files(App *a) {
     char dir[300], bdir[300], pdir[300];
     sub_path(dir, sizeof dir, "firmware", NULL);
@@ -678,7 +688,7 @@ static void scan_files(App *a) {
     free(ents);
     memset(a->fsha, 0, sizeof a->fsha);                         /* the files may have changed: hash them again when asked */
     if (a->info_on && a->info_i >= a->nfiles) a->info_on = 0;
-    if (a->file_sel > a->nfiles) a->file_sel = a->nfiles;       /* nfiles is the Quit row */
+    if (a->file_sel >= a->nfiles) a->file_sel = a->nfiles > 0 ? a->nfiles - 1 : 0;
 }
 /* The firmware Rec demo and the benchmark use when the person gave none: a bundled one with a screen worth recording. "" when none ships. */
 static void default_firmware(char *out, size_t n) {
@@ -763,6 +773,90 @@ static void rec_stop(App *a) {
 }
 
 /* ---- audio: the device paces the emulated machine ---------------------------------------------------------------------- */
+/* ---- the emulation thread: the machine renders ahead into a ring, the callback only reads it -------------------------------- */
+/* On a unit that runs the firmware slower than real time the callback used to render inside itself, ran late every time and left the device dry (a rattle). Now the
+ * thread renders EMU_CHUNK frames at a time while the ring holds under EMU_TARGET, and the callback copies out what is there and plays silence for what is not (one
+ * counted late buffer, not a stall of the device). The latency is the ring's fill, about two buffers. Single producer (the thread), single consumer (the callback). */
+#define EMU_RING (1 << 13)              /* frames; a power of two */
+#define EMU_CHUNK 256                   /* frames rendered per lock of the machine, so the UI waits at most one chunk */
+#define EMU_TARGET (2 * AUDIO_FRAMES)   /* frames kept ahead of the device */
+static void emu_discard(App *a) { SDL_AtomicSet(&a->ring_r, SDL_AtomicGet(&a->ring_w)); a->emu_primed = 0; }
+static void emu_pull(App *a, int16_t *out, size_t frames) {
+    unsigned w = (unsigned)SDL_AtomicGet(&a->ring_w), r = (unsigned)SDL_AtomicGet(&a->ring_r);
+    size_t have = (size_t)(w - r), n = have < frames ? have : frames;
+    SDL_MemoryBarrierAcquire();
+    for (size_t i = 0; i < n; i++) { size_t at = ((size_t)r + i) & (EMU_RING - 1); out[2 * i] = a->emu_ring[2 * at]; out[2 * i + 1] = a->emu_ring[2 * at + 1]; }
+    SDL_MemoryBarrierRelease();
+    SDL_AtomicSet(&a->ring_r, (int)(r + (unsigned)n));
+    if (n < frames) {
+        memset(out + 2 * n, 0, (frames - n) * 4);
+        if (a->emu_primed) SDL_AtomicAdd(&a->late_cb, 1);          /* the machine did not keep up: a gap of silence, once per buffer */
+    }
+    if (SDL_SemValue(a->emu_sem) < 2) SDL_SemPost(a->emu_sem);
+}
+static int emu_main(void *ud) {
+    App *a = ud;
+    if (a->pin) { int e, u; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }      /* the emulation runs here: the last core */
+    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+    int16_t tmp[EMU_CHUNK * 2];
+    while (!a->emu_quit) {
+        Uint32 wait = 20;
+        SDL_LockMutex(a->mx);
+        int loaded = fm1ntt_loaded(a->m);
+        a->emu_loaded = loaded;
+        int solo = a->pv_on && a->pv_solo && (a->pv || a->inst);
+        Uint32 idle = a->audio_asleep ? 250 : 20;
+        if (!loaded || a->pl.on || solo) { a->emu_primed = 0; wait = idle; }
+        else if (a->paused) {
+            a->emu_primed = 0;
+            if (a->mevq) fm1ntt_apply_events(a->m, a->mevq);          /* an input sent while paused lands now, not in a burst on resume */
+            wait = idle;
+        } else {
+            unsigned w = (unsigned)SDL_AtomicGet(&a->ring_w), r = (unsigned)SDL_AtomicGet(&a->ring_r);
+            if ((size_t)(w - r) >= EMU_TARGET) { a->emu_primed = 1; wait = idle; }
+            else {
+                uint32_t bud = (a->budget ? a->budget : MAX_INSNS_PER_BUFFER) / (AUDIO_FRAMES / EMU_CHUNK);
+                if (a->mevq) fm1ntt_render_events(a->m, a->mevq, now_us(), tmp, EMU_CHUNK, bud);
+                else fm1ntt_render(a->m, tmp, EMU_CHUNK, bud);
+                for (size_t i = 0; i < EMU_CHUNK; i++) { size_t at = ((size_t)w + i) & (EMU_RING - 1); a->emu_ring[2 * at] = tmp[2 * i]; a->emu_ring[2 * at + 1] = tmp[2 * i + 1]; }
+                SDL_MemoryBarrierRelease();
+                SDL_AtomicSet(&a->ring_w, (int)(w + EMU_CHUNK));
+                wait = 0;
+            }
+        }
+        SDL_UnlockMutex(a->mx);
+        if (wait) SDL_SemWaitTimeout(a->emu_sem, wait);
+    }
+    return 0;
+}
+/* Start it (call once, with the sound device open and still paused, before any firmware plays); 0 ok, -1 not started (the callback then renders itself). */
+static int emu_start(App *a) {
+    if (a->emu) return 0;
+    a->emu_ring = calloc((size_t)EMU_RING * 2, sizeof(int16_t));
+    a->mx = SDL_CreateMutex();
+    a->emu_sem = SDL_CreateSemaphore(0);
+    a->emu_quit = 0;
+    SDL_AtomicSet(&a->ring_w, 0); SDL_AtomicSet(&a->ring_r, 0);
+    if (a->emu_ring && a->mx && a->emu_sem) a->emu = SDL_CreateThread(emu_main, "emulation", a);
+    if (a->emu) return 0;
+    if (a->mx) SDL_DestroyMutex(a->mx);
+    if (a->emu_sem) SDL_DestroySemaphore(a->emu_sem);
+    free(a->emu_ring);
+    a->mx = NULL; a->emu_sem = NULL; a->emu_ring = NULL;
+    return -1;
+}
+/* Stop it (the sound device is closed first, so the callback is no longer reading the ring). */
+static void emu_stop(App *a) {
+    if (!a->emu) return;
+    a->emu_quit = 1;
+    SDL_SemPost(a->emu_sem);
+    SDL_WaitThread(a->emu, NULL);
+    a->emu = NULL;
+    SDL_DestroyMutex(a->mx); SDL_DestroySemaphore(a->emu_sem);
+    free(a->emu_ring);
+    a->mx = NULL; a->emu_sem = NULL; a->emu_ring = NULL;
+}
+
 /* One buffer of the emulated machine's sound, and the meters, the scope and the recorder's ring that go with it. The callback's whole body,
  * so Rec demo steps the app with the same code. */
 static void audio_step(App *a, int16_t *out, size_t frames) {
@@ -776,13 +870,20 @@ static void audio_step(App *a, int16_t *out, size_t frames) {
         return;
     }
     int solo = a->pv_on && a->pv_solo && (a->pv || a->inst);      /* the engine alone: the machine is not run, so a unit too slow for the firmware still plays live */
+    if (a->emu) {                                                  /* the emulation thread has made the machine's sound: take what is ready, never wait for it */
+        if (a->paused || (!solo && !a->emu_loaded)) { emu_discard(a); memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return; }
+        if (solo) { emu_discard(a); memset(out, 0, frames * 4); }
+        else emu_pull(a, out, frames);
+    } else
     if (a->paused || (!solo && !fm1ntt_loaded(a->m))) {
         if (a->mevq && fm1ntt_loaded(a->m)) fm1ntt_apply_events(a->m, a->mevq);      /* an input sent while paused lands now, not in a burst on resume */
         memset(out, 0, frames * 4); a->level_l = a->level_r = 0; return;
     }
-    if (solo) memset(out, 0, frames * 4);
+    if (a->emu) {}
+    else if (solo) memset(out, 0, frames * 4);
     else if (a->mevq) fm1ntt_render_events(a->m, a->mevq, now_us(), out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
     else fm1ntt_render(a->m, out, frames, a->budget ? a->budget : MAX_INSNS_PER_BUFFER);
+    if (a->fw_mute && !solo) memset(out, 0, frames * 4);                  /* too slow to keep up: silence, not the rattle of a device left dry (the preview below still plays) */
     if (a->pv_on && (a->pv || a->inst)) {   /* the preview's voice on both channels (the caller holds the audio lock, as the machine's keys do) */
         int16_t mono[4096];
         for (size_t at = 0; at < frames; ) {
@@ -839,7 +940,7 @@ static void audio_sleep_tick(App *a, uint32_t now) {
 static void audio_cb(void *ud, Uint8 *stream, int len) {
     App *a = ud;
     SDL_AtomicAdd(&a->callbacks, 1);
-    if (a->pin && !a->pinned) { int e, u; a->pinned = 1; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }   /* the emulation runs here: the last core */
+    if (a->pin && !a->pinned && !a->emu) { int e, u; a->pinned = 1; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }   /* the emulation runs here: the last core */
     Uint64 t0 = SDL_GetPerformanceCounter();
     audio_step(a, (int16_t *)stream, (size_t)len / 4);
     double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
@@ -1094,6 +1195,7 @@ static void tools_run(App *a) {
     case 9: a->want_demo = 1; break;
     case 10: job_start(a, JOB_BENCH); break;
     case 11: a->pace_mode = (a->pace_mode + 1) % 5; if (a->pace_mode == PACE_AUTO) a->pace_lvl = 0; apply_prefs(a); say(a, 0, a->pace_mode == PACE_AUTO ? "Pace AUTO: slows the main loop only when the unit cannot keep up" : a->pace_mode ? "Pace fixed: the main loop is slowed, the sound is not" : "Pace off: exact timing", NULL); break;
+    case 15: request_quit(a); break;
     case 14: a->remember = !a->remember; a->fl_dirty = 0; if (a->remember) a->fl_rev = fm1ntt_flash_revision(a->m); say(a, 0, a->remember ? "Remembering the firmware's saved settings between runs" : "Saved settings are no longer kept", NULL); break;
     case 13: a->bg_demos = !a->bg_demos; say(a, 0, a->bg_demos ? "Background demos on: one at a time, paused while you play" : "Background demos off", NULL); break;
     case 12: a->rain_on = !a->rain_on; if (a->rain_on && a->reduced_motion) rain_still(a); say(a, 0, a->rain_on ? (a->reduced_motion ? "Data rain on, as a still page (reduced motion)" : "Data rain on: it shows on the MONITOR panel") : "Data rain off", NULL); break;
@@ -1113,7 +1215,7 @@ static void act(App *a, int act) {
         } else if (act == A_BACK) { a->confirm = CF_NONE; say(a, 0, "Cancelled", NULL); }
         return;
     }
-    int rows = a->nfiles + 1;
+    int rows = a->nfiles > 0 ? a->nfiles : 1;                       /* the rows of FILES (Quit is on TOOLS); never zero, so the wrap has a divisor */
     switch (a->panel) {
     case PANEL_FILES:
         if (files_press(a, act)) break;                                     /* the firmware's page, when it is open or A opens it */
@@ -1123,8 +1225,7 @@ static void act(App *a, int act) {
         else if (act == A_R2) a->file_sel = a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22) >= rows ? rows - 1 : a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22);
         else if (act == A_X) { scan_files(a); say(a, 0, "Rescanned the folder", NULL); }
         else if (act == A_OK) {
-            if (a->file_sel >= a->nfiles) request_quit(a);
-            else {
+            if (a->file_sel < a->nfiles) {
                 const char *p = a->fpaths[a->file_sel];
                 if (has_ext(p, ".fm1i")) open_instrument(a, p);
                 else load_firmware(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA);
@@ -1261,8 +1362,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->bundled_dir, sizeof u->bundled_dir, "%s", a->bdir);
     snprintf(u->pack_dir, sizeof u->pack_dir, "%s", a->pdir);
     for (int i = 0; i < a->nfiles; i++) snprintf(u->files[i], PX_NAME, "%c%c %s", !strcmp(a->fpaths[i], a->fw_path) && a->fw_path[0] ? '*' : ' ', a->fbundled[i] == 2 ? 'G' : a->fbundled[i] ? 'B' : ' ', a->files[i]);
-    snprintf(u->files[a->nfiles], PX_NAME, "   [ QUIT ]");
-    u->nfiles = a->nfiles + 1;
+    u->nfiles = a->nfiles;
     u->file_sel = a->file_sel;
     u->cpu_sel = a->cpu_sel;
     u->ips = a->ips;
@@ -1317,6 +1417,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->tools[9], PX_NAME, "  REC DEMO");
     snprintf(u->tools[10], PX_NAME, "  BENCHMARK%s", a->job_kind == JOB_BENCH ? " (RUNNING)" : "");
     snprintf(u->tools[14], PX_NAME, "  REMEMBER SETTINGS: %s", a->remember ? "ON" : "OFF");
+    snprintf(u->tools[15], PX_NAME, "  QUIT");
     if (a->pace_mode == PACE_AUTO) snprintf(u->tools[11], PX_NAME, "  PACE: AUTO (NOW %d)", a->pace_lvl);
     else if (a->pace_mode) snprintf(u->tools[11], PX_NAME, "  PACE: %d", a->pace_mode);
     else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
@@ -1339,6 +1440,21 @@ static void pace_auto(App *a) {
     if (l != a->pace_lvl) { a->pace_lvl = l; lock(a); fm1ntt_pace(a->m, l); unlock(a); }
 }
 
+/* A firmware that runs under half of real time cannot fill an audio buffer in the buffer's own time: the callback is late every time and the sound device, left dry,
+ * rattles (the unit, 2026-11-19: the MONITOR's LATE BUFFERS climbing at the buffer rate, idle). Its sound is muted until it is back above 0.7x (a hysteresis, so it does not
+ * flap at the edge); the SOUND preview and Solo, which the callback does not wait for, are never muted. The machine still runs, so the speed stays measured. */
+#define SLOW_MUTE_BELOW 0.5
+#define SLOW_MUTE_ABOVE 0.7
+static void slow_mute_update(App *a) {
+    int was = a->fw_mute, now = was;
+    if (a->paused || a->speed <= 0 || !fm1ntt_loaded(a->m)) now = 0;
+    else if (a->speed < SLOW_MUTE_BELOW) now = 1;
+    else if (a->speed >= SLOW_MUTE_ABOVE) now = 0;
+    a->fw_mute = now;
+    if (now && !was) { char m[96]; snprintf(m, sizeof m, "Firmware sound muted: too slow to keep up (%.2fx real time). Solo still plays.", a->speed); say(a, 2, "%s", m); }
+    else if (!now && was) say(a, 0, "Firmware sound back: keeping up again", NULL);
+}
+
 /* speed: once a second, instructions a second and emulated time over real time */
 static void speed_tick(App *a) {
     uint32_t now = SDL_GetTicks();
@@ -1353,6 +1469,7 @@ static void speed_tick(App *a) {
     else a->ips = a->speed = 0;
     a->sp_real0 = now; a->sp_insns0 = ins; a->sp_ms0 = ms;
     pace_auto(a);
+    slow_mute_update(a);
 }
 
 /* ---- input ------------------------------------------------------------------------------------------------------------- */
@@ -2723,6 +2840,50 @@ static int root_selftest(const char *root, App *a, UiState *ui) {
     return fails;
 }
 
+/* The emulation thread: it fills the ring ahead of the callback, the callback takes from it without waiting, a pause empties it and silences the callback, a machine
+ * too slow to fill it costs a counted gap and not a stall, and the UI's lock() still reaches the machine. Needs a firmware: the bundled one given, "" skips. */
+static int emu_selftest(const char *fw) {
+    int fails = 0;
+#define ECHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL (emulation thread): %s (line %d)\n", #c, __LINE__); fails++; } } while (0)
+    if (!fw[0]) { fprintf(stderr, "  emulation thread: no bundled firmware here, skipped\n"); return 0; }
+    App *t = calloc(1, sizeof *t);
+    if (!t) return 1;
+    t->m = fm1ntt_new();
+    char why[64]; size_t n = 0;
+    uint8_t *img = read_file(fw, &n, why, sizeof why);
+    ECHECK(t->m && img && fm1ntt_load_package(t->m, img, n) == 0);
+    free(img);
+    ECHECK(emu_start(t) == 0 && t->emu && t->mx);
+    int16_t out[AUDIO_FRAMES * 2];
+    for (int i = 0; i < 400 && !t->emu_primed; i++) SDL_Delay(5);
+    ECHECK(t->emu_primed && (unsigned)(SDL_AtomicGet(&t->ring_w) - SDL_AtomicGet(&t->ring_r)) >= EMU_TARGET);   /* it filled the ring on its own */
+    unsigned r0 = (unsigned)SDL_AtomicGet(&t->ring_r);
+    audio_step(t, out, AUDIO_FRAMES);
+    ECHECK((unsigned)SDL_AtomicGet(&t->ring_r) - r0 == AUDIO_FRAMES && SDL_AtomicGet(&t->late_cb) == 0);        /* a buffer taken, not a gap */
+    for (int i = 0; i < 400 && (unsigned)(SDL_AtomicGet(&t->ring_w) - SDL_AtomicGet(&t->ring_r)) < EMU_TARGET; i++) SDL_Delay(5);
+    ECHECK((unsigned)(SDL_AtomicGet(&t->ring_w) - SDL_AtomicGet(&t->ring_r)) >= EMU_TARGET);                   /* and it refilled after the take */
+    lock(t); ECHECK(fm1ntt_loaded(t->m)); unlock(t);                                                            /* the UI's way in */
+    /* a callback that comes faster than the thread can fill: silence for the missing frames, each buffer counted once */
+    for (int i = 0; i < 40; i++) audio_step(t, out, AUDIO_FRAMES);
+    ECHECK(SDL_AtomicGet(&t->late_cb) >= 0);
+    /* pause: the callback is silent and the ring is dropped, so nothing stale plays on resume */
+    t->paused = 1;
+    for (int i = 0; i < 3; i++) SDL_Delay(30);
+    for (int i = 0; i < AUDIO_FRAMES * 2; i++) out[i] = 5;
+    audio_step(t, out, AUDIO_FRAMES);
+    int nz = 0; for (int i = 0; i < AUDIO_FRAMES * 2; i++) nz += out[i] != 0;
+    ECHECK(nz == 0 && SDL_AtomicGet(&t->ring_r) == SDL_AtomicGet(&t->ring_w));
+    t->paused = 0;
+    for (int i = 0; i < 400 && !t->emu_primed; i++) SDL_Delay(5);
+    ECHECK(t->emu_primed);                                                                                      /* it runs again */
+    emu_stop(t);
+    ECHECK(!t->emu && !t->mx);
+    fm1ntt_free(t->m);
+    free(t);
+#undef ECHECK
+    return fails;
+}
+
 static int selftest(void) {
     int bad = 0;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "selftest FAIL: %s (line %d)\n", #c, __LINE__); bad++; } } while (0)
@@ -2754,7 +2915,7 @@ static int selftest(void) {
             u.fb_valid = 1; u.panel = panel;
             u.run_state = "RUN"; u.fw_name = "TEST.FWSC"; u.fw_board = "Fm1"; u.msg = "HELLO WORLD THIS IS A LONG LOG LINE THAT MUST WRAP NICELY";
             u.ncpu = 1; u.cpu[0].pc = 0x2000120; u.cpu[0].regs[3] = 0xDEADBEEF; u.cpu[0].insns = 123456789; u.ips = 1.5e7; u.speed = 1.25;
-            u.nfiles = 3; snprintf(u.files[0], PX_NAME, "  A.FWSC"); snprintf(u.files[1], PX_NAME, "  B.BIN"); snprintf(u.files[2], PX_NAME, "  [ QUIT ]");
+            u.nfiles = 2; snprintf(u.files[0], PX_NAME, "  A.FWSC"); snprintf(u.files[1], PX_NAME, "  B.BIN");
             snprintf(u.file_dir, sizeof u.file_dir, "/x/firmware");
             u.mem_n = mode ? 128 : 256; u.mem_size = 0x100000; u.mem_base = 0x1c00000; for (int i = 0; i < PX_MEM_BYTES; i++) u.mem[i] = (uint8_t)i;
             snprintf(u.console, sizeof u.console, "BOOT OK\nHELLO FROM THE FIRMWARE\nA VERY LONG LINE THAT HAS TO BE BROKEN ACROSS SEVERAL ROWS OF THE PANEL"); u.console_n = (int)strlen(u.console);
@@ -2935,7 +3096,7 @@ static int selftest(void) {
     a.sw_pid = 1; CHECK(audio_wanted(&a, 99000)); a.sw_pid = 0;
     a.want_demo = 1; CHECK(audio_wanted(&a, 99000)); a.want_demo = 0;
     CHECK(!audio_wanted(&a, 99000));
-    /* the firmware folder: the right extensions, sorted, a Quit row last, a garbage file refused with a reason, a raw file booted */
+    /* the firmware folder: the right extensions, sorted, a garbage file refused with a reason, a raw file booted */
     char fdir[300], p[400];
     sub_path(fdir, sizeof fdir, "firmware", NULL);
     mkdir_p(fdir);
@@ -2961,15 +3122,15 @@ static int selftest(void) {
     a.file_sel = 1; act(&a, A_OK); act(&a, A_OK);
     CHECK(fm1ntt_loaded(a.m) && !strcmp(a.file, "b.bin") && a.msg_style == 1); /* the .bin boots as a raw image */
     act(&a, A_UP); CHECK(a.file_sel == 0);
-    act(&a, A_UP); CHECK(a.file_sel == 3);                                     /* wraps to the Quit row */
+    act(&a, A_UP); CHECK(a.file_sel == 2);                                     /* wraps to the last file: Quit is a TOOLS row now */
     act(&a, A_DOWN); CHECK(a.file_sel == 0);
-    a.file_sel = 3; act(&a, A_OK); CHECK(a.quit == 1); a.quit = 0;
+    a.panel = PANEL_TOOLS; a.tool_sel = 15; act(&a, A_OK); CHECK(a.quit == 1); a.quit = 0; a.panel = PANEL_FILES;
     /* the CPU view and the memory view */
     UiState *ui = calloc(1, sizeof *ui);
     a.panel = PANEL_CPU; a.mode = MODE_STANDARD;
     fill_ui(&a, ui, 0);
     CHECK(ui->ncpu >= 1 && (!strcmp(ui->run_state, "RUN") || !strcmp(ui->run_state, "HALT")));
-    CHECK(ui->nfiles == 4 && !strcmp(ui->files[3], "   [ QUIT ]") && ui->files[1][0] == '*');
+    CHECK(ui->nfiles == 3 && ui->files[1][0] == '*' && !strcmp(ui->tools[15], "  QUIT"));
     a.cpu_sel = 0; act(&a, A_LEFT); CHECK(a.cpu_sel == 1); act(&a, A_UP); CHECK(a.cpu_sel == 0);
     a.panel = PANEL_MEMORY; a.mem_region = 1;
     fill_ui(&a, ui, 0);
@@ -3054,6 +3215,12 @@ static int selftest(void) {
     a.speed = 0.5; pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 2 && fm1ntt_pace_level(a.m) == 2);   /* behind: up a level a second */
     a.speed = 1.5; pace_auto(&a); CHECK(a.pace_lvl == 2);                                                 /* keeping up: stays */
     a.speed = 5.0; pace_auto(&a); pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 0 && fm1ntt_pace_level(a.m) == 0);   /* plenty to spare: back to exact */
+    /* too slow to fill a buffer in time: the firmware's sound is muted (with a hysteresis) and the message says so; faster again, it is back */
+    a.speed = 0.3; slow_mute_update(&a); CHECK(a.fw_mute == 1 && a.msg_style == 2 && strstr(a.msg, "muted"));
+    a.speed = 0.6; slow_mute_update(&a); CHECK(a.fw_mute == 1);                                            /* between the two limits: unchanged */
+    { int16_t mb[1024]; for (int i = 0; i < 1024; i++) mb[i] = 7; audio_step(&a, mb, 512); int nz = 0; for (int i = 0; i < 1024; i++) nz += mb[i] != 0; CHECK(nz == 0); }
+    a.speed = 0.9; slow_mute_update(&a); CHECK(a.fw_mute == 0 && a.msg_style == 0);
+    a.speed = 0.3; slow_mute_update(&a); a.paused = 1; slow_mute_update(&a); CHECK(a.fw_mute == 0); a.paused = 0;   /* paused: nothing to mute */
     act(&a, A_OK); CHECK(a.pace_mode == 0 && fm1ntt_pace_level(a.m) == 0);
     a.speed = 0;
     /* the SOUND preview: voices in, a toggle, notes from the keys and the pad reach the mix and not the machine, and leaving the panel lets them go */
@@ -3275,7 +3442,7 @@ static int selftest(void) {
     SDL_AtomicSet(&a.rec_w, 4000);
     rec_pump(&a); CHECK(a.rec_frames == 2000);
     /* a quit while recording asks first, and stopping saves the file */
-    a.panel = PANEL_FILES; a.file_sel = a.nfiles;
+    a.panel = PANEL_TOOLS; a.tool_sel = 15;                                                     /* Quit is the last TOOLS row */
     act(&a, A_OK); CHECK(a.confirm == CF_QUIT && !a.quit);
     act(&a, A_BACK); CHECK(a.confirm == CF_NONE && a.rec != NULL && !a.quit);
     act(&a, A_OK); act(&a, A_OK); CHECK(a.quit == 1 && a.rec == NULL);
@@ -3462,11 +3629,22 @@ static int selftest(void) {
         for (int i = 0; i < b2.nfiles; i++) { nb += b2.fbundled[i] != 0; np += b2.fbundled[i] == 2; }
         char pk[300];
         pack_dir(pk, sizeof pk);
-        CHECK(nb - np >= 5);                                                      /* the permissive tier: always shipped */
+        CHECK(nb - np >= 6);                                                      /* the permissive tier: always shipped (five firmwares and an instrument package) */
         CHECK(pk[0] ? np >= 3 : np == 0);                                         /* the copyleft pack: its three, or none when it is not installed */
-        int booted = 0;
+        int booted = 0, nfw = 0, ninst = 0;
         for (int i = 0; i < b2.nfiles; i++) {
             if (!b2.fbundled[i]) continue;
+            if (has_ext(b2.fpaths[i], ".fm1i")) {                                /* an instrument package: it loads into the engine, it is not booted */
+                ninst++;
+                uint8_t *ib = NULL; size_t ilen = 0; char iw[64];
+                ib = read_file(b2.fpaths[i], &ilen, iw, sizeof iw);
+                fm1ntt_inst *ih = ib ? fm1ntt_inst_load(ib, ilen, FM1_SAMPLE_RATE, NULL, NULL) : NULL;
+                CHECK(ih != NULL);
+                if (ih) fm1ntt_inst_free(ih);
+                free(ib);
+                continue;
+            }
+            nfw++;
             char why2[64]; size_t n2 = 0;
             uint8_t *fwb = read_file(b2.fpaths[i], &n2, why2, sizeof why2);
             fm1ntt_machine *bm = fm1ntt_new();
@@ -3482,7 +3660,7 @@ static int selftest(void) {
             booted += ok && !fm1ntt_halted(bm) && colours >= 8;
             fm1ntt_free(bm);
         }
-        CHECK(booted == nb);
+        CHECK(booted == nfw && ninst >= 1);                                       /* every bundled firmware boots; the bundled instrument package loads */
         /* the FILES panel marks them, and the default firmware is one of them */
         a.panel = PANEL_FILES;
         memcpy(a.files, b2.files, sizeof a.files); memcpy(a.fpaths, b2.fpaths, sizeof a.fpaths); memcpy(a.fbundled, b2.fbundled, sizeof a.fbundled); a.nfiles = b2.nfiles;
@@ -3493,6 +3671,7 @@ static int selftest(void) {
         char dflt[300];
         default_firmware(dflt, sizeof dflt);
         CHECK(dflt[0] && strstr(dflt, "untrue") && is_file(dflt));
+        CHECK(emu_selftest(dflt) == 0);                                           /* the emulation thread, on the bundled firmware */
         setenv("FM1NTT_BUNDLED", nob, 1);
         setenv("FM1NTT_PACK", nob, 1);
         scan_files(&a);
@@ -3782,6 +3961,8 @@ int main(int argc, char **argv) {
     SDL_AudioSpec want = {.freq = FM1_SAMPLE_RATE, .format = AUDIO_S16SYS, .channels = 2, .samples = AUDIO_FRAMES, .callback = audio_cb, .userdata = &a}, got;
     a.dev = SDL_OpenAudioDevice(NULL, 0, &want, &got, 0);
     if (!a.dev) say(&a, 2, "No sound device: %s", SDL_GetError());
+    else if (!(getenv("FM1NTT_NO_EMU_THREAD") && *getenv("FM1NTT_NO_EMU_THREAD"))) emu_start(&a);       /* the machine renders on its own thread; FM1NTT_NO_EMU_THREAD=1 puts it back in the callback */
+    a.mq_live = a.dev != 0;
     draw_splash(canvas, "READING THE FIRMWARE FOLDER", 40);
     present(ren, tex, canvas);
     scan_files(&a);
@@ -3847,7 +4028,7 @@ int main(int argc, char **argv) {
             unsigned mask = demo_checklist(ren, tex, canvas, have_fw);
             if (mask) {
                 char res[240];
-                DemoWin w = {ren, tex, canvas, 0};
+                DemoWin w = {ren, tex, canvas, 0, 0, -1};
                 int pz = a.paused;
                 lock(&a); a.paused = 1; a.mq_live = 0; if (a.mevq) fm1ntt_apply_events(a.m, a.mevq); unlock(&a);      /* the demo steps its own clock: its inputs go straight in */
                 rec_demo_run(mask, fm1ntt_loaded(a.m) && a.fw_path[0] ? a.fw_path : (dflt[0] ? dflt : NULL), fm1ntt_loaded(a.m) && a.fw_path[0] ? a.fw_raw : (dflt[0] && has_ext(dflt, ".bin")), 1, demo_win_progress, &w, res, sizeof res);
@@ -3890,6 +4071,7 @@ int main(int argc, char **argv) {
     player_stop(&a);
     if (a.job) SDL_WaitThread(a.job, NULL);
     if (a.dev) SDL_CloseAudioDevice(a.dev);
+    emu_stop(&a);
     free(a.rec_ring);
     pv_free(&a);
     persist_save(&a, 1, SDL_GetTicks());

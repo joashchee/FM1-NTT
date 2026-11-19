@@ -259,6 +259,9 @@ fn program_change_reaches_all_128_voices() {
 /// effect channel (not tried: that setting is on a GLO page). This pins what was seen.
 #[test]
 fn cc1_is_the_filter_type_on_every_channel_with_omni_notes() {
+    if stock().is_none() {
+        return;
+    }
     let played = |msg: &[u8]| {
         let mut m = stock().unwrap();
         run(&mut m, 3000);
@@ -283,6 +286,9 @@ fn cc1_is_the_filter_type_on_every_channel_with_omni_notes() {
 /// playing to start); what is: FA and FB leave the machine in exactly the same state, and Stop after either does too.
 #[test]
 fn continue_acts_as_start() {
+    if stock().is_none() {
+        return;
+    }
     let run_with = |rt: &[u8]| {
         let mut m = stock().unwrap();
         run(&mut m, 3000);

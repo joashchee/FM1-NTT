@@ -404,7 +404,7 @@ static int bench_run(App *a, double seconds, const char *fw, int fw_raw, char *r
         memset(&u, 0, sizeof u);
         u.fb_valid = 1; u.run_state = "RUN"; u.fw_name = "BENCH.BIN"; u.fw_board = "Fm1"; u.msg = "BENCH";
         for (int i = 0; i < FM_W * FM_H; i++) u.fb[i] = (uint32_t)(i * 2654435761u) & 0xFFFFFF;
-        u.ncpu = 2; u.nfiles = 1; snprintf(u.files[0], PX_NAME, "  [ QUIT ]"); u.mem_n = PX_MEM_BYTES; u.ntools = 8; u.console_n = 0;
+        u.ncpu = 2; u.nfiles = 0; u.mem_n = PX_MEM_BYTES; u.ntools = 8; u.console_n = 0;
         for (int mode = 0; mode < 2; mode++) {
             for (int i = 0; i < BENCH_RUNS; i++) {
                 double t0 = r3_report_ms();
