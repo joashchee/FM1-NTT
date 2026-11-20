@@ -10,7 +10,7 @@ measured (2026-11-17) the core is far too slow to play live (**0.24x real time a
 - [x] **Web shell** (`web/`): installable PWA (manifest, 192/512/maskable icons and apple-touch-icon drawn by `scripts/build-icons.ts`, no service worker), a Node server and a test that fetches the manifest and every icon. **Untested on a phone** (Add to Home Screen on iOS and Android).
 - [x] **R36S package scripts** (`r36s/`): built and smoke-tested once (2026-11-16, run by the maintainer, on the first scaffold: 328 KiB, arm64, needs only SDL2, glibc, libgcc and libm). **Run again on this build** (2026-11-16, Docker, arm64 Debian 12): `FM1-NTT.deb` 0.2.0, 964 KiB with the panels (rebuilt after them, self-test passing from the unpacked package), still needs only SDL2, glibc (newest symbol 2.34 of the rootfs's 2.36), libgcc and libm; `--selftest` passes from the unpacked package. Not installed on a unit.
 - [x] **Docs:** architecture, licensing and clean-room policy, firmware policy, what is known of the hardware.
-- [x] **`git init`, first commit and the GitHub repo** (`joashchee/FM1-NTT`, origin set; PR #1 merged). [ ] **Push:** local `main` is 2 commits ahead of `origin/main`.
+- [x] **`git init`, first commit and the GitHub repo** (`joashchee/FM1-NTT`, origin set; PR #1 merged). [ ] **Push:** local `main` is 24 commits ahead of `origin/main` (as of 2026-11-20; the sandbox cannot reach GitHub, so the maintainer pushes).
 
 ## 1. Make firmware run
 
