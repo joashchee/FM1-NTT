@@ -237,6 +237,8 @@ struct Voice {
     held: bool,
     age: u64,
     f0: f64,
+    /// where the pitch is going (`f0` slides to it when glide is on)
+    tf0: f64,
     vel: f64,
     ops: [Op; OPS],
     fb: [[f64; 2]; OPS],
@@ -245,7 +247,7 @@ struct Voice {
 }
 
 const IDLE_OP: Op = Op { stage: Stage::Idle, ph: 0.0, env: 0.0, out: 0.0 };
-const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
+const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
 
 pub struct Fm4 {
     rate: f64,
@@ -255,6 +257,9 @@ pub struct Fm4 {
     bend: f64,
     bend_raw: i32,
     bend_semis: f64,
+    /// portamento time in ms (0 off), and the pitch of the last note started
+    glide_ms: i32,
+    last_f0: f64,
     waves: Vec<Vec<f32>>,
 }
 
@@ -296,7 +301,7 @@ impl Fm4 {
                 *v = d.3;
             }
         }
-        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, waves: (0..WAVES.len()).map(make_wave).collect() }
+        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, glide_ms: 0, last_f0: 0.0, waves: (0..WAVES.len()).map(make_wave).collect() }
     }
 
     fn op(&self, op: usize, field: u16) -> i32 {
@@ -348,7 +353,10 @@ impl Engine for Fm4 {
         v.note = note;
         v.held = true;
         v.age = self.clock;
-        v.f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
+        let f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
+        v.f0 = if self.glide_ms > 0 && self.last_f0 > 0.0 { self.last_f0 } else { f0 };
+        v.tf0 = f0;
+        self.last_f0 = f0;
         v.vel = velocity.min(127) as f64 / 127.0;
         for (k, o) in v.ops.iter_mut().enumerate() {
             o.stage = Stage::Attack;
@@ -377,6 +385,10 @@ impl Engine for Fm4 {
                 }
             }
         }
+    }
+
+    fn glide(&mut self, ms: i32) {
+        self.glide_ms = ms.clamp(0, 5000);
     }
 
     fn bend_range(&mut self, semitones: i32) {
@@ -442,10 +454,19 @@ impl Engine for Fm4 {
                 fco[i] = biquad(kind, keyed.clamp(5.0, rate * 0.45), f_q, rate);
             }
         }
+        // the pitch slides in the log domain, 99% of the way in the glide time, stepped every eighth sample
+        let slide = if self.glide_ms > 0 { (-4.6 * 8.0 / (f64::from(self.glide_ms) * 0.001 * rate)).exp() } else { 0.0 };
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
-        for o in out.iter_mut() {
+        for (n, o) in out.iter_mut().enumerate() {
+            let refresh = n & 7 == 0;
             let mut acc = 0.0;
             for (vi, v) in self.voices.iter_mut().enumerate().filter(|(_, v)| v.active) {
+                if refresh && v.f0 != v.tf0 {
+                    v.f0 = if slide == 0.0 { v.tf0 } else { v.tf0 * (v.f0 / v.tf0).powf(slide) };
+                    if (v.f0 / v.tf0 - 1.0).abs() < 1e-5 {
+                        v.f0 = v.tf0;
+                    }
+                }
                 let mut heard = 0.0;
                 for op in (0..OPS).rev() {
                     let s = &mut v.ops[op];
@@ -1090,5 +1111,42 @@ mod tests {
         let z = &b[8000..];
         let f = z.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as f64 * 44_100.0 / z.len() as f64 / 220.0;
         assert!((f - 3.0).abs() < 0.04, "coarse 2 fine 50 % is 3x: {f}");
+    }
+
+    #[test]
+    fn glide_slides_from_the_last_note_to_the_next() {
+        let play = |ms: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_ALGORITHM, 7);
+            e.glide(ms);
+            let mut buf = vec![0i16; 4410];
+            e.note_on(57, 100);
+            e.render(&mut buf);
+            e.note_off(57);
+            e.render(&mut buf);
+            e.note_on(69, 100);
+            let mut out = vec![0i16; 22_050];
+            e.render(&mut out);
+            out
+        };
+        let none = play(0);
+        let g = play(300);
+        let f = |x: &[i16], lo: usize, hi: usize| {
+            let seg = &x[lo..hi];
+            let z = seg.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+            z as f64 / 2.0 * 44_100.0 / seg.len() as f64
+        };
+        let (n_hz, early, late) = (f(&none, 2048, 8192), f(&g, 1024, 3072), f(&g, 14_000, 22_050));
+        assert!((n_hz / early) > 1.2, "glide starts below the target: {n_hz} vs {early}");
+        assert!((late / n_hz - 1.0).abs() < 0.03, "and arrives: {late} vs {n_hz}");
+        // a huge value is clamped, not trusted
+        let mut e = Fm4::new(44_100.0);
+        e.glide(i32::MAX);
+        e.note_on(81, 100);
+        e.note_off(81);
+        e.note_on(45, 100);
+        let mut out = vec![0i16; 2048];
+        e.render(&mut out);
+        assert!(out.iter().any(|&v| v != 0));
     }
 }
