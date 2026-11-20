@@ -148,7 +148,15 @@ pub const F2_ENV_TIMEVEL: u16 = 15;
 /// nothing here: with Loop Times of 3 ms, 100 ms and 2.45 s, sustain 0 and 40 %, the cutoff followed the plain envelope, so what it loops is not understood.
 pub const F2_ENV_MODE: u16 = 16;
 pub const F2_ENV_REPEAT: u16 = 17;
-pub const F2_PARAMS: u16 = 18;
+/// Filter envelope Slopes page, -100 to +100 (A Slope 0, D Slope +100, R Slope +100 by default). A slope bends the segment's travel: **0 is a straight line**, **+100 moves fast first and
+/// slowly later** (the decay's three-term fall and the release's exponential are the +100 curves), **-100 is its mirror** (slow first, a cliff at the end); the attack's +100 is the decay's
+/// fall turned upside down. Measured at the 25 % amount: D Slope 0 was a line that reached the rest cutoff at 1.1 times the Decay time, -100 its mirror, and the 50, 75 and 25 % curves fit
+/// `(e^(-kx) - e^(-k)) / (1 - e^(-k))` with k = 5.4 s up to s = 0.5 (2.7 at 50 %) and a blend of that with the +100 curve above, within 0.02 of the peak. The attack's and the release's
+/// slopes were seen at 0, +100 and -100 only (the release's line takes 1.1 times Release); the values between are the same curves, assumed.
+pub const F2_ENV_A_SLOPE: u16 = 18;
+pub const F2_ENV_D_SLOPE: u16 = 19;
+pub const F2_ENV_R_SLOPE: u16 = 20;
+pub const F2_PARAMS: u16 = 21;
 const F_ENV_OCTAVES: f64 = 9.0;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
@@ -255,6 +263,9 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             F2_ENV_TIMEVEL => ("FILTER ENV TIME<VEL", -100, 100, 0, "%"),
             F2_ENV_MODE => ("FILTER ENV MODE (0 NONE 1 LOOP 2 BEAT)", 0, 2, 0, ""),
             F2_ENV_REPEAT => ("FILTER ENV REPEAT (LFO SYNCED INDEX)", 0, 14, 3, ""),
+            F2_ENV_A_SLOPE => ("FILTER ENV A SLOPE", -100, 100, 0, "%"),
+            F2_ENV_D_SLOPE => ("FILTER ENV D SLOPE", -100, 100, 100, "%"),
+            F2_ENV_R_SLOPE => ("FILTER ENV R SLOPE", -100, 100, 100, "%"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -416,6 +427,26 @@ pub struct Fm4 {
 
 /// A two-pole filter's coefficients `[b0, b1, b2, a1, a2]` (a0 = 1) for a corner of `fc` Hz: the bilinear form of `1 / (s^2 + s / Q + 1)`, its high-pass, band-pass (**peak gain
 /// Q**, as OPERATOR's: a constant-skirt band-pass) and notch relatives, and for kind 4 the Morph mix of the three outputs (`morph` 0 to 1; all share the denominator, so only the numerator blends).
+/// The share of a segment still to travel at progress `x` (1 at the start, 0 at `x` = 1) for OPERATOR's envelope slope `s` (-1 to 1), `g` being the +1 curve (1 at 0): see `F2_ENV_A_SLOPE`.
+fn slope_shape(s: f64, x: f64, g: &dyn Fn(f64) -> f64) -> f64 {
+    if s < 0.0 {
+        return 1.0 - slope_shape(-s, 1.0 - x, g);
+    }
+    let x = x.max(0.0);
+    let e = |k: f64| if k < 1e-6 { (1.0 - x).max(0.0) } else if x >= 1.0 { 0.0 } else { ((-k * x).exp() - (-k).exp()) / (1.0 - (-k).exp()) };
+    if s <= 0.5 {
+        e(5.4 * s)
+    } else {
+        let w = 2.0 * s - 1.0;
+        (1.0 - w) * e(2.7) + w * g(x)
+    }
+}
+
+/// The +100 decay curve of the filter envelope in units of the segment (x = time / (1.1 x Decay)): the three-term fall, 1 at the strike. Fitted to the sound (`F2_ENV_AMOUNT`).
+fn fenv_fall(x: f64) -> f64 {
+    (2.2 * (-x * 0.658 / 0.017).exp() + 2.9 * (-x * 0.658 / 0.06).exp() + 3.4 * (-x * 0.658 / 0.17).exp()) / F_ENV_OCTAVES / (8.5 / F_ENV_OCTAVES)
+}
+
 fn biquad(kind: i32, fc: f64, q: f64, rate: f64, morph: f64) -> [f64; 5] {
     let w = TAU * fc / rate;
     let (sn, cs) = (w.sin(), w.cos());
@@ -643,6 +674,11 @@ impl Engine for Fm4 {
         let fe_peak = f64::from(self.p[(F2_BASE + F2_ENV_PEAK) as usize]) / 100.0;
         let fe_end = f64::from(self.p[(F2_BASE + F2_ENV_END) as usize]) / 100.0;
         let fe_tv = f64::from(self.p[(F2_BASE + F2_ENV_TIMEVEL) as usize]) / 100.0;
+        let (fe_sa, fe_sd, fe_sr) = (
+            f64::from(self.p[(F2_BASE + F2_ENV_A_SLOPE) as usize]) / 100.0,
+            f64::from(self.p[(F2_BASE + F2_ENV_D_SLOPE) as usize]) / 100.0,
+            f64::from(self.p[(F2_BASE + F2_ENV_R_SLOPE) as usize]) / 100.0,
+        );
         let fe_beat = if self.p[(F2_BASE + F2_ENV_MODE) as usize] == 2 {
             60.0 / f64::from(self.p[(LFO_BASE + L_TEMPO) as usize]).max(1.0) * SYNC_QUARTERS[self.p[(F2_BASE + F2_ENV_REPEAT) as usize].clamp(0, 14) as usize]
         } else {
@@ -804,19 +840,22 @@ impl Engine for Fm4 {
                     if f_env_on {
                         let dt = 8.0 / rate;
                         let tv = (-1.4 * fe_tv * v.vel).exp();
-                        let (fe_att, fe_scale, fe_rel_tau) = (fe_att * tv, fe_scale * tv, fe_rel_tau * tv);
+                        // the attack segment, like the decay's and the release's, is 1.1 times its displayed time (a line reached the peak at 0.143 s for 135 ms)
+                        let (fe_att, fe_scale, fe_rel_tau) = (fe_att * 1.1 * tv, fe_scale * tv, fe_rel_tau * tv);
                         if v.held {
                             v.fe_t += dt;
                             // a linear rise to the peak over the attack, then the fall (fitted to the sound: `fm4fenv`)
-                            let fall = |t: f64| (2.2 * (-t / (0.017 * fe_scale)).exp() + 2.9 * (-t / (0.06 * fe_scale)).exp() + 3.4 * (-t / (0.17 * fe_scale)).exp()) / F_ENV_OCTAVES;
+                            let t_d = (0.658 * fe_scale).max(1e-4); // the segment: 1.1 x Decay (the line of D Slope 0 reached the rest cutoff then)
+                            let fall = |t: f64| 8.5 / F_ENV_OCTAVES * slope_shape(fe_sd, t / t_d, &fenv_fall);
                             let unit = fe_sus + (1.0 - fe_sus) * fall(0.0); // the level at Peak 100 %
                             v.fe_val = fe_peak
-                                * if v.fe_t < fe_att { unit * (fe_init + (1.0 - fe_init) * v.fe_t / fe_att) } else { fe_sus + (1.0 - fe_sus) * fall(if fe_beat > 0.0 { (v.fe_t - fe_att) % fe_beat } else { v.fe_t - fe_att }) };
+                                * if v.fe_t < fe_att { unit * (fe_init + (1.0 - fe_init) * (1.0 - slope_shape(fe_sa, v.fe_t / fe_att, &fenv_fall))) } else { fe_sus + (1.0 - fe_sus) * fall(if fe_beat > 0.0 { (v.fe_t - fe_att) % fe_beat } else { v.fe_t - fe_att }) };
                             v.fe_r0 = v.fe_val;
                         } else {
                             v.fe_tr += dt;
                             let end = fe_end * fe_peak * (fe_sus + (1.0 - fe_sus) * (2.2 + 2.9 + 3.4) / F_ENV_OCTAVES);
-                            v.fe_val = end + (v.fe_r0 - end) * (-v.fe_tr / fe_rel_tau).exp();
+                            let t_r = (1.1 * fe_rel * tv).max(1e-5);
+                            v.fe_val = end + (v.fe_r0 - end) * slope_shape(fe_sr, v.fe_tr / t_r, &|x| (-x * t_r / fe_rel_tau).exp());
                         }
                         oct += F_ENV_OCTAVES * f_env_amt * v.fe_val;
                     }
@@ -2352,5 +2391,62 @@ mod tests {
         for (g, w) in o.iter().zip([0.30, 0.38, 0.50, 0.70]) {
             assert!((g - w).abs() < 0.2, "release: {o:?}");
         }
+        // the Slopes page (fitted cutoffs of OPERATOR at the 25 % amount, 598 ms decay; the window centres 20 ms after its start): D Slope 0 is a line to 1.1 times the Decay, -100 its mirror
+        let want_at = |w: f64| (rest + (w - 652.6) * rest / 652.6).max(rest);
+        for (d, starts, wants) in [
+            (0, vec![4101usize, 13_582, 23_107], vec![2343.0, 1417.0, 843.0]),
+            (50, vec![10_400], vec![1002.0]),
+            (-100, vec![4101, 18_346, 23_107, 26_282], vec![2986.0, 2555.0, 2111.0, 1417.0]),
+        ] {
+            let got = cutoffs(&|e| {
+                e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+                e.set(F2_BASE + F2_ENV_D_SLOPE, d);
+            }, 127, &starts);
+            for ((g, w), a) in got.iter().zip(&wants).zip(&starts) {
+                assert!((g / want_at(*w) - 1.0).abs() < 0.2, "D Slope {d} at sample {a}: {g} Hz, wanted about {}", want_at(*w));
+            }
+        }
+        // the attack's slope: +100 rises fast first and levels off, 0 is the line, -100 waits and climbs at the end (135 ms attack)
+        for (sl, starts, wants) in [
+            (100, vec![44usize, 1455], vec![1970.0, 2600.0]),
+            (0, vec![1455], vec![1171.0]),
+            (-100, vec![2513, 3925, 4630], vec![721.0, 828.0, 965.0]),
+        ] {
+            let got = cutoffs(&|e| {
+                e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+                e.set(F2_BASE + F2_ENV_ATTACK, 1350);
+                e.set(F2_BASE + F2_ENV_A_SLOPE, sl);
+            }, 127, &starts);
+            for ((g, w), a) in got.iter().zip(&wants).zip(&starts) {
+                assert!((g / want_at(*w) - 1.0).abs() < 0.25, "A Slope {sl} at sample {a}: {g} Hz, wanted about {}", want_at(*w));
+            }
+        }
+        // the release's slope: the cutoff 20 ms after the note is let go stays higher the further the slope goes below +100 (0.18, 0.60 and 0.85 of the plateau's 0.9 octave in the measurement)
+        let rs = |sl: i32| cutoffs_off(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_SUSTAIN, 40);
+            e.set(F2_BASE + F2_ENV_R_SLOPE, sl);
+        }, 127, &[30_000], 30_000)[0];
+        let (r_exp, r_line, r_late) = (rs(100), rs(0), rs(-100));
+        assert!(r_exp < r_line && r_line < r_late, "R Slope +100, 0, -100: {r_exp} {r_line} {r_late}");
+    }
+
+    #[test]
+    fn the_slope_curve_is_a_line_at_zero_and_mirrors_below() {
+        let g = |x: f64| (-x * 8.0).exp();
+        for k in 0..=10 {
+            let x = k as f64 / 10.0;
+            assert!((slope_shape(0.0, x, &g) - (1.0 - x)).abs() < 1e-9);
+            assert!((slope_shape(-1.0, x, &g) - (1.0 - slope_shape(1.0, 1.0 - x, &g))).abs() < 1e-9);
+            assert!((slope_shape(1.0, x, &g) - g(x)).abs() < 1e-9);
+            // monotonic in the slope: a larger slope has less left to travel at the same progress
+            let mut last = 2.0;
+            for j in -4..=4 {
+                let y = slope_shape(j as f64 / 4.0, x, &g);
+                assert!(y <= last + 1e-9 || x == 0.0 || x == 1.0, "slope {j}/4 at {x}");
+                last = y;
+            }
+        }
+        assert!((slope_shape(0.5, 0.153, &g) - 0.63).abs() < 0.05);
     }
 }
