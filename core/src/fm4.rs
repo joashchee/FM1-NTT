@@ -79,9 +79,14 @@ pub const L_RATE: u16 = 2;
 pub const L_AMOUNT: u16 = 3;
 /// 1 each note restarts its own LFO at phase 0, 0 one LFO runs free for every voice.
 pub const L_RETRIG: u16 = 4;
-/// Bit k set: operator k's pitch follows the LFO (OPERATOR's Osc A to D buttons; all four by default).
+/// Bit k set: operator k's pitch follows the LFO (OPERATOR's Osc A to D buttons; all four by default); bit 4 the filter's cutoff.
 pub const L_DEST: u16 = 5;
-pub const LFO_PARAMS: u16 = 6;
+/// OPERATOR's Amount A, percent (-100 to 100): scales the LFO's depth on every target of destination A (the operators and the filter); the pitch and cutoff swing are proportional to it (34 % gave 0.35 of the 100 % swing).
+pub const L_AMOUNT_A: u16 = 6;
+pub const LFO_PARAMS: u16 = 7;
+/// Bit 4 of `L_DEST`: the filter's cutoff follows the LFO. Measured: the cutoff swings by plus and minus this many octaves at 100 % (a sine, geometrically about its own value).
+pub const L_FILTER_BIT: i32 = 16;
+const L_FILTER_OCTAVES: f64 = 2.84;
 pub const P_COUNT: usize = LFO_BASE as usize + LFO_PARAMS as usize;
 const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
 
@@ -163,7 +168,8 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_RATE => ("LFO RATE (0.01 HZ)", 1, 10_000, 632, ""),
             L_AMOUNT => ("LFO AMOUNT (PITCH)", 0, 100, 10, "%"),
             L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
-            L_DEST => ("LFO OPERATORS (BIT MASK)", 0, 15, 15, ""),
+            L_DEST => ("LFO TARGETS (BITS: 1-8 OPERATORS 16 FILTER)", 0, 31, 15, ""),
+            L_AMOUNT_A => ("LFO AMOUNT A", -100, 100, 100, "%"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -491,10 +497,13 @@ impl Engine for Fm4 {
         let f_res = (self.p[(FILT_BASE + F_RES) as usize] as f64 / 100.0).min(0.93);
         let f_q = 0.5 / (1.0 - 0.97 * f_res);
         let mut fco = [[0.0f64; 5]; VOICES];
+        let mut fkey = [0.0f64; VOICES];
+        let f_kind = self.p[(FILT_BASE + F_TYPE) as usize];
         if f_on {
             let kind = self.p[(FILT_BASE + F_TYPE) as usize];
             for (i, v) in self.voices.iter().enumerate() {
                 let keyed = self.p[(FILT_BASE + F_FREQ) as usize] as f64 * 2f64.powf(self.p[(FILT_BASE + F_KEY) as usize] as f64 / 100.0 * (v.note as f64 - 60.0) / 12.0);
+                fkey[i] = keyed;
                 fco[i] = biquad(kind, keyed.clamp(5.0, rate * 0.45), f_q, rate);
             }
         }
@@ -504,7 +513,8 @@ impl Engine for Fm4 {
         let lfo_on = self.p[(LFO_BASE + L_ON) as usize] == 1;
         let (l_type, l_retrig, l_dest) = (self.p[(LFO_BASE + L_TYPE) as usize], self.p[(LFO_BASE + L_RETRIG) as usize] == 1, self.p[(LFO_BASE + L_DEST) as usize]);
         let l_dph = f64::from(self.p[(LFO_BASE + L_RATE) as usize]) / 100.0 / rate;
-        let l_depth = f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0;
+        let l_depth = f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0 * f64::from(self.p[(LFO_BASE + L_AMOUNT_A) as usize]) / 100.0;
+        let l_filter = lfo_on && l_dest & L_FILTER_BIT != 0;
         let (mut free_ph, mut rng) = (self.lfo_ph, self.rng);
         let steps = if l_type == 6 { 16.0 } else { 1.0 };
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
@@ -519,6 +529,7 @@ impl Engine for Fm4 {
                     }
                 }
                 let mut lmul = 1.0;
+                let mut lshape = 0.0;
                 if lfo_on {
                     let prev = if l_retrig { v.lph } else { free_ph };
                     let ph = if l_retrig { v.lph } else { free_ph };
@@ -542,6 +553,7 @@ impl Engine for Fm4 {
                         4 => 1.0 - 2.0 * ph,
                         _ => v.lval,
                     };
+                    lshape = shape;
                     lmul = 2f64.powf(l_depth * shape);
                     let next = ph + l_dph;
                     let nph = next - next.floor();
@@ -602,6 +614,9 @@ impl Engine for Fm4 {
                 // a voice ends once every heard operator has released to silence
                 if !v.held && (0..OPS).all(|k| alg.carriers >> k & 1 == 0 || v.ops[k].env < 1e-4) {
                     v.active = false;
+                }
+                if f_on && l_filter && n & 7 == 0 {
+                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(L_FILTER_OCTAVES * l_depth * lshape)).clamp(5.0, rate * 0.45), f_q, rate);
                 }
                 if f_on {
                     let c = &fco[vi];
@@ -1302,5 +1317,70 @@ mod tests {
             e.render(&mut x);
             assert!(x.iter().any(|&v| v != 0));
         }
+    }
+
+    /// OPERATOR 0.7's LFO on the filter (2026-11-20; operator A as Saw D, a 24 dB low-pass at 846 Hz, Freq<Key +100, Res 0.27, only the filter a target): the fitted cutoff
+    /// swung 537 to 800 Hz about 655 (the displayed corner 712 Hz at the note, times the engine factor) at Amount 10 %, so **plus and minus 0.285 octave, 2.85 octaves at 100 %**,
+    /// a sine geometrically about its own value; Amount A at 34 % gave 0.35 of that swing.
+    #[test]
+    fn fitted_to_operator_the_lfo_on_the_filter() {
+        let swing = |amount: i32, amount_a: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_WAVE), 10); // Saw D
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(FILT_BASE + F_FREQ, 846);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_AMOUNT, amount);
+            e.set(LFO_BASE + L_AMOUNT_A, amount_a);
+            e.set(LFO_BASE + L_DEST, L_FILTER_BIT); // the filter only
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100 + 3000];
+            e.render(&mut x);
+            let x: Vec<f64> = x[3000..].iter().map(|&v| f64::from(v) / 32768.0).collect();
+            let f0 = 220.0;
+            let q = 0.5 / (1.0 - 0.97 * 0.27);
+            let h = |f: f64, fc: f64| {
+                let xx = f / fc;
+                1.0 / ((1.0 - xx * xx).powi(2) + (xx / q).powi(2))
+            };
+            let mut fcs = vec![];
+            for a in (0..x.len() - 1764).step_by(882) {
+                let db: Vec<f64> = (1..=10)
+                    .map(|k| {
+                        let w = std::f64::consts::TAU * k as f64 * f0 / 44_100.0;
+                        let (mut c, mut s) = (0.0, 0.0);
+                        for i in 0..1764 {
+                            let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / 1764.0).cos();
+                            c += x[a + i] * win * (w * i as f64).cos();
+                            s += x[a + i] * win * (w * i as f64).sin();
+                        }
+                        20.0 * (c.hypot(s) / 441.0 * k as f64).max(1e-9).log10()
+                    })
+                    .collect();
+                let mut best = (f64::MAX, 0.0);
+                for g in 0..200 {
+                    let fc = 200.0 * 2f64.powf(g as f64 / 40.0);
+                    let m: Vec<f64> = (1..=10).map(|k| 20.0 * h(k as f64 * f0, fc).log10()).collect();
+                    let off = db.iter().zip(&m).map(|(d, m)| d - m).sum::<f64>() / 10.0;
+                    let e: f64 = db.iter().zip(&m).map(|(d, m)| (d - m - off).powi(2)).sum();
+                    if e < best.0 {
+                        best = (e, fc);
+                    }
+                }
+                fcs.push(best.1);
+            }
+            let (lo, hi) = (fcs.iter().cloned().fold(f64::MAX, f64::min), fcs.iter().cloned().fold(0.0, f64::max));
+            ((hi / lo).log2(), (hi * lo).sqrt())
+        };
+        let (oct, centre) = swing(10, 100);
+        assert!((oct - 0.57).abs() < 0.15, "10 percent swung {oct} octaves");
+        assert!((centre / 712.0 - 1.0).abs() < 0.12, "about {centre} Hz");
+        let (oct34, _) = swing(10, 34);
+        assert!((oct34 / oct - 0.35).abs() < 0.15, "Amount A at 34 percent: {oct34} against {oct}");
+        let (oct0, _) = swing(0, 100);
+        assert!(oct0 < 0.1, "no amount, no swing: {oct0}");
     }
 }
