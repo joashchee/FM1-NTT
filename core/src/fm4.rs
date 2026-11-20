@@ -92,7 +92,16 @@ pub const L_AMOUNT_B: u16 = 8;
 pub const L_RATE_KEY: u16 = 9;
 /// OPERATOR's Amt<Vel, percent (0 to 100; negatives not measured): the depth of every target is multiplied by `(1 - p) + p x velocity / 127` (+100 %: swings of 115, 60 and 30 cents at velocity 127, 64 and 32).
 pub const L_AMT_VEL: u16 = 10;
-pub const LFO_PARAMS: u16 = 11;
+/// OPERATOR's Range = Sync (0 free: the rate knob; 1 tempo-synced: `L_SYNC_DIV` at `L_TEMPO`). Range High is only a higher rate: the same knob position read 2.53 kHz instead of 6.32 Hz, and
+/// the sidebands of a 6.54 kHz setting sat at 6.0 kHz either side of the carrier, so `L_RATE` simply reaches 25 kHz here.
+pub const L_SYNC: u16 = 11;
+/// The Synced menu in length order, an index: 0 1/32, 1 1/16T, 2 1/16, 3 1/8T (the default), 4 1/8, 5 1/4T, 6 3/16, 7 1/4, 8 1/2T, 9 3/8, 10 1/2, 11 3/4, 12 1 Bar, 13 2 Bars, 14 4 Bars.
+pub const L_SYNC_DIV: u16 = 12;
+/// OPERATOR's GLO Tempo, beats a minute (its default is 120). 1/8T at 120 measured 6.0 Hz times the engine factor (5.52).
+pub const L_TEMPO: u16 = 13;
+pub const LFO_PARAMS: u16 = 14;
+/// The Synced menu's lengths in quarter notes.
+const SYNC_QUARTERS: [f64; 15] = [0.125, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 1.0, 4.0 / 3.0, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0];
 /// Bit 4 of `L_DEST`: the filter's cutoff follows the LFO. Measured: the cutoff swings by plus and minus this many octaves at 100 % (a sine, geometrically about its own value).
 pub const L_FILTER_BIT: i32 = 16;
 const L_FILTER_OCTAVES: f64 = 2.84;
@@ -174,7 +183,7 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - LFO_BASE as usize) as u16 {
             L_ON => ("LFO (0 OFF 1 ON)", 0, 1, 0, ""),
             L_TYPE => ("LFO TYPE (0 SINE 1 SQR 2 TRI 3 SAW UP 4 SAW DN 5 S&H 6 NOISE)", 0, 6, 0, ""),
-            L_RATE => ("LFO RATE (0.01 HZ)", 1, 10_000, 632, ""),
+            L_RATE => ("LFO RATE (0.01 HZ, TO 25 KHZ)", 1, 2_500_000, 632, ""),
             L_AMOUNT => ("LFO AMOUNT (PITCH)", 0, 100, 10, "%"),
             L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
             L_DEST => ("LFO TARGETS (BITS: 1-8 OPERATORS 16 FILTER)", 0, 31, 15, ""),
@@ -183,6 +192,9 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_AMOUNT_B => ("LFO AMOUNT B", -100, 100, 100, "%"),
             L_RATE_KEY => ("LFO RATE<KEY", -100, 100, 0, "%"),
             L_AMT_VEL => ("LFO AMT<VEL", 0, 100, 0, "%"),
+            L_SYNC => ("LFO SYNC (0 FREE 1 TEMPO)", 0, 1, 0, ""),
+            L_SYNC_DIV => ("LFO SYNCED (0 1/32 ... 3 1/8T ... 14 4 BARS)", 0, 14, 3, ""),
+            L_TEMPO => ("LFO TEMPO", 30, 300, 120, "bpm"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -527,7 +539,12 @@ impl Engine for Fm4 {
         // the LFO (pitch): its phase step a sample, its depth in octaves at a value of 1
         let lfo_on = self.p[(LFO_BASE + L_ON) as usize] == 1;
         let (l_type, l_retrig, l_dest) = (self.p[(LFO_BASE + L_TYPE) as usize], self.p[(LFO_BASE + L_RETRIG) as usize] == 1, self.p[(LFO_BASE + L_DEST) as usize]);
-        let l_dph = f64::from(self.p[(LFO_BASE + L_RATE) as usize]) / 100.0 / rate;
+        let l_hz = if self.p[(LFO_BASE + L_SYNC) as usize] == 1 {
+            f64::from(self.p[(LFO_BASE + L_TEMPO) as usize]) / 60.0 / SYNC_QUARTERS[self.p[(LFO_BASE + L_SYNC_DIV) as usize].clamp(0, 14) as usize]
+        } else {
+            f64::from(self.p[(LFO_BASE + L_RATE) as usize]) / 100.0
+        };
+        let l_dph = l_hz / rate;
         let l_depth = f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0 * f64::from(self.p[(LFO_BASE + L_AMOUNT_A) as usize]) / 100.0;
         let l_filter = lfo_on && l_dest & L_FILTER_BIT != 0;
         let l_dest_b = self.p[(LFO_BASE + L_DEST_B) as usize];
@@ -1601,5 +1618,65 @@ mod tests {
         let (_, flat64) = run(57, 64, 0, 0);
         let (_, flat127) = run(57, 127, 0, 0);
         assert!((flat64 / flat127 - 1.0).abs() < 0.07, "Amt<Vel at 0 leaves the depth alone");
+    }
+
+    /// OPERATOR 0.7's LFO Range (2026-11-20): Sync at 1/8T and 120 beats a minute ran at 5.52 Hz, which is 6.0 Hz times the engine factor, and the Synced menu is a ladder of
+    /// note lengths; High range is only a higher rate (sidebands 6.0 kHz either side of the carrier for the 6.54 kHz setting).
+    #[test]
+    fn fitted_to_operator_the_lfo_range() {
+        let rate_of = |sync: i32, div: i32, tempo: i32, hz100: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_SYNC, sync);
+            e.set(LFO_BASE + L_SYNC_DIV, div);
+            e.set(LFO_BASE + L_TEMPO, tempo);
+            e.set(LFO_BASE + L_RATE, hz100);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 441_000];
+            e.render(&mut x);
+            let mut ups = vec![];
+            for i in 1..x.len() {
+                if x[i - 1] < 0 && x[i] >= 0 {
+                    ups.push(i as f64 - 1.0 + f64::from(-x[i - 1]) / f64::from(x[i] - x[i - 1]));
+                }
+            }
+            let c: Vec<(f64, f64)> = ups.windows(2).map(|w| (44_100.0 / (w[1] - w[0]), (w[0] + w[1]) / 2.0 / 44_100.0)).filter(|v| v.1 > 0.1).collect();
+            let mean = c.iter().map(|v| v.0).sum::<f64>() / c.len() as f64;
+            let up: Vec<f64> = (1..c.len()).filter(|&k| c[k - 1].0 < mean && c[k].0 >= mean).map(|k| c[k].1).collect();
+            (up.len() - 1) as f64 / (up[up.len() - 1] - up[0])
+        };
+        let r = rate_of(1, 3, 120, 632);
+        assert!((r - 6.0).abs() < 0.3, "1/8T at 120: {r}");
+        let r = rate_of(1, 7, 120, 632);
+        assert!((r - 2.0).abs() < 0.15, "1/4 at 120 is 2 Hz: {r}");
+        let r = rate_of(1, 3, 60, 632);
+        assert!((r - 3.0).abs() < 0.2, "1/8T at 60: {r}");
+        let r = rate_of(1, 12, 120, 632);
+        assert!((r - 0.5).abs() < 0.1, "a bar at 120 is 0.5 Hz: {r}");
+        assert!((rate_of(0, 3, 120, 632) - 6.32).abs() < 0.3, "free: the knob's rate");
+        // High range: an audio-rate LFO puts sidebands at the carrier plus and minus its rate
+        let mut e = Fm4::new(44_100.0);
+        e.set(P_LEVEL, 16);
+        e.set(op_param(0, O_ATTACK), 1);
+        e.set(op_param(0, O_SUSTAIN), 99);
+        e.set(LFO_BASE + L_ON, 1);
+        e.set(LFO_BASE + L_AMOUNT, 100);
+        e.set(LFO_BASE + L_RATE, 600_000); // 6 kHz
+        e.note_on(93, 127); // 1760 Hz, so a 6 kHz LFO's sidebands are strong enough to see
+        let mut x = vec![0i16; 22_050];
+        e.render(&mut x);
+        let amp = |f: f64| {
+            let w = std::f64::consts::TAU * f / 44_100.0;
+            let (mut c, mut s) = (0.0, 0.0);
+            for (i, &v) in x[2000..18_000].iter().enumerate() {
+                c += f64::from(v) * (w * i as f64).cos();
+                s += f64::from(v) * (w * i as f64).sin();
+            }
+            c.hypot(s)
+        };
+        assert!(amp(6000.0 - 1760.0) > 0.3 * amp(1760.0), "a sideband at the rate minus the carrier");
     }
 }
