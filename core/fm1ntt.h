@@ -60,6 +60,9 @@ size_t fm1ntt_bench_image(uint8_t *out, size_t cap);                            
 uint32_t fm1ntt_bench_version(void);                                                        /* bump = reports are not comparable */
 int fm1ntt_jit_available(void);                                                            /* 1 when the build's CPU supports the native JIT */
 uint32_t fm1ntt_clock_mhz(void);                                                            /* 240: instructions a second real time needs */
+/* The standard audition (core/src/audition.rs): four notes on the jack, no wall clock, so a firmware gives the same result on any computer. verdict: 0 Pass, 1 Silent, 2 Blank, 3 Halted. */
+typedef struct { int verdict; uint32_t colours; int32_t peak; uint32_t emulated_ms; uint32_t size; uint32_t png_len; double rms_db; double active; char sha256[65]; } fm1ntt_audition_result;
+int fm1ntt_audition(const uint8_t *data, size_t len, fm1ntt_audition_result *out, uint8_t *png, size_t png_cap);   /* 0, or -1 and fm1ntt_error; the PNG is copied only when png_cap holds png_len */
 /* The sound engines (core/src/capi_sound.rs): fm6 (a DX7 voice from the keys) and the sampler. All mono 16-bit; null-safe; a render of more than 1 << 20 frames returns 0. */
 typedef struct Fm6Handle fm1ntt_fm6;
 typedef struct SamplerHandle fm1ntt_sampler;
@@ -150,3 +153,15 @@ int32_t fm1ntt_inst_fx_get(const fm1ntt_inst *h, size_t fx, int id);
 int fm1ntt_inst_fx_set(fm1ntt_inst *h, size_t fx, int id, int value);
 size_t fm1ntt_inst_to_package(const fm1ntt_inst *h, const char *source, uint8_t *out, size_t cap);   /* the instrument, edits included, as package text; the full length */
 void fm1ntt_sha256_hex(const uint8_t *data, size_t len, char out[65]);
+/* The fm1tastik.json reader (core/src/capi_catalog.rs, docs/FM1TASTIK-JSON.md): the host supplies the bytes (the app has no network fetch yet). A null parse says why in fm1ntt_error. */
+typedef struct CatalogHandle fm1ntt_catalog;
+fm1ntt_catalog *fm1ntt_catalog_parse(const uint8_t *data, size_t len);                      /* UTF-8, at most 64 KiB */
+void fm1ntt_catalog_free(fm1ntt_catalog *h);
+size_t fm1ntt_catalog_count(const fm1ntt_catalog *h);                                       /* entries it may show: 0 when the author set listed: false */
+size_t fm1ntt_catalog_text(const fm1ntt_catalog *h, size_t entry, int which, char *out, size_t cap);   /* which: 0 id 1 name 2 summary 3 description 4 author 5 homepage 6 source 7 SPDX 8 categories 9 tags; the full length */
+int fm1ntt_catalog_tier(const fm1ntt_catalog *h, size_t entry);                              /* 0 permissive, 1 copyleft (the Pack's), -1 not on the allowlist */
+size_t fm1ntt_catalog_release_count(const fm1ntt_catalog *h, size_t entry);
+int fm1ntt_catalog_latest(const fm1ntt_catalog *h, size_t entry);                            /* the newest release not deprecated, or -1 */
+size_t fm1ntt_catalog_release_text(const fm1ntt_catalog *h, size_t entry, size_t release, int which, char *out, size_t cap);   /* 0 version 1 date 2 url 3 page 4 preview url 5 sha256 6 format 7 notes */
+uint64_t fm1ntt_catalog_release_size(const fm1ntt_catalog *h, size_t entry, size_t release);
+int fm1ntt_catalog_matches(const fm1ntt_catalog *h, size_t entry, size_t release, const uint8_t *data, size_t len);   /* 1 when data is that release's file (size and SHA-256) */

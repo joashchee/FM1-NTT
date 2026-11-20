@@ -644,6 +644,128 @@ pub fn parse_vced_sysex(bytes: &[u8]) -> Option<[u8; 156]> {
     Some(unpack_patch(&pack_patch(&p)))
 }
 
+/// One operator of a voice as the DX7's panel names the fields (byte `n` of its 21 in the unpacked patch is noted on each).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PatchOperator {
+    /// 0..21: EG rates 1 to 4 and levels 1 to 4 (each 0 to 99)
+    pub rates: [u8; 4],
+    pub levels: [u8; 4],
+    /// 8: break point (0 to 99, note 0 = A-1), 9, 10: left and right depth (0 to 99), 11, 12: left and right curve (0 to 3: -LIN, -EXP, +EXP, +LIN)
+    pub break_point: u8,
+    pub left_depth: u8,
+    pub right_depth: u8,
+    pub left_curve: u8,
+    pub right_curve: u8,
+    /// 13: rate scaling 0 to 7, 14: amp mod sensitivity 0 to 3, 15: key velocity sensitivity 0 to 7, 16: output level 0 to 99
+    pub rate_scale: u8,
+    pub amp_mod_sens: u8,
+    pub key_vel_sens: u8,
+    pub output_level: u8,
+    /// 17: true for a fixed frequency, 18: coarse 0 to 31, 19: fine 0 to 99, 20: detune 0 to 14 (7 is none)
+    pub fixed: bool,
+    pub freq_coarse: u8,
+    pub freq_fine: u8,
+    pub detune: u8,
+}
+
+/// A DX7 voice with typed fields instead of byte indices (`param_name` names the bytes; this names the fields). `ops[0]` is **OP1**, the carrier nearest the output in most algorithms,
+/// whose bytes come last in the patch (`param_name`'s `OP6` is byte 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PatchVoice {
+    pub ops: [PatchOperator; 6],
+    /// 126..134: pitch EG rates 1 to 4 and levels 1 to 4
+    pub pitch_rates: [u8; 4],
+    pub pitch_levels: [u8; 4],
+    /// 134: algorithm 0 to 31 (the panel's 1 to 32), 135: feedback 0 to 7, 136: oscillator key sync
+    pub algorithm: u8,
+    pub feedback: u8,
+    pub osc_sync: bool,
+    /// 137..: LFO speed, delay, PM depth, AM depth (each 0 to 99), key sync, wave 0 to 5 (triangle, saw down, saw up, square, sine, sample and hold), PM sensitivity 0 to 7
+    pub lfo_speed: u8,
+    pub lfo_delay: u8,
+    pub lfo_pm_depth: u8,
+    pub lfo_am_depth: u8,
+    pub lfo_sync: bool,
+    pub lfo_wave: u8,
+    pub lfo_pm_sens: u8,
+    /// 144: transpose 0 to 48 (24 is middle C)
+    pub transpose: u8,
+    /// 145..155: the ten characters of the name
+    pub name: [u8; 10],
+}
+
+impl PatchVoice {
+    /// The voice in an unpacked patch. Nothing is clamped here (`unpack_patch` already did for a packed voice); `to_patch` returns exactly these bytes.
+    pub fn from_patch(p: &[u8; 156]) -> PatchVoice {
+        let mut v = PatchVoice::default();
+        for (n, op) in v.ops.iter_mut().enumerate() {
+            let o = (5 - n) * 21;
+            *op = PatchOperator {
+                rates: [p[o], p[o + 1], p[o + 2], p[o + 3]],
+                levels: [p[o + 4], p[o + 5], p[o + 6], p[o + 7]],
+                break_point: p[o + 8],
+                left_depth: p[o + 9],
+                right_depth: p[o + 10],
+                left_curve: p[o + 11],
+                right_curve: p[o + 12],
+                rate_scale: p[o + 13],
+                amp_mod_sens: p[o + 14],
+                key_vel_sens: p[o + 15],
+                output_level: p[o + 16],
+                fixed: p[o + 17] != 0,
+                freq_coarse: p[o + 18],
+                freq_fine: p[o + 19],
+                detune: p[o + 20],
+            };
+        }
+        v.pitch_rates.copy_from_slice(&p[126..130]);
+        v.pitch_levels.copy_from_slice(&p[130..134]);
+        v.algorithm = p[134];
+        v.feedback = p[135];
+        v.osc_sync = p[136] != 0;
+        v.lfo_speed = p[137];
+        v.lfo_delay = p[138];
+        v.lfo_pm_depth = p[139];
+        v.lfo_am_depth = p[140];
+        v.lfo_sync = p[141] != 0;
+        v.lfo_wave = p[142];
+        v.lfo_pm_sens = p[143];
+        v.transpose = p[144];
+        v.name.copy_from_slice(&p[145..155]);
+        v
+    }
+
+    /// The unpacked patch: byte 155 is msfa's 0x3f, as `parse_vced_sysex` sets it.
+    pub fn to_patch(&self) -> [u8; 156] {
+        let mut p = [0u8; 156];
+        for (n, op) in self.ops.iter().enumerate() {
+            let o = (5 - n) * 21;
+            p[o..o + 4].copy_from_slice(&op.rates);
+            p[o + 4..o + 8].copy_from_slice(&op.levels);
+            p[o + 8..o + 21].copy_from_slice(&[
+                op.break_point, op.left_depth, op.right_depth, op.left_curve, op.right_curve, op.rate_scale, op.amp_mod_sens, op.key_vel_sens, op.output_level,
+                op.fixed as u8, op.freq_coarse, op.freq_fine, op.detune,
+            ]);
+        }
+        p[126..130].copy_from_slice(&self.pitch_rates);
+        p[130..134].copy_from_slice(&self.pitch_levels);
+        p[134] = self.algorithm;
+        p[135] = self.feedback;
+        p[136] = self.osc_sync as u8;
+        p[137..145].copy_from_slice(&[self.lfo_speed, self.lfo_delay, self.lfo_pm_depth, self.lfo_am_depth, self.lfo_sync as u8, self.lfo_wave, self.lfo_pm_sens, self.transpose]);
+        p[145..155].copy_from_slice(&self.name);
+        p[155] = 0x3f;
+        p
+    }
+
+    /// The name as text (`voice_name`'s rule: printable ASCII only, trailing spaces cut).
+    pub fn name_text(&self) -> String {
+        let mut p = [0u8; 156];
+        p[145..155].copy_from_slice(&self.name);
+        voice_name(&p)
+    }
+}
+
 /// The LFO's six bytes in an unpacked patch.
 pub fn lfo_params(patch: &[u8; 156]) -> [u8; 6] {
     [patch[137], patch[138], patch[139], patch[140], patch[141], patch[142]]
@@ -1140,6 +1262,40 @@ impl Synth {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_voice_has_typed_fields_that_round_trip_and_sit_where_the_names_say() {
+        // every byte of the 155 that is a flag stays a flag, the rest are kept as they are
+        let mut p = [0u8; 156];
+        for (i, b) in p.iter_mut().enumerate() {
+            *b = (i % 97) as u8;
+        }
+        for flag in [136usize, 141].into_iter().chain((0..6).map(|o| o * 21 + 17)) {
+            p[flag] = (p[flag] != 0) as u8;
+        }
+        p[155] = 0x3f;
+        let v = PatchVoice::from_patch(&p);
+        assert_eq!(v.to_patch(), p);
+        // OP1 is byte 105 on: its output level is byte 105 + 16, and the algorithm is where param_name says
+        assert_eq!(v.ops[0].output_level, p[105 + 16]);
+        assert_eq!(param_name(105 + 16), "OP1 OUTPUT LEVEL");
+        assert_eq!(v.ops[5].rates[0], p[0]);
+        assert_eq!(param_name(134), "ALGORITHM");
+        assert_eq!(v.algorithm, p[134]);
+        assert_eq!(param_name(144), "TRANSPOSE");
+        assert_eq!(v.transpose, p[144]);
+        // a packed voice goes through unpack, the typed voice and back to the same bytes
+        let mut bulk = [0u8; 128];
+        for (i, b) in bulk.iter_mut().enumerate() {
+            *b = (i * 7 % 50) as u8;
+        }
+        bulk[..11].fill(40);
+        let un = unpack_patch(&bulk);
+        assert_eq!(pack_patch(&PatchVoice::from_patch(&un).to_patch()), pack_patch(&un));
+        let mut named = [0u8; 156];
+        named[145..155].copy_from_slice(b"E.PIANO 1 ");
+        assert_eq!(PatchVoice::from_patch(&named).name_text(), "E.PIANO 1");
+    }
+
     use super::*;
 
     fn voice(alg: u8) -> [u8; 128] {

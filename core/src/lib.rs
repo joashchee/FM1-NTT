@@ -10,6 +10,7 @@ pub mod arp;
 pub mod audition;
 pub mod bench;
 pub mod capi;
+pub mod capi_catalog;
 pub mod capi_inst;
 pub mod capi_sound;
 pub mod catalog;

@@ -117,3 +117,14 @@ test('a bad file is an error with a reason, never a crash; sizes are bounded', o
   assert.ok(m.loaded);
   m.free();
 });
+
+test('the standard audition runs in the module and passes a bundled firmware', opts, async () => {
+  const f = firmwares().find((x) => x.includes('untrue'))!;
+  const engine = await load(wasm!);
+  const a = engine.audition(readFileSync(f));
+  assert.equal(a.verdict, 'pass');
+  assert.equal(a.sha256, createHash('sha256').update(readFileSync(f)).digest('hex'));
+  assert.ok(a.colours > 8 && a.peak > 0 && a.png.length > 1000 && a.png[1] === 0x50);
+  assert.throws(() => engine.audition(new Uint8Array(100)), /./);
+  assert.throws(() => engine.audition(new Uint8Array(0)), /1 to/);
+});

@@ -521,3 +521,85 @@ mod tests {
         }
     }
 }
+
+/// What `fm1ntt_audition` reports (see `core/src/audition.rs`). `verdict`: 0 Pass, 1 Silent, 2 Blank, 3 Halted. `sha256` is 64 lowercase hex digits and a NUL.
+#[repr(C)]
+pub struct Fm1nttAudition {
+    pub verdict: c_int,
+    pub colours: u32,
+    pub peak: i32,
+    pub emulated_ms: u32,
+    pub size: u32,
+    /// the final screen's PNG: its length (set even when it did not fit `png_cap`)
+    pub png_len: u32,
+    pub rms_db: f64,
+    pub active: f64,
+    pub sha256: [c_char; 65],
+}
+
+/// Runs the standard audition (a fixed script of four notes, no wall clock: the same firmware gives the same result on any computer) on a `.fwsc` package.
+/// 0 on success, else -1 and `fm1ntt_error` says why (not a package, or a null argument). The screen PNG is copied to `png` when `png_cap` holds it.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes, `out` to one `Fm1nttAudition`, and `png` (when not null) to `png_cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_audition(data: *const u8, len: usize, out: *mut Fm1nttAudition, png: *mut u8, png_cap: usize) -> c_int {
+    if data.is_null() || out.is_null() || len > 64 << 20 {
+        return set_error(Some("no firmware to audition".into()));
+    }
+    match crate::audition::audition_standard(std::slice::from_raw_parts(data, len)) {
+        Ok(a) => {
+            let o = &mut *out;
+            o.verdict = match a.verdict {
+                crate::audition::Verdict::Pass => 0,
+                crate::audition::Verdict::Silent => 1,
+                crate::audition::Verdict::Blank => 2,
+                crate::audition::Verdict::Halted => 3,
+            };
+            o.colours = a.colours as u32;
+            o.peak = a.peak;
+            o.emulated_ms = a.emulated_ms;
+            o.size = a.size as u32;
+            o.png_len = a.screen_png.len() as u32;
+            o.rms_db = a.rms_db;
+            o.active = a.active;
+            o.sha256 = [0; 65];
+            for (d, s) in o.sha256.iter_mut().zip(a.sha256.bytes().take(64)) {
+                *d = s as c_char;
+            }
+            if !png.is_null() && png_cap >= a.screen_png.len() {
+                std::ptr::copy_nonoverlapping(a.screen_png.as_ptr(), png, a.screen_png.len());
+            }
+            set_error(None)
+        }
+        Err(e) => set_error(Some(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod audition_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn the_c_face_auditions_and_refuses_a_non_package() {
+        unsafe {
+            let mut o: Fm1nttAudition = std::mem::zeroed();
+            assert_eq!(fm1ntt_audition(std::ptr::null(), 0, &mut o, std::ptr::null_mut(), 0), -1);
+            let junk = [1u8, 2, 3];
+            assert_eq!(fm1ntt_audition(junk.as_ptr(), 3, &mut o, std::ptr::null_mut(), 0), -1);
+            assert!(!CStr::from_ptr(fm1ntt_error()).to_bytes().is_empty());
+            // a bundled firmware, when present, passes and its PNG is returned
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundled-firmware/haunted-fm1");
+            if let Some(f) = std::fs::read_dir(dir).ok().and_then(|d| d.flatten().find(|e| e.path().extension().is_some_and(|x| x == "fwsc"))) {
+                let fw = std::fs::read(f.path()).unwrap();
+                assert_eq!(fm1ntt_audition(fw.as_ptr(), fw.len(), &mut o, std::ptr::null_mut(), 0), 0);
+                assert!(o.png_len > 1000);
+                let mut png = vec![0u8; o.png_len as usize];
+                assert_eq!(fm1ntt_audition(fw.as_ptr(), fw.len(), &mut o, png.as_mut_ptr(), png.len()), 0);
+                assert_eq!(&png[1..4], b"PNG");
+                assert_eq!(CStr::from_ptr(o.sha256.as_ptr()).to_bytes().len(), 64);
+            }
+        }
+    }
+}

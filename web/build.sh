@@ -31,7 +31,7 @@ const m = new WebAssembly.Module(require('fs').readFileSync(process.argv[2]));
 const imp = WebAssembly.Module.imports(m).map((i) => `${i.module}.${i.name}:${i.kind}`);
 const exp = new Set(WebAssembly.Module.exports(m).map((e) => `${e.name}:${e.kind}`));
 const want = ['memory:memory', '__indirect_function_table:table', 'fm1ntt_wasm_alloc:function', 'fm1ntt_wasm_free:function', 'fm1ntt_new:function', 'fm1ntt_free:function',
-  'fm1ntt_load_package:function', 'fm1ntt_loaded:function', 'fm1ntt_render:function', 'fm1ntt_screen:function', 'fm1ntt_key:function', 'fm1ntt_jit:function', 'fm1ntt_version:function', 'fm1ntt_error:function'];
+  'fm1ntt_load_package:function', 'fm1ntt_loaded:function', 'fm1ntt_render:function', 'fm1ntt_screen:function', 'fm1ntt_key:function', 'fm1ntt_jit:function', 'fm1ntt_version:function', 'fm1ntt_error:function', 'fm1ntt_audition:function'];
 const missing = want.filter((w) => !exp.has(w));
 if (imp.length !== 1 || imp[0] !== 'env.fm1_jit_compile:function') { console.error('imports must be exactly env.fm1_jit_compile, got', imp); process.exit(1); }
 if (missing.length) { console.error('missing exports:', missing); process.exit(1); }

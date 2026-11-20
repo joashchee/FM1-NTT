@@ -4315,11 +4315,17 @@ static int selftest(void) {
             int ok = fwb && fm1ntt_load_package(bm, fwb, n2) == 0;
             free(fwb);
             int16_t pcm2[1024];
-            for (int k = 0; ok && k < 40 && !fm1ntt_halted(bm); k++) fm1ntt_render(bm, pcm2, 512, 2000000);
+            /* a firmware that draws late (a MIDI monitor waits for its first message) gets up to 8 emulated seconds to light its screen; the rest stop at once */
             static uint32_t scr[FM1_SCREEN_W * FM1_SCREEN_H];
-            fm1ntt_screen(bm, scr);
-            int colours = 0; uint32_t seen[16] = {0};
-            for (int k = 0; k < FM1_SCREEN_W * FM1_SCREEN_H && colours < 16; k++) { int f = 0; for (int q = 0; q < colours; q++) if (seen[q] == scr[k]) f = 1; if (!f) seen[colours++] = scr[k]; }
+            int colours = 0;
+            for (int k = 0; ok && k < 700 && !fm1ntt_halted(bm) && (colours < 8); k++) {
+                fm1ntt_render(bm, pcm2, 512, 2000000);
+                if (k % 40 != 39) continue;
+                fm1ntt_screen(bm, scr);
+                uint32_t seen[16] = {0};
+                colours = 0;
+                for (int q = 0; q < FM1_SCREEN_W * FM1_SCREEN_H && colours < 16; q++) { int f = 0; for (int r = 0; r < colours; r++) if (seen[r] == scr[q]) f = 1; if (!f) seen[colours++] = scr[q]; }
+            }
             if (!ok || fm1ntt_halted(bm) || colours < 8) fprintf(stderr, "  bundled firmware %s: %s\n", b2.files[i], !ok ? "did not load" : fm1ntt_halted(bm) ? "halted" : "drew almost nothing");
             booted += ok && !fm1ntt_halted(bm) && colours >= 8;
             fm1ntt_free(bm);

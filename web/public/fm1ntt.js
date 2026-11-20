@@ -102,6 +102,35 @@ export class Engine {
   newMachine() {
     return new Machine(this);
   }
+  /**
+   * The standard audition of a `.fwsc` package (`core/src/audition.rs`): four notes, no wall clock, so the same firmware gives the same answer on any computer.
+   * Returns `{ verdict: 'pass' | 'silent' | 'blank' | 'halted', colours, peak, rmsDb, active, emulatedMs, size, sha256, png }` (`png` a Uint8Array of the final screen),
+   * or throws an Error with the core's reason when the file is not a package. It runs the whole script before it returns: call it in a Worker.
+   */
+  audition(bytes) {
+    const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (b.length === 0 || b.length > MAX_PACKAGE_BYTES) throw new Error(`a firmware package is 1 to ${MAX_PACKAGE_BYTES} bytes, this is ${b.length}`);
+    const x = this.x, OUT = 112, PNG_CAP = 240 * 240 * 3 + 240 + 4096; // the C struct (wasm32: sha256 at 40) and a stored-deflate PNG of the screen
+    const fw = x.fm1ntt_wasm_alloc(b.length), out = x.fm1ntt_wasm_alloc(OUT), png = x.fm1ntt_wasm_alloc(PNG_CAP);
+    try {
+      if (!fw || !out || !png) throw new Error('the module refused an allocation');
+      new Uint8Array(x.memory.buffer, fw, b.length).set(b);
+      if (x.fm1ntt_audition(fw, b.length, out, png, PNG_CAP) !== 0) throw new Error(this.lastError() || 'the core refused this file');
+      const dv = new DataView(x.memory.buffer, out, OUT);
+      const pngLen = dv.getUint32(20, true);
+      return {
+        verdict: ['pass', 'silent', 'blank', 'halted'][dv.getInt32(0, true)] ?? 'halted',
+        colours: dv.getUint32(4, true), peak: dv.getInt32(8, true), emulatedMs: dv.getUint32(12, true), size: dv.getUint32(16, true),
+        rmsDb: dv.getFloat64(24, true), active: dv.getFloat64(32, true),
+        sha256: this.cstr(out + 40),
+        png: pngLen <= PNG_CAP ? new Uint8Array(x.memory.buffer, png, pngLen).slice() : new Uint8Array(0),
+      };
+    } finally {
+      if (fw) x.fm1ntt_wasm_free(fw, b.length);
+      if (out) x.fm1ntt_wasm_free(out, OUT);
+      if (png) x.fm1ntt_wasm_free(png, PNG_CAP);
+    }
+  }
 }
 
 export class Machine {
