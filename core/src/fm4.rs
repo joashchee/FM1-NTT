@@ -86,7 +86,7 @@ pub const L_DEST: u16 = 5;
 pub const L_AMOUNT_A: u16 = 6;
 /// OPERATOR's Dest B (one target, its own Amount B): 0 Off, 1 to 4 Osc Vol A to D, 5 X-Fade A/C, 6 X-Fade B/D, 7 Feedback, 8 Fixed Freq, 9 FM Drive, 10 Filter Freq, 11 Filter Q,
 /// 12 Filter Res, 13 Morph, 14 Flt Drive, 15 Filter Env, 16 Shp Drive, 17 LFO Rate, 18 LFO Amt, 19 Pitch Env, 20 Volume, 21 Pan, 22 Tone, 23 Time (the menu's order). **Only Osc Vol A to D
-/// and Volume, FM Drive and Feedback act so far**: FM Drive scales every modulator's index by the same gain as Osc Vol; Feedback adds amount x Amount B x value (a fraction of the full feedback, never below 0) to the feedback of operators B to D (OPERATOR's A has none). The gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
+/// and Volume, FM Drive, Feedback and the filter's Freq, Q and Res act so far**: FM Drive scales every modulator's index by the same gain as Osc Vol; Feedback adds amount x Amount B x value (a fraction of the full feedback, never below 0) to the feedback of operators B to D (OPERATOR's A has none). The gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
 pub const L_DEST_B: u16 = 7;
 pub const L_AMOUNT_B: u16 = 8;
 /// OPERATOR's Rate<Key, percent (-100 to 100): each note's LFO rate is the set rate times `2^(percent / 100 x (note - 60) / 12)` (measured at +100 %: 2.44, 4.88 and 9.78 Hz on notes 45, 57 and 69 from 5.8). Not applied to the free-running LFO.
@@ -108,6 +108,8 @@ const SYNC_QUARTERS: [f64; 15] = [0.125, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 
 /// Bit 4 of `L_DEST`: the filter's cutoff follows the LFO. Measured: the cutoff swings by plus and minus this many octaves at 100 % (a sine, geometrically about its own value).
 pub const L_FILTER_BIT: i32 = 16;
 const L_FILTER_OCTAVES: f64 = 2.84;
+/// Dest B's Filter Freq swings the cutoff by this many octaves either way at 100 % (0.75 octave peak to peak at 10 %; Dest A's is 2.84).
+const L_FILTER_B_OCTAVES: f64 = 3.75;
 pub const P_COUNT: usize = LFO_BASE as usize + LFO_PARAMS as usize;
 const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
 
@@ -191,7 +193,7 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
             L_DEST => ("LFO TARGETS (BITS: 1-8 OPERATORS 16 FILTER)", 0, 31, 15, ""),
             L_AMOUNT_A => ("LFO AMOUNT A", -100, 100, 100, "%"),
-            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 7 FEEDBACK, 9 FM DRIVE, 20 VOLUME; REST NOT YET)", 0, 23, 0, ""),
+            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 7 FEEDBACK, 9 FM DRIVE, 10-12 FILTER FREQ Q RES, 20 VOLUME)", 0, 23, 0, ""),
             L_AMOUNT_B => ("LFO AMOUNT B", -100, 100, 100, "%"),
             L_RATE_KEY => ("LFO RATE<KEY", -100, 100, 0, "%"),
             L_AMT_VEL => ("LFO AMT<VEL", 0, 100, 0, "%"),
@@ -676,8 +678,16 @@ impl Engine for Fm4 {
                 if !v.held && (0..OPS).all(|k| alg.carriers >> k & 1 == 0 || v.ops[k].env < 1e-4) {
                     v.active = false;
                 }
-                if f_on && l_filter && n & 7 == 0 {
-                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(L_FILTER_OCTAVES * depth_v * lshape)).clamp(5.0, rate * 0.45), f_q, rate);
+                if f_on && (l_filter || (10..=12).contains(&l_dest_b)) && lfo_on && n & 7 == 0 {
+                    let mut oct = if l_filter { L_FILTER_OCTAVES * depth_v * lshape } else { 0.0 };
+                    let mut q = f_q;
+                    if l_dest_b == 10 {
+                        oct += L_FILTER_B_OCTAVES * depth_bv * lshape;
+                    } else if l_dest_b >= 11 {
+                        // Filter Q and Filter Res act alike: the resonance goes up by amount x value (to 1.0, where the filter nearly rings)
+                        q = 0.5 / (1.0 - 0.97 * (f_res + depth_bv * lshape).clamp(0.0, 1.0));
+                    }
+                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(oct)).clamp(5.0, rate * 0.45), q, rate);
                 }
                 if f_on {
                     let c = &fco[vi];
@@ -1750,5 +1760,55 @@ mod tests {
         assert!((fast / std - 2.2).abs() < 0.6, "30 Hz against 6.3 Hz: {}", fast / std);
         assert!((slow / std - 0.33).abs() < 0.12, "0.77 Hz against 6.3 Hz: {}", slow / std);
         assert!(ac100 > 0.4, "Noise at 0.77 Hz is still correlated at 100 ms: {ac100}");
+    }
+
+    /// OPERATOR 0.7's LFO Dest B on the filter (2026-11-20; a Saw D and a 24 dB low-pass at 846 Hz): Filter Freq at 10 % swung the fitted cutoff 501 to 843 Hz (0.75 octave, wider
+    /// than Dest A's 0.57), and Filter Q and Filter Res (the same behaviour) rang the filter up by some 40 dB at the LFO's peaks, harmonic 3 rising from -41 to +1 dB.
+    #[test]
+    fn fitted_to_operator_lfo_dest_b_on_the_filter() {
+        let spectrum = |target: i32, amount: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_WAVE), 10);
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(FILT_BASE + F_FREQ, 846);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_DEST, 0);
+            e.set(LFO_BASE + L_AMOUNT, amount);
+            e.set(LFO_BASE + L_DEST_B, target);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[4410..].iter().map(|&v| f64::from(v) / 32768.0).collect();
+            // the third harmonic's level (dB) in each 20 ms window
+            (0..x.len() - 882)
+                .step_by(441)
+                .map(|a| {
+                    let w = std::f64::consts::TAU * 3.0 * 220.0 / 44_100.0;
+                    let (mut c, mut s) = (0.0, 0.0);
+                    for i in 0..882 {
+                        let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / 882.0).cos();
+                        c += x[a + i] * win * (w * i as f64).cos();
+                        s += x[a + i] * win * (w * i as f64).sin();
+                    }
+                    20.0 * (c.hypot(s) / 220.5).max(1e-9).log10()
+                })
+                .collect::<Vec<f64>>()
+        };
+        let range = |v: &[f64]| (v.iter().cloned().fold(f64::MAX, f64::min), v.iter().cloned().fold(f64::MIN, f64::max));
+        let (lo, hi) = range(&spectrum(0, 100));
+        assert!(hi - lo < 1.0, "Off: steady {lo} {hi}");
+        // Res and Q at 100 %: harmonic 3 (near the cutoff) rings far above its resting level
+        for target in [11, 12] {
+            let (lo, hi) = range(&spectrum(target, 100));
+            assert!(hi - lo > 25.0, "target {target}: harmonic 3 swung only {} dB", hi - lo);
+        }
+        // Freq at 10 %: the cutoff moves a little, so the third harmonic moves a few dB
+        let (lo, hi) = range(&spectrum(10, 10));
+        assert!(hi - lo > 2.0 && hi - lo < 15.0, "Filter Freq at 10 percent: {} dB", hi - lo);
+        let (lo2, hi2) = range(&spectrum(10, 100));
+        assert!(hi2 - lo2 > 15.0, "and a lot at 100 percent");
     }
 }
