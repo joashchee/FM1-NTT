@@ -170,6 +170,11 @@ fn main() -> ExitCode {
                 }
                 let _ = fs::write(f[1], s);
             }
+            // `dump:FILE`: after a play, the recording as raw little-endian f32 mono at 44.1 kHz (for a time-resolved look: a pitch or filter sweep)
+            "dump" => {
+                let b: Vec<u8> = rec.iter().flat_map(|v| (*v as f32).to_le_bytes()).collect();
+                let _ = fs::write(f[1], b);
+            }
             "play" | "fm4" => {
                 let off = usize::from(f[0] == "fm4");
                 let note: u8 = f[1 + off].parse().unwrap_or(57);
