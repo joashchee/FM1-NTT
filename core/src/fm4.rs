@@ -85,7 +85,7 @@ pub const L_DEST: u16 = 5;
 pub const L_AMOUNT_A: u16 = 6;
 /// OPERATOR's Dest B (one target, its own Amount B): 0 Off, 1 to 4 Osc Vol A to D, 5 X-Fade A/C, 6 X-Fade B/D, 7 Feedback, 8 Fixed Freq, 9 FM Drive, 10 Filter Freq, 11 Filter Q,
 /// 12 Filter Res, 13 Morph, 14 Flt Drive, 15 Filter Env, 16 Shp Drive, 17 LFO Rate, 18 LFO Amt, 19 Pitch Env, 20 Volume, 21 Pan, 22 Tone, 23 Time (the menu's order). **Only Osc Vol A to D
-/// and Volume act so far**: the gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
+/// and Volume, FM Drive and Feedback act so far**: FM Drive scales every modulator's index by the same gain as Osc Vol; Feedback adds amount x Amount B x value (a fraction of the full feedback, never below 0) to the feedback of operators B to D (OPERATOR's A has none). The gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
 pub const L_DEST_B: u16 = 7;
 pub const L_AMOUNT_B: u16 = 8;
 pub const LFO_PARAMS: u16 = 9;
@@ -175,7 +175,7 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
             L_DEST => ("LFO TARGETS (BITS: 1-8 OPERATORS 16 FILTER)", 0, 31, 15, ""),
             L_AMOUNT_A => ("LFO AMOUNT A", -100, 100, 100, "%"),
-            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 20 VOLUME; REST NOT YET)", 0, 23, 0, ""),
+            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 7 FEEDBACK, 9 FM DRIVE, 20 VOLUME; REST NOT YET)", 0, 23, 0, ""),
             L_AMOUNT_B => ("LFO AMOUNT B", -100, 100, 100, "%"),
             _ => return None,
         };
@@ -491,8 +491,10 @@ impl Engine for Fm4 {
         // feedback: each operator's own output (level and envelope included) fed back into its phase, the mean of the last two samples, up to P_FEEDBACK at 100 %
         let fb_max = self.p[P_FEEDBACK as usize] as f64 / 100.0;
         let mut fb = [0.0; OPS];
+        let mut fbf = [0.0; OPS];
         for (op, f) in fb.iter_mut().enumerate() {
-            *f = self.op(op, O_FEEDBACK) as f64 / 100.0 * fb_max;
+            fbf[op] = self.op(op, O_FEEDBACK) as f64 / 100.0;
+            *f = fbf[op] * fb_max;
         }
         let master = self.p[P_LEVEL as usize] as f64 / 100.0 * 0.3;
         let live = self.voices.iter().filter(|v| v.active).count().max(1);
@@ -540,6 +542,7 @@ impl Engine for Fm4 {
                 let mut lmul = 1.0;
                 let mut lshape = 0.0;
                 let mut gain_b = 1.0;
+                let mut fm_gain = 1.0;
                 if lfo_on {
                     let prev = if l_retrig { v.lph } else { free_ph };
                     let ph = if l_retrig { v.lph } else { free_ph };
@@ -565,6 +568,9 @@ impl Engine for Fm4 {
                     };
                     lshape = shape;
                     gain_b = (1.0 + l_depth_b * shape).max(0.0);
+                    if l_dest_b == 9 {
+                        fm_gain = gain_b;
+                    }
                     lmul = 2f64.powf(l_depth * shape);
                     let next = ph + l_dph;
                     let nph = next - next.floor();
@@ -594,11 +600,12 @@ impl Engine for Fm4 {
                     let mut pm = 0.0;
                     for (k, o) in v.ops.iter().enumerate().take(OPS) {
                         if alg.modulators[op] >> k & 1 == 1 {
-                            pm += index * o.out;
+                            pm += index * o.out * fm_gain;
                         }
                     }
                     let s = &mut v.ops[op];
-                    pm += fb[op] * 0.5 * (v.fb[op][0] + v.fb[op][1]);
+                    let fbk = if l_dest_b == 7 && op >= 1 { (fbf[op] + l_depth_b * lshape).max(0.0) * fb_max } else { fb[op] };
+                    pm += fbk * 0.5 * (v.fb[op][0] + v.fb[op][1]);
                     let inc = if fixed[op] > 0.0 { fixed[op] / rate } else { v.f0 * bend * ratio[op] * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
                     s.ph += inc;
                     s.ph -= s.ph.floor();
@@ -1429,5 +1436,115 @@ mod tests {
         assert!((a / b - 1.0).abs() < 0.03, "Osc Vol C leaves operator A alone");
         let (a, b) = range(1, 100, 50);
         assert!((a / one - 0.5).abs() < 0.06 && (b / one - 1.5).abs() < 0.06, "Amount B at 50 percent");
+    }
+
+    /// OPERATOR 0.7's LFO Dest B on FM Drive (the fitted index of B into A swung 0.52 to 2.64 about 1.58 at 69 %, 0.30 to 2.84 at 100 %: the same 1 + amount x value as
+    /// Osc Vol) and on Feedback (a lone B in algorithm 11 with no base feedback sounded feedback only on the positive half of the LFO, clamped at zero below it).
+    #[test]
+    fn fitted_to_operator_lfo_dest_b_on_fm_drive_and_feedback() {
+        let build = |target: i32, amount: i32, fb: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(P_ALGORITHM, 0);
+            e.set(P_INDEX, 628);
+            for op in 0..OPS {
+                for (field, v) in [(O_ATTACK, 1), (O_DECAY, 998), (O_SUSTAIN, 99), (O_RELEASE, 399), (O_LEVEL, 99), (O_FEEDBACK, 0)] {
+                    e.set(op_param(op, field), v);
+                }
+            }
+            for op in 2..OPS {
+                e.set(op_param(op, O_LEVEL), 0);
+            }
+            e.set(op_param(1, O_FEEDBACK), fb);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_DEST, 0);
+            e.set(LFO_BASE + L_AMOUNT, amount);
+            e.set(LFO_BASE + L_DEST_B, target);
+            e.note_on(57, 127);
+            e
+        };
+        // FM Drive: B into A at -12 dB (index 1.58 rad), the fitted index per 20 ms window against a phase-modulation table
+        let table: Vec<(f64, Vec<f64>)> = (0..=160)
+            .map(|b| {
+                let beta = f64::from(b) * 0.05;
+                let n = 256;
+                let y: Vec<f64> = (0..n).map(|t| (std::f64::consts::TAU * t as f64 / n as f64 + beta * (std::f64::consts::TAU * t as f64 / n as f64).sin()).sin()).collect();
+                let h = (1..=7)
+                    .map(|k| {
+                        let (mut c, mut s) = (0.0, 0.0);
+                        for (t, v) in y.iter().enumerate() {
+                            let a = std::f64::consts::TAU * (k * t) as f64 / n as f64;
+                            c += v * a.cos();
+                            s += v * a.sin();
+                        }
+                        2.0 * c.hypot(s) / n as f64
+                    })
+                    .collect();
+                (beta, h)
+            })
+            .collect();
+        let betas = |amount: i32, target: i32| {
+            let mut e = build(target, amount, 0);
+            e.set(op_param(1, O_LEVEL), 83);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[4410..].iter().map(|&v| f64::from(v) / 32768.0 / 0.0484).collect();
+            let mut out = vec![];
+            for a in (0..x.len() - 882).step_by(441) {
+                let amp: Vec<f64> = (1..=7)
+                    .map(|k| {
+                        let w = std::f64::consts::TAU * f64::from(k) * 220.0 / 44_100.0;
+                        let (mut c, mut s) = (0.0, 0.0);
+                        for i in 0..882 {
+                            let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / 882.0).cos();
+                            c += x[a + i] * win * (w * i as f64).cos();
+                            s += x[a + i] * win * (w * i as f64).sin();
+                        }
+                        c.hypot(s) / 220.5
+                    })
+                    .collect();
+                let best = table.iter().map(|(b, h)| (amp.iter().zip(h).map(|(a, h)| (a - h).powi(2)).sum::<f64>(), *b)).fold((f64::MAX, 0.0), |m, v| if v.0 < m.0 { v } else { m });
+                out.push(best.1);
+            }
+            (out.iter().cloned().fold(f64::MAX, f64::min), out.iter().cloned().fold(0.0, f64::max))
+        };
+        let (lo, hi) = betas(0, 0);
+        assert!((lo - 1.58).abs() < 0.25 && (hi - 1.58).abs() < 0.25, "no target: steady at 1.58, got {lo} {hi}");
+        let (lo, hi) = betas(69, 9);
+        assert!(lo < 0.9 && hi > 2.2, "FM Drive at 69 percent swings the index (OPERATOR: 0.52 to 2.64): {lo} {hi}");
+        let (lo10, hi10) = betas(10, 9);
+        assert!(lo10 > 1.3 && hi10 < 1.9 && hi10 - lo10 > 0.1, "and at 10 percent only a little (1.44 to 1.70): {lo10} {hi10}");
+        // Feedback: B alone (algorithm 11), base 0 and the LFO at 100 %: harmonics only while the LFO is positive
+        let mut e = build(7, 100, 0);
+        e.set(P_ALGORITHM, 10);
+        e.set(op_param(0, O_LEVEL), 0);
+        let mut x = vec![0i16; 44_100];
+        e.render(&mut x);
+        let x: Vec<f64> = x[4410..].iter().map(|&v| f64::from(v) / 32768.0).collect();
+        let dist = |a: usize| {
+            // how far a 10 ms window is from a pure sine: the harmonics' share
+            let w1 = std::f64::consts::TAU * 220.0 / 44_100.0;
+            let (mut c, mut s, mut tot) = (0.0, 0.0, 0.0);
+            for i in 0..441 {
+                c += x[a + i] * (w1 * i as f64).cos();
+                s += x[a + i] * (w1 * i as f64).sin();
+                tot += x[a + i] * x[a + i];
+            }
+            let fund = (c * c + s * s) * 2.0 / 441.0;
+            1.0 - fund / tot.max(1e-12)
+        };
+        let shares: Vec<f64> = (0..x.len() - 441).step_by(441).map(dist).collect();
+        let shares: Vec<f64> = shares.iter().map(|&v| if v < 0.05 { 0.0 } else { v }).collect();
+        let hi = shares.iter().cloned().fold(0.0, f64::max);
+        let quiet = shares.iter().filter(|&&v| v == 0.0).count() as f64 / shares.len() as f64;
+        assert!(hi > 0.1, "feedback shows at the LFO's peaks: {hi}");
+        assert!(quiet > 0.3 && quiet < 0.8, "and not on the negative half: {quiet} of the windows are clean");
+        // with Dest B off the same patch is a clean sine throughout
+        let mut e = build(0, 100, 0);
+        e.set(P_ALGORITHM, 10);
+        e.set(op_param(0, O_LEVEL), 0);
+        let mut y = vec![0i16; 8820];
+        e.render(&mut y);
+        assert!(y.iter().any(|&v| v != 0));
     }
 }
