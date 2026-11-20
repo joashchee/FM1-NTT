@@ -50,6 +50,9 @@ pub struct Instrument {
     bank_names: Vec<String>,
     /// notes held in mono mode, in the order played (the last one sounds)
     mono_stack: Vec<(u8, u8)>,
+    /// the sustain pedal (CC 64) is down, and the keys let go of meanwhile
+    pedal: bool,
+    pedal_held: Vec<u8>,
     // MIDI parser state
     status: u8,
     data: [u8; 2],
@@ -121,6 +124,8 @@ impl Instrument {
             globals: Globals::new(),
             bank_names: vec![String::new(); crate::package::MAX_BANKS],
             mono_stack: Vec::with_capacity(16),
+            pedal: false,
+            pedal_held: Vec::with_capacity(16),
             status: 0,
             data: [0; 2],
             have: 0,
@@ -353,6 +358,11 @@ impl Instrument {
 
     /// A key goes down: to the arpeggiator when it is on (which plays the engine from its own clock), else straight to the engine.
     pub fn note_on(&mut self, note: u8, velocity: u8) {
+        // struck again while the pedal held it: the old strike is let go (the new one is the finger's)
+        if let Some(k) = self.pedal_held.iter().position(|&n| n == note) {
+            self.pedal_held.remove(k);
+            self.engine.note_off(note);
+        }
         let velocity = self.globals.velocity(velocity);
         if self.globals.get(G_MONO) == Some(1) && !self.arp.on() && !self.seq.on() {
             let top = self.mono_stack.last().map(|&(n, _)| n);
@@ -380,7 +390,24 @@ impl Instrument {
         }
     }
 
+    /// The sustain pedal: while it is down a key let go of keeps sounding, and the keys let go of meanwhile are released together when it comes up. Not with the arpeggiator
+    /// (its own latch does that).
+    pub fn sustain(&mut self, down: bool) {
+        self.pedal = down;
+        if !down {
+            for n in std::mem::take(&mut self.pedal_held) {
+                self.note_off(n);
+            }
+        }
+    }
+
     pub fn note_off(&mut self, note: u8) {
+        if self.pedal && !self.arp.on() {
+            if !self.pedal_held.contains(&note) && self.pedal_held.len() < 128 {
+                self.pedal_held.push(note);
+            }
+            return;
+        }
         if self.arp.on() {
             self.arp.note_off(note);
         } else if self.globals.get(G_MONO) == Some(1) && !self.seq.on() {
@@ -404,6 +431,7 @@ impl Instrument {
 
     pub fn all_off(&mut self) {
         self.mono_stack.clear();
+        self.pedal_held.clear();
         self.arp.all_off();
         self.seq.all_off();
         self.flush_arp();
@@ -582,6 +610,8 @@ impl Instrument {
                 0 if !self.map.iter().any(|m| m.cc == 0) => {
                     self.set_bank(usize::from(d1));
                 }
+                // the sustain pedal (the stock FM-1's CC 64, 64 and up is down), unless the package maps it
+                64 if !self.map.iter().any(|m| m.cc == 64) => self.sustain(d1 >= 64),
                 _ => {
                     self.cc(d0, d1);
                 }
@@ -1471,5 +1501,31 @@ mod tests_globals {
             r.iter().map(|&v| i32::from(v).abs()).max().unwrap_or(0)
         };
         assert_ne!(peak_first(0), peak_first(1), "the two paths differ");
+    }
+
+    #[test]
+    fn the_sustain_pedal_holds_released_keys_until_it_comes_up() {
+        let mut m = analog();
+        m.midi_bytes(&[0x90, 60, 100, 0xB0, 64, 127, 0x80, 60, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 1, "let go of with the pedal down: still sounding");
+        m.midi_bytes(&[0xB0, 64, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 0, "the pedal up releases it");
+        // a key still held when the pedal comes up keeps sounding
+        m.midi_bytes(&[0xB0, 64, 127, 0x90, 60, 100, 0x90, 64, 100, 0x80, 60, 0, 0xB0, 64, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 1);
+        // a key let go of under the pedal and struck again is held by the finger: the pedal coming up leaves it
+        m.midi_bytes(&[0xB0, 64, 127, 0x80, 64, 0, 0x90, 64, 100, 0xB0, 64, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 1);
+        m.midi_bytes(&[0x80, 64, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 0);
+        let mut m = analog();
+        m.midi_bytes(&[0xB0, 64, 127, 0x90, 60, 100, 0x80, 60, 0, 0xB0, 123, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 0, "all notes off lets go");
     }
 }
