@@ -1030,17 +1030,34 @@ static void midi_ok(App *a, int down) {
 /* groups: 0 the engine, 1 the arpeggiator, 2 the sequencer's settings, 3 the pattern being edited (its voice and steps), 4 the global settings (channels, bend range, velocity, mono), then one for each effect */
 enum { ED_GLOBAL = 4, ED_FX0 = 5 };
 static int ed_groups(const App *a) { return ED_FX0 + (int)fm1ntt_inst_fx_count(a->inst); }
-static int ed_count(const App *a, int g) {
+/* One extra row ends a group that has something to choose besides parameters (no new keys: Left and Right change it like any row): the engine's group gets BANK when the
+ * instrument has more than one bank of voices (same slot, another bank), and an effect's group gets POSITION when the chain has more than one effect (Left and Right move it
+ * earlier or later, and the editor follows it). Neither is a stored parameter: the bank is not saved, the order is (the package writes the chain in order). */
+enum { ED_V_ID = 100000 };
+static int ed_virtual(const App *a, int g) {
+    if (!a->inst) return 0;
+    if (g == 0) return fm1ntt_inst_bank_count(a->inst) > 1;
+    return g >= ED_FX0 && fm1ntt_inst_fx_count(a->inst) > 1;
+}
+static int ed_count_real(const App *a, int g) {
     if (!a->inst) return 0;
     return (int)(g == 0 ? fm1ntt_inst_param_count(a->inst) : g == 1 ? fm1ntt_inst_arp_count(a->inst) : g == ED_GLOBAL ? fm1ntt_inst_global_count(a->inst) : g < ED_FX0 ? fm1ntt_inst_seq_count(a->inst, (size_t)g - 2) : fm1ntt_inst_fx_param_count(a->inst, (size_t)g - ED_FX0));
 }
+static int ed_count(const App *a, int g) { return ed_count_real(a, g) + ed_virtual(a, g); }
 /* Parameter i of group g: { id, min, max, default } and its name; 0 ok. */
 static int ed_info(const App *a, int g, int i, int32_t info[4], char *name, size_t cap) {
     if (!a->inst || i < 0) return -1;
+    if (ed_virtual(a, g) && i == ed_count_real(a, g)) {
+        int top = g == 0 ? (int)fm1ntt_inst_bank_count(a->inst) - 1 : (int)fm1ntt_inst_fx_count(a->inst) - 1;
+        info[0] = ED_V_ID; info[1] = 0; info[2] = top; info[3] = 0;
+        snprintf(name, cap, "%s", g == 0 ? "BANK (0 FIRST)" : "POSITION (0 FIRST)");
+        return 0;
+    }
     return g == 0 ? fm1ntt_inst_param(a->inst, (size_t)i, info, name, cap) : g == 1 ? fm1ntt_inst_arp_param(a->inst, (size_t)i, info, name, cap)
          : g == ED_GLOBAL ? fm1ntt_inst_global_param(a->inst, (size_t)i, info, name, cap) : g < ED_FX0 ? fm1ntt_inst_seq_param(a->inst, (size_t)g - 2, (size_t)i, info, name, cap) : fm1ntt_inst_fx_param(a->inst, (size_t)g - ED_FX0, (size_t)i, info, name, cap);
 }
 static int ed_get(const App *a, int g, int id) {
+    if (id == ED_V_ID) return g == 0 ? (int)fm1ntt_inst_bank(a->inst) : g - ED_FX0;
     return g == 0 ? fm1ntt_inst_get(a->inst, id) : g == 1 ? fm1ntt_inst_arp_get(a->inst, id) : g == ED_GLOBAL ? fm1ntt_inst_global_get(a->inst, id) : g < ED_FX0 ? fm1ntt_inst_seq_get(a->inst, id) : fm1ntt_inst_fx_get(a->inst, (size_t)g - ED_FX0, id);
 }
 static void ed_title(const App *a, int g, char *out, size_t n) {
@@ -1053,6 +1070,12 @@ static void ed_title(const App *a, int g, char *out, size_t n) {
 }
 static void ed_set(App *a, int g, int id, int v) {
     lock(a);
+    if (id == ED_V_ID) {
+        if (g == 0) fm1ntt_inst_bank_set(a->inst, (size_t)v);          /* not an edit of the package: the bank is where the player is */
+        else if (v != g - ED_FX0 && fm1ntt_inst_fx_move(a->inst, (size_t)g - ED_FX0, (size_t)v) == 0) { a->ed_group = ED_FX0 + v; a->ed_dirty = 1; }
+        unlock(a);
+        return;
+    }
     if (g == 0) fm1ntt_inst_set(a->inst, id, v);
     else if (g == 1) fm1ntt_inst_arp_set(a->inst, id, v);
     else if (g == ED_GLOBAL) fm1ntt_inst_global_set(a->inst, id, v);
@@ -4011,7 +4034,7 @@ static int selftest(void) {
                     a.ed_sel = 30; fill_ui(&a, ui, 0); CHECK(ui->ed_page == 1 && ui->ed_n == 9 && ui->ed_sel == 6);   /* the second page holds the last 9 rows */
                     act(&a, A_START); CHECK(a.ed_group == 4);                                       /* the global settings: channels, bend range, velocity, mono */
                     fill_ui(&a, ui, 0);
-                    CHECK(ui->ed_total == 7 && !strcmp(ui->ed_title, "GLOBAL") && ui->ed_row[2].max == 24);
+                    CHECK(ui->ed_total == 8 && !strcmp(ui->ed_title, "GLOBAL") && ui->ed_row[2].max == 24);
                     a.ed_sel = 2; act(&a, A_RIGHT); CHECK(fm1ntt_inst_global_get(a.inst, 2) == 3 && a.ed_dirty);   /* BEND RANGE 2 to 3 */
                     a.ed_group = 3; a.ed_sel = 1; act(&a, A_X); CHECK(fm1ntt_inst_seq_get(a.inst, 101) == 0);
                     act(&a, A_SELECT); act(&a, A_SELECT); act(&a, A_SELECT); CHECK(a.ed_group == 0);
@@ -4019,6 +4042,28 @@ static int selftest(void) {
                     char sp2[400]; sub_path(sp2, sizeof sp2, "instruments", "selftest-edit.fm1i");
                     CHECK(is_file(sp2) && a.msg_style == 1 && !a.ed_dirty && is_file(ip));
                     CHECK(inst_load(&a, sp2) == 0 && fm1ntt_inst_get(a.inst, 2) == c1 && fm1ntt_inst_arp_get(a.inst, 0) == 1 && fm1ntt_inst_global_get(a.inst, 2) == 3);   /* the edits came back */
+                    {   /* the effect chain's order from the editor: POSITION ends an effect's group when there are two or more; Left and Right move it and the editor follows */
+                        char fp[256];
+                        snprintf(fp, sizeof fp, "%s/selftest-fx.fm1i", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+                        FILE *ff = fopen(fp, "wb");
+                        CHECK(ff != NULL);
+                        if (ff) {
+                            fputs("fm1i = 1\nname = FxTest\nengine = analog\nlicence = MIT\nfx = delay\nfx = reverb\n", ff);
+                            fclose(ff);
+                            CHECK(inst_load(&a, fp) == 0 && fm1ntt_inst_fx_count(a.inst) == 2);
+                            char n0[24], n1[24]; int np = (int)fm1ntt_inst_fx_param_count(a.inst, 0);
+                            fm1ntt_inst_fx_name(a.inst, 0, n0, sizeof n0);
+                            a.ed_on = 1; a.ed_group = ED_FX0; a.ed_sel = np;
+                            fill_ui(&a, ui, 0);
+                            CHECK(ui->ed_total == np + 1 && !strcmp(ui->ed_row[(np) % ED_ROWS].name, "POSITION (0 FIRST)") && ui->ed_row[np % ED_ROWS].val == 0);
+                            act(&a, A_RIGHT);                                                  /* later: the delay is second now, and the editor is on it */
+                            fm1ntt_inst_fx_name(a.inst, 1, n1, sizeof n1);
+                            CHECK(!strcmp(n0, n1) && a.ed_group == ED_FX0 + 1 && a.ed_dirty);
+                            act(&a, A_RIGHT); CHECK(a.ed_group == ED_FX0 + 1);                  /* clamped at the end */
+                            act(&a, A_LEFT); CHECK(a.ed_group == ED_FX0);
+                            remove(fp);
+                        }
+                    }
                     /* it is in the FILES list and A plays it */
                     a.panel = PANEL_FILES; scan_files(&a);
                     int fi = -1; for (int i = 0; i < a.nfiles; i++) if (!strcmp(a.files[i], "selftest-edit.fm1i")) fi = i;
