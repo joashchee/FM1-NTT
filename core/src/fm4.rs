@@ -134,8 +134,22 @@ pub const F2_ENV_DECAY: u16 = 9;
 pub const F2_ENV_SUSTAIN: u16 = 10;
 /// Filter envelope release in milliseconds (50 by default).
 pub const F2_ENV_RELEASE: u16 = 11;
-pub const F2_PARAMS: u16 = 12;
-const F_ENV_OCTAVES: f64 = 6.0;
+/// Filter envelope levels page (percent of the envelope's own scale): where the attack starts (0 by default), the peak it rises to and falls from (100) and where the release goes (0).
+/// Measured on OPERATOR: Peak 0 removes the envelope; Initial 1.00 with a 135 ms attack holds the peak level from the strike; End 1.00 raises the cutoff after the note is let go.
+/// Peak between 0 and 1 and the in-between Initial and End values are assumed linear, not measured.
+pub const F2_ENV_INITIAL: u16 = 12;
+pub const F2_ENV_PEAK: u16 = 13;
+pub const F2_ENV_END: u16 = 14;
+/// Filter envelope Time<Vel, percent (-100 to 100): every time of the envelope is multiplied by `e^(-1.4 x percent / 100 x velocity / 127)`. Measured at +100 % (decay scales 0.25 at
+/// velocity 127 and 0.7 at 32, the attack and release likewise); other percentages and the negative side are assumed to follow the same law.
+pub const F2_ENV_TIMEVEL: u16 = 15;
+/// Filter envelope Mode (0 None, 1 Loop, 2 Beat) and Repeat (the LFO's Synced ladder, 3 = 1/8T by default). **Beat** is measured: the envelope strikes again at every Repeat period at the
+/// GLO tempo (1/8T at 120 restarted it every 0.175 to 0.185 s, the same engine factor as the LFO's sync, and each restart peaks as high as the first strike). **Loop** is accepted and does
+/// nothing here: with Loop Times of 3 ms, 100 ms and 2.45 s, sustain 0 and 40 %, the cutoff followed the plain envelope, so what it loops is not understood.
+pub const F2_ENV_MODE: u16 = 16;
+pub const F2_ENV_REPEAT: u16 = 17;
+pub const F2_PARAMS: u16 = 18;
+const F_ENV_OCTAVES: f64 = 9.0;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
 const NOISE_HZ: f64 = 400.0;
@@ -235,6 +249,12 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             F2_ENV_DECAY => ("FILTER ENV DECAY", 1, 10_000, 598, "ms"),
             F2_ENV_SUSTAIN => ("FILTER ENV SUSTAIN", 0, 100, 0, "%"),
             F2_ENV_RELEASE => ("FILTER ENV RELEASE", 1, 10_000, 50, "ms"),
+            F2_ENV_INITIAL => ("FILTER ENV INITIAL", 0, 100, 0, "%"),
+            F2_ENV_PEAK => ("FILTER ENV PEAK", 0, 100, 100, "%"),
+            F2_ENV_END => ("FILTER ENV END", 0, 100, 0, "%"),
+            F2_ENV_TIMEVEL => ("FILTER ENV TIME<VEL", -100, 100, 0, "%"),
+            F2_ENV_MODE => ("FILTER ENV MODE (0 NONE 1 LOOP 2 BEAT)", 0, 2, 0, ""),
+            F2_ENV_REPEAT => ("FILTER ENV REPEAT (LFO SYNCED INDEX)", 0, 14, 3, ""),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -619,6 +639,17 @@ impl Engine for Fm4 {
         let fe_sus = f64::from(self.p[(F2_BASE + F2_ENV_SUSTAIN) as usize]) / 100.0;
         let fe_scale = f64::from(self.p[(F2_BASE + F2_ENV_DECAY) as usize]) / 598.0;
         let fe_rel = f64::from(self.p[(F2_BASE + F2_ENV_RELEASE) as usize]) / 1000.0;
+        let fe_init = f64::from(self.p[(F2_BASE + F2_ENV_INITIAL) as usize]) / 100.0;
+        let fe_peak = f64::from(self.p[(F2_BASE + F2_ENV_PEAK) as usize]) / 100.0;
+        let fe_end = f64::from(self.p[(F2_BASE + F2_ENV_END) as usize]) / 100.0;
+        let fe_tv = f64::from(self.p[(F2_BASE + F2_ENV_TIMEVEL) as usize]) / 100.0;
+        let fe_beat = if self.p[(F2_BASE + F2_ENV_MODE) as usize] == 2 {
+            60.0 / f64::from(self.p[(LFO_BASE + L_TEMPO) as usize]).max(1.0) * SYNC_QUARTERS[self.p[(F2_BASE + F2_ENV_REPEAT) as usize].clamp(0, 14) as usize]
+        } else {
+            0.0
+        };
+        // the release fell more slowly than a time constant of rel / 4.6 for long times: about rel / (4.9 (rel / 41 ms)^0.24) fits 41 to 128 ms (fitted to the sound, `fm4fenv`)
+        let fe_rel_tau = fe_rel.max(1e-4) / (4.9 * (fe_rel.max(1e-4) / 0.041).powf(0.24));
         let shaper = self.p[(F2_BASE + F2_SHAPER) as usize];
         let shp_gain = 10f64.powf(f64::from(self.p[(F2_BASE + F2_SHP_DRIVE) as usize]) / 200.0);
         let shp_wet = f64::from(self.p[(F2_BASE + F2_DRYWET) as usize]) / 100.0;
@@ -772,15 +803,20 @@ impl Engine for Fm4 {
                     let mut oct = if lfo_on && l_filter { L_FILTER_OCTAVES * depth_v * lshape } else { 0.0 };
                     if f_env_on {
                         let dt = 8.0 / rate;
+                        let tv = (-1.4 * fe_tv * v.vel).exp();
+                        let (fe_att, fe_scale, fe_rel_tau) = (fe_att * tv, fe_scale * tv, fe_rel_tau * tv);
                         if v.held {
                             v.fe_t += dt;
-                            let shape = (2.9 * (-v.fe_t / (0.06 * fe_scale)).exp() + 3.4 * (-v.fe_t / (0.17 * fe_scale)).exp()) / 6.3;
-                            let up = 1.0 - (-4.6 * v.fe_t / fe_att.max(1e-5)).exp();
-                            v.fe_val = fe_sus + (1.0 - fe_sus) * shape * up;
+                            // a linear rise to the peak over the attack, then the fall (fitted to the sound: `fm4fenv`)
+                            let fall = |t: f64| (2.2 * (-t / (0.017 * fe_scale)).exp() + 2.9 * (-t / (0.06 * fe_scale)).exp() + 3.4 * (-t / (0.17 * fe_scale)).exp()) / F_ENV_OCTAVES;
+                            let unit = fe_sus + (1.0 - fe_sus) * fall(0.0); // the level at Peak 100 %
+                            v.fe_val = fe_peak
+                                * if v.fe_t < fe_att { unit * (fe_init + (1.0 - fe_init) * v.fe_t / fe_att) } else { fe_sus + (1.0 - fe_sus) * fall(if fe_beat > 0.0 { (v.fe_t - fe_att) % fe_beat } else { v.fe_t - fe_att }) };
                             v.fe_r0 = v.fe_val;
                         } else {
                             v.fe_tr += dt;
-                            v.fe_val = v.fe_r0 * (-4.6 * v.fe_tr / fe_rel.max(1e-4)).exp();
+                            let end = fe_end * fe_peak * (fe_sus + (1.0 - fe_sus) * (2.2 + 2.9 + 3.4) / F_ENV_OCTAVES);
+                            v.fe_val = end + (v.fe_r0 - end) * (-v.fe_tr / fe_rel_tau).exp();
                         }
                         oct += F_ENV_OCTAVES * f_env_amt * v.fe_val;
                     }
@@ -2175,7 +2211,7 @@ mod tests {
     #[test]
     fn fitted_to_operator_the_filter_envelope_and_freq_vel() {
         let q = 0.5 / (1.0 - 0.97 * 0.27);
-        let cutoffs = |setup: &dyn Fn(&mut Fm4), vel: u8, starts: &[usize]| {
+        let cutoffs_off = |setup: &dyn Fn(&mut Fm4), vel: u8, starts: &[usize], off: usize| {
             let mut e = Fm4::new(44_100.0);
             e.set(P_LEVEL, 16);
             e.set(op_param(0, O_ATTACK), 1);
@@ -2186,7 +2222,14 @@ mod tests {
             setup(&mut e);
             e.note_on(57, vel);
             let mut x = vec![0i16; 44_100];
-            e.render(&mut x);
+            if off < x.len() {
+                let (a, b) = x.split_at_mut(off);
+                e.render(a);
+                e.note_off(57);
+                e.render(b);
+            } else {
+                e.render(&mut x);
+            }
             let x: Vec<f64> = x.iter().map(|&v| f64::from(v) / 32768.0).collect();
             let h = |f: f64, fc: f64| {
                 let xx = f / fc;
@@ -2221,6 +2264,7 @@ mod tests {
                 })
                 .collect::<Vec<f64>>()
         };
+        let cutoffs = |setup: &dyn Fn(&mut Fm4), vel: u8, starts: &[usize]| cutoffs_off(setup, vel, starts, usize::MAX);
         // the instrument's own corner is 0.9173 of the displayed one (the engine factor): fm4's is the displayed 712 Hz
         let rest = 846.0 * 2f64.powf(-0.25);
         let starts = [0usize, 2646, 4410, 6174, 7938, 13_230, 23_814];
@@ -2253,5 +2297,60 @@ mod tests {
         let (b64, b127) = (at(50, 64), at(50, 127));
         assert!((b64 / a127 - 2.0).abs() < 0.3 && (b127 / a127 - 4.0).abs() < 0.8, "Freq<Vel +50: {b64} {b127}");
         assert!((at(100, 1) / a127 - 1.0).abs() < 0.1, "none at velocity 0");
+        // the other envelope times (fitted from the sound, `core/examples/fm4fenv.rs`): the sustain is a plateau of 9 octaves a unit at 100 %, the attack a linear rise to the peak, the release a fall that takes longer for longer times
+        let plateau = |sus: i32| cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 50);
+            e.set(F2_BASE + F2_ENV_SUSTAIN, sus);
+        }, 127, &[40_000])[0];
+        let p10 = (plateau(10) / rest).log2();
+        let p33 = (plateau(33) / rest).log2();
+        assert!((p10 - 0.45).abs() < 0.15 && (p33 - 1.47).abs() < 0.2, "sustain plateaus {p10} and {p33} octaves, wanted 0.45 and 1.47");
+        let rise = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_ATTACK, 1350);
+        }, 127, &[882, 2646, 5200, 8820, 13_230]);
+        assert!(rise[0] < rise[1] && rise[1] < rise[2], "a 135 ms attack rises: {rise:?}");
+        assert!(rise[2] > rest * 3.0 && rise[4] < rise[2] * 0.7, "and then falls: {rise:?}");
+        // a note let go at sample 30_000 and read 20 ms later (a window starting at 30_000): 0.30, 0.38, 0.50 and 0.70 octave above the rest for 41, 50, 74 and 128 ms
+        let after = |rel: i32| cutoffs_off(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 50);
+            e.set(F2_BASE + F2_ENV_SUSTAIN, 40);
+            e.set(F2_BASE + F2_ENV_RELEASE, rel);
+        }, 127, &[30_000], 30_000)[0];
+        // the Levels page: Peak 0 removes the envelope, Initial 100 % with a 135 ms attack holds the peak from the strike, End 100 % lifts the cutoff once the note is let go
+        let no_peak = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_PEAK, 0);
+        }, 127, &[0, 13_230]);
+        assert!(no_peak.iter().all(|c| (c / rest - 1.0).abs() < 0.1), "Peak 0: {no_peak:?}");
+        let flat = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_ATTACK, 1350);
+            e.set(F2_BASE + F2_ENV_INITIAL, 100);
+        }, 127, &[0, 2646, 4410, 13_230]);
+        assert!(flat[0] > rest * 3.0 && (flat[1] / flat[0] - 1.0).abs() < 0.25 && flat[3] < flat[0] * 0.5, "Initial 100: {flat:?}");
+        let end = |pct: i32| cutoffs_off(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_END, pct);
+        }, 127, &[30_000], 30_000)[0];
+        assert!(end(100) > end(0) * 1.8 && end(0) < rest * 1.3, "End: {} against {}", end(100), end(0));
+        // Time<Vel +100 %: the decay runs 0.25 times as long at velocity 127 and 0.7 at 32 (the cutoff 20 and 50 ms in, 25 % amount: 1.2 and 0.5 octave against 2.0 and 1.6 without)
+        let tv = |pct: i32, vel: u8| cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_TIMEVEL, pct);
+        }, vel, &[2646])[0];
+        assert!(tv(100, 127) < tv(0, 127) * 0.8 && tv(100, 32) < tv(0, 32) * 0.95 && tv(100, 127) < tv(100, 32), "Time<Vel: {} {} {} {}", tv(100, 127), tv(0, 127), tv(100, 32), tv(0, 32));
+        assert!((tv(0, 32) / tv(0, 127) - 1.0).abs() < 0.02, "no Time<Vel, no velocity effect");
+        // Beat: struck again every Repeat (1/8T at 120 is 1/6 s here): the cutoff rises again after it had fallen
+        let beat = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+            e.set(F2_BASE + F2_ENV_MODE, 2);
+        }, 127, &[0, 5800, 8000]); // the second window ends just before the restart at 7350, the third starts just after
+        assert!(beat[1] < beat[0] * 0.6 && beat[2] > beat[1] * 1.5, "Beat restarts the envelope: {beat:?}");
+        let o: Vec<f64> = [41, 50, 74, 128].iter().map(|&r| (after(r) / rest).log2()).collect();
+        assert!(o[0] < o[1] && o[1] < o[2] && o[2] < o[3], "a longer release holds the cutoff up longer: {o:?}");
+        for (g, w) in o.iter().zip([0.30, 0.38, 0.50, 0.70]) {
+            assert!((g - w).abs() < 0.2, "release: {o:?}");
+        }
     }
 }
