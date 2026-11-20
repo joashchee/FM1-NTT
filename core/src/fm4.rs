@@ -174,7 +174,23 @@ const L_FILTER_OCTAVES: f64 = 2.84;
 const L_FILTER_B_OCTAVES: f64 = 3.75;
 /// Dest B's Fixed Freq swings a fixed operator's frequency by this many octaves either way at 100 % (+-0.40 octave at 10 %, the same on 92 and 306 Hz, symmetric in log).
 const L_FIXED_B_OCTAVES: f64 = 4.0;
-pub const P_COUNT: usize = F2_BASE as usize + F2_PARAMS as usize;
+/// OPERATOR's additive wave editor (EDIT pages 6 and 7, "Partials" and "Partials+"), a third block after the second so no earlier id moves: per operator `USER_PARAMS` values, which
+/// shape that operator's **User** wave (`WAVES` 19). Measured on OPERATOR 0.7 (2026-11-20, `docs/PORTING.md` 'OPERATOR's additive editor'): the wave is **the sum of sines** `sum amp_k sin(k x)`
+/// for partials 1 to Count, each amp in steps of 1/256 (a knob click; 256 is 100 %); **Normalize** (on by default) divides the sum by its peak, off leaves it as it is (three full partials
+/// gave three harmonics at 1.0 each, nothing clipped). The first 64 ids of the block are the partials' amps (default: partial 1 at 100 %, the rest 0, a sine).
+pub const U_BASE: usize = F2_BASE as usize + F2_PARAMS as usize;
+pub const PARTIALS: usize = 64;
+/// Id offsets after the 64 amps: Count (0 to 2 for 16, 32, 64 partials used; 16 by default), Repeat (stored, **inert**: it changed no partial, no wave and no sound in any test) and Normalize (0 or 1).
+pub const U_COUNT: u16 = PARTIALS as u16;
+pub const U_REPEAT: u16 = PARTIALS as u16 + 1;
+pub const U_NORMALIZE: u16 = PARTIALS as u16 + 2;
+pub const USER_PARAMS: u16 = PARTIALS as u16 + 3;
+pub const USER_WAVE: usize = 19;
+pub const P_COUNT: usize = U_BASE + OPS * USER_PARAMS as usize;
+/// Parameter id of operator `op`'s field `f` of the user-wave block: a partial's amp (0 to 63) or `U_COUNT`, `U_REPEAT`, `U_NORMALIZE`.
+pub const fn user_param(op: usize, f: u16) -> u16 {
+    (U_BASE + op * USER_PARAMS as usize + f as usize) as u16
+}
 const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
 
 /// Parameter id of operator `op` (0 to 3), field `E_*` of the second block.
@@ -183,9 +199,9 @@ pub const fn ext_param(op: usize, field: u16) -> u16 {
 }
 /// The waveform names, in OPERATOR 0.7's order: Sine, the sine in 4 and 8 bits, a saw of N harmonics (3 4 6 8 16 32 64) and an ideal saw (D), a square of N odd
 /// harmonics and an ideal square. A table of 2048 points each, built once, peak 1 (measured: harmonics at 1/k, every wave the same peak level).
-pub const WAVES: [&str; 19] = [
+pub const WAVES: [&str; 20] = [
     "SINE", "SINE 4 BIT", "SINE 8 BIT", "SAW 3", "SAW 4", "SAW 6", "SAW 8", "SAW 16", "SAW 32", "SAW 64", "SAW D", "SQUARE 3", "SQUARE 4", "SQUARE 6", "SQUARE 8", "SQUARE 16",
-    "SQUARE 32", "SQUARE 64", "SQUARE D",
+    "SQUARE 32", "SQUARE 64", "SQUARE D", "USER",
 ];
 const TABLE: usize = 2048;
 
@@ -222,6 +238,28 @@ fn make_wave(w: usize) -> Vec<f32> {
     out
 }
 
+/// Operator `op`'s User wave: `TABLE` points plus a repeated first, the sum of `amp / 256 x sin(k x)` for partials 1 to Count (16, 32 or 64), divided by its peak when Normalize is on.
+fn make_user(p: &[i32; P_COUNT], op: usize) -> Vec<f32> {
+    let at = |f: u16| p[user_param(op, f) as usize];
+    let count = 16usize << at(U_COUNT).clamp(0, 2);
+    let amps: Vec<f64> = (0..count).map(|k| at(k as u16).clamp(0, 256) as f64 / 256.0).collect();
+    let mut t: Vec<f64> = (0..TABLE)
+        .map(|i| {
+            let th = TAU * i as f64 / TABLE as f64;
+            amps.iter().enumerate().filter(|(_, a)| **a > 0.0).map(|(k, a)| a * (th * (k + 1) as f64).sin()).sum()
+        })
+        .collect();
+    if at(U_NORMALIZE) == 1 {
+        let peak = t.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        if peak > 1e-9 {
+            t.iter_mut().for_each(|v| *v /= peak);
+        }
+    }
+    let mut out: Vec<f32> = t.iter().map(|v| *v as f32).collect();
+    out.push(out[0]);
+    out
+}
+
 /// Parameter id of operator `op` (0 to 3), field `field` (`O_*`).
 pub const fn op_param(op: usize, field: u16) -> u16 {
     OP_BASE + op as u16 * OP_PARAMS + field
@@ -247,6 +285,19 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
     if id < GLOBAL.len() {
         let d = GLOBAL[id];
         return Some((d.0.to_string(), d.1, d.2, d.3, d.4));
+    }
+    if id >= U_BASE {
+        let i = id - U_BASE;
+        if i >= OPS * USER_PARAMS as usize {
+            return None;
+        }
+        let (op, f) = (i / USER_PARAMS as usize, (i % USER_PARAMS as usize) as u16);
+        return Some(match f {
+            U_COUNT => (format!("OP{} USER COUNT (0 16, 1 32, 2 64 PARTIALS)", op + 1), 0, 2, 0, ""),
+            U_REPEAT => (format!("OP{} USER REPEAT (NO EFFECT HEARD)", op + 1), 0, 63, 0, ""),
+            U_NORMALIZE => (format!("OP{} USER NORMALIZE (0 OFF 1 ON)", op + 1), 0, 1, 1, ""),
+            k => (format!("OP{} PARTIAL {} AMP (256 = 100%)", op + 1, k + 1), 0, 256, if k == 0 { 256 } else { 0 }, ""),
+        });
     }
     if id >= F2_BASE as usize {
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - F2_BASE as usize) as u16 {
@@ -316,7 +367,7 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
         }
         let (op, f) = (i / EXT_PARAMS as usize, i % EXT_PARAMS as usize);
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match f as u16 {
-            E_WAVE => ("WAVE (0 SINE ... 18 SQUARE D)", 0, WAVES.len() as i32 - 1, 0, ""),
+            E_WAVE => ("WAVE (0 SINE ... 18 SQUARE D 19 USER)", 0, WAVES.len() as i32 - 1, 0, ""),
             E_PHASE => ("PHASE", 0, 100, 0, "%"),
             E_KEYSCALE => ("KEY SCALE (ABOUT NOTE 60)", -100, 100, 0, "%"),
             E_FIXED => ("FIXED (0 OFF 1 ON)", 0, 1, 0, ""),
@@ -430,6 +481,8 @@ pub struct Fm4 {
     lfo_ph: f64,
     rng: u32,
     waves: Vec<Vec<f32>>,
+    /// each operator's User wave (`make_user`), rebuilt when one of its partial parameters is set
+    user: [Vec<f32>; OPS],
 }
 
 /// A two-pole filter's coefficients `[b0, b1, b2, a1, a2]` (a0 = 1) for a corner of `fc` Hz: the bilinear form of `1 / (s^2 + s / Q + 1)`, its high-pass, band-pass (**peak gain
@@ -506,7 +559,7 @@ impl Fm4 {
                 *v = d.3;
             }
         }
-        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, glide_ms: 0, last_f0: 0.0, lfo_ph: 0.0, rng: 0x1234_5678, waves: (0..WAVES.len()).map(make_wave).collect() }
+        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, glide_ms: 0, last_f0: 0.0, lfo_ph: 0.0, rng: 0x1234_5678, waves: (0..USER_WAVE).map(make_wave).collect(), user: [make_user(&p, 0), make_user(&p, 1), make_user(&p, 2), make_user(&p, 3)] }
     }
 
     fn op(&self, op: usize, field: u16) -> i32 {
@@ -540,6 +593,10 @@ impl Engine for Fm4 {
     fn set(&mut self, id: u16, value: i32) -> bool {
         let Some(d) = desc(id as usize) else { return false };
         self.p[id as usize] = value.clamp(d.1, d.2);
+        if id as usize >= U_BASE {
+            let op = (id as usize - U_BASE) / USER_PARAMS as usize;
+            self.user[op] = make_user(&self.p, op);
+        }
         true
     }
 
@@ -836,7 +893,7 @@ impl Engine for Fm4 {
                         // a table lookup at the phase (cycles) plus the modulation, linearly interpolated
                         let x = (s.ph + pm / TAU).rem_euclid(1.0) * TABLE as f64;
                         let (i, f) = ((x as usize).min(TABLE - 1), x - (x as usize).min(TABLE - 1) as f64);
-                        let t = &self.waves[wave[op]];
+                        let t = if wave[op] == USER_WAVE { &self.user[op] } else { &self.waves[wave[op]] };
                         (t[i] as f64 + (t[i + 1] - t[i]) as f64 * f) * amp
                     };
                     v.fb[op][1] = v.fb[op][0];
@@ -1109,7 +1166,7 @@ mod tests {
         assert!(!e.set(P_COUNT as u16, 1) && e.get(7).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize + LFO_PARAMS as usize + F2_PARAMS as usize);
+        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize + LFO_PARAMS as usize + F2_PARAMS as usize + OPS * USER_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
     }
@@ -1180,7 +1237,7 @@ mod tests {
         }
         // the ideal waves and the 4-bit sine are in the table and sound; an out-of-range wave is clamped
         let mut e = operator();
-        assert!(e.set(ext_param(3, E_WAVE), 99) && e.get(ext_param(3, E_WAVE)) == Some(18) && e.get(P_COUNT as u16).is_none());
+        assert!(e.set(ext_param(3, E_WAVE), 99) && e.get(ext_param(3, E_WAVE)) == Some(19) && e.get(P_COUNT as u16).is_none());
         for w in [1, 2, 10, 18] {
             let mut e = operator();
             e.set(ext_param(0, E_WAVE), w);
@@ -1189,6 +1246,52 @@ mod tests {
             e.render(&mut b);
             assert!(peak(&b[5_000..]) > 1000, "wave {w} silent");
         }
+    }
+
+    /// OPERATOR 0.7's additive editor, measured in the emulator (2026-11-20, `fm4fit`, A on wave User, note 57): the wave is `sum amp_k sin(k x)`, amps in 256ths; a second partial
+    /// at 50 clicks (50/256) sat at 0.196 of the first and the fundamental fell to 0.937 of a sine's (Normalize divides by the peak, 1.066); partials 1 and 2 at 100 % each read 0.568 of a
+    /// sine's (1 / 1.76); with Normalize off, partials 1, 2 and 3 at 100 % each read 1.0 of a sine's (nothing clipped); partial 20 sounded at Count 32 and not at Count 16 (0.36 of the first
+    /// for 100 of 256 clicks, the emulator's own high-harmonic roll-off not modelled here); the partials are per operator.
+    #[test]
+    fn fitted_to_operator_the_additive_wave() {
+        let tones = |setup: &dyn Fn(&mut Fm4), h: &[usize]| -> Vec<f64> {
+            let mut e = operator();
+            e.set(ext_param(0, E_WAVE), USER_WAVE as i32);
+            setup(&mut e);
+            e.note_on(57, 127);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            h.iter().map(|k| tone(&b[10_000..10_000 + 22_050], 220.0 * *k as f64) / 0.0484).collect()
+        };
+        // the default is partial 1 alone: a sine at the sine's level
+        let d = tones(&|_| {}, &[1, 2, 3]);
+        assert!((d[0] - 1.0).abs() < 0.04 && d[1] < 0.01 && d[2] < 0.01, "default {d:?}");
+        // a second partial at 50/256: its ratio and the normalized fundamental
+        let t = tones(&|e| { e.set(user_param(0, 1), 50); }, &[1, 2]);
+        assert!((t[1] / t[0] - 0.196).abs() < 0.01 && (t[0] - 0.937).abs() < 0.04, "p2 at 50: {t:?}");
+        // two full partials, normalized: 1 / 1.76 each
+        let t = tones(&|e| { e.set(user_param(0, 1), 256); }, &[1, 2]);
+        assert!((t[0] - 0.568).abs() < 0.03 && (t[1] - 0.568).abs() < 0.03, "p1 + p2: {t:?}");
+        // Normalize off: three full partials, each as loud as a sine
+        let t = tones(&|e| { e.set(user_param(0, U_NORMALIZE), 0); e.set(user_param(0, 1), 256); e.set(user_param(0, 2), 256); }, &[1, 2, 3]);
+        assert!(t.iter().all(|v| (v - 1.0).abs() < 0.06), "unnormalized: {t:?}");
+        // Count: partial 20 is heard at 32 and not at 16; Count is clamped
+        let t16 = tones(&|e| { e.set(user_param(0, 19), 100); }, &[1, 20]);
+        let t32 = tones(&|e| { e.set(user_param(0, 19), 100); e.set(user_param(0, U_COUNT), 1); }, &[1, 20]);
+        assert!(t16[1] < 0.01 && (t32[1] / t32[0] - 100.0 / 256.0).abs() < 0.02, "count: {t16:?} {t32:?}");
+        // the partials are sines in phase: the wave of partials 1 and 2 is (sin x + sin 2x) / its peak, and each operator has its own
+        let mut e = operator();
+        e.set(user_param(0, 1), 256);
+        let peak = (0..TABLE).map(|i| { let th = TAU * i as f64 / TABLE as f64; (th.sin() + (2.0 * th).sin()).abs() }).fold(0.0, f64::max);
+        for i in [0, 100, 777, 1500, 2047] {
+            let th = TAU * i as f64 / TABLE as f64;
+            assert!((e.user[0][i] as f64 - (th.sin() + (2.0 * th).sin()) / peak).abs() < 1e-5, "table point {i}");
+        }
+        assert!((e.user[1][TABLE / 4] - 1.0).abs() < 1e-6, "operator 2 keeps its own sine");
+        // Repeat is stored and does nothing; out-of-range values clamp
+        assert!(e.set(user_param(2, U_REPEAT), 40) && e.get(user_param(2, U_REPEAT)) == Some(40));
+        assert!(e.set(user_param(2, 5), 999) && e.get(user_param(2, 5)) == Some(256) && e.set(user_param(2, U_COUNT), 9) && e.get(user_param(2, U_COUNT)) == Some(2));
+        assert!(!e.set(P_COUNT as u16, 1));
     }
 
     /// The numbers measured on OPERATOR 0.7 (2026-11-19, `fm4fit`): Key scaling pivots on note 60 and doubles the level an octave at +100 % (notes 24 to 96 at +100 %
