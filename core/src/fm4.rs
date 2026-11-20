@@ -88,7 +88,11 @@ pub const L_AMOUNT_A: u16 = 6;
 /// and Volume, FM Drive and Feedback act so far**: FM Drive scales every modulator's index by the same gain as Osc Vol; Feedback adds amount x Amount B x value (a fraction of the full feedback, never below 0) to the feedback of operators B to D (OPERATOR's A has none). The gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
 pub const L_DEST_B: u16 = 7;
 pub const L_AMOUNT_B: u16 = 8;
-pub const LFO_PARAMS: u16 = 9;
+/// OPERATOR's Rate<Key, percent (-100 to 100): each note's LFO rate is the set rate times `2^(percent / 100 x (note - 60) / 12)` (measured at +100 %: 2.44, 4.88 and 9.78 Hz on notes 45, 57 and 69 from 5.8). Not applied to the free-running LFO.
+pub const L_RATE_KEY: u16 = 9;
+/// OPERATOR's Amt<Vel, percent (0 to 100; negatives not measured): the depth of every target is multiplied by `(1 - p) + p x velocity / 127` (+100 %: swings of 115, 60 and 30 cents at velocity 127, 64 and 32).
+pub const L_AMT_VEL: u16 = 10;
+pub const LFO_PARAMS: u16 = 11;
 /// Bit 4 of `L_DEST`: the filter's cutoff follows the LFO. Measured: the cutoff swings by plus and minus this many octaves at 100 % (a sine, geometrically about its own value).
 pub const L_FILTER_BIT: i32 = 16;
 const L_FILTER_OCTAVES: f64 = 2.84;
@@ -177,6 +181,8 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_AMOUNT_A => ("LFO AMOUNT A", -100, 100, 100, "%"),
             L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 7 FEEDBACK, 9 FM DRIVE, 20 VOLUME; REST NOT YET)", 0, 23, 0, ""),
             L_AMOUNT_B => ("LFO AMOUNT B", -100, 100, 100, "%"),
+            L_RATE_KEY => ("LFO RATE<KEY", -100, 100, 0, "%"),
+            L_AMT_VEL => ("LFO AMT<VEL", 0, 100, 0, "%"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -526,6 +532,7 @@ impl Engine for Fm4 {
         let l_filter = lfo_on && l_dest & L_FILTER_BIT != 0;
         let l_dest_b = self.p[(LFO_BASE + L_DEST_B) as usize];
         let l_depth_b = f64::from(self.p[(LFO_BASE + L_AMOUNT_B) as usize]) / 100.0 * f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0;
+        let (l_ratekey, l_amtvel) = (f64::from(self.p[(LFO_BASE + L_RATE_KEY) as usize]) / 100.0, f64::from(self.p[(LFO_BASE + L_AMT_VEL) as usize]) / 100.0);
         let (mut free_ph, mut rng) = (self.lfo_ph, self.rng);
         let steps = if l_type == 6 { 16.0 } else { 1.0 };
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
@@ -539,6 +546,10 @@ impl Engine for Fm4 {
                         v.f0 = v.tf0;
                     }
                 }
+                // this note's LFO: its rate follows the key, its depth the velocity
+                let ratek = if l_retrig { 2f64.powf(l_ratekey * (f64::from(v.note) - 60.0) / 12.0) } else { 1.0 };
+                let vs = (1.0 - l_amtvel) + l_amtvel * v.vel;
+                let (depth_v, depth_bv) = (l_depth * vs, l_depth_b * vs);
                 let mut lmul = 1.0;
                 let mut lshape = 0.0;
                 let mut gain_b = 1.0;
@@ -567,12 +578,12 @@ impl Engine for Fm4 {
                         _ => v.lval,
                     };
                     lshape = shape;
-                    gain_b = (1.0 + l_depth_b * shape).max(0.0);
+                    gain_b = (1.0 + depth_bv * shape).max(0.0);
                     if l_dest_b == 9 {
                         fm_gain = gain_b;
                     }
-                    lmul = 2f64.powf(l_depth * shape);
-                    let next = ph + l_dph;
+                    lmul = 2f64.powf(depth_v * shape);
+                    let next = ph + l_dph * ratek;
                     let nph = next - next.floor();
                     if l_type >= 5 && ((nph * steps).floor() != (prev * steps).floor() || nph < prev) {
                         rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -604,7 +615,7 @@ impl Engine for Fm4 {
                         }
                     }
                     let s = &mut v.ops[op];
-                    let fbk = if l_dest_b == 7 && op >= 1 { (fbf[op] + l_depth_b * lshape).max(0.0) * fb_max } else { fb[op] };
+                    let fbk = if l_dest_b == 7 && op >= 1 { (fbf[op] + depth_bv * lshape).max(0.0) * fb_max } else { fb[op] };
                     pm += fbk * 0.5 * (v.fb[op][0] + v.fb[op][1]);
                     let inc = if fixed[op] > 0.0 { fixed[op] / rate } else { v.f0 * bend * ratio[op] * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
                     s.ph += inc;
@@ -634,7 +645,7 @@ impl Engine for Fm4 {
                     v.active = false;
                 }
                 if f_on && l_filter && n & 7 == 0 {
-                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(L_FILTER_OCTAVES * l_depth * lshape)).clamp(5.0, rate * 0.45), f_q, rate);
+                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(L_FILTER_OCTAVES * depth_v * lshape)).clamp(5.0, rate * 0.45), f_q, rate);
                 }
                 if f_on {
                     let c = &fco[vi];
@@ -1546,5 +1557,49 @@ mod tests {
         let mut y = vec![0i16; 8820];
         e.render(&mut y);
         assert!(y.iter().any(|&v| v != 0));
+    }
+
+    /// OPERATOR 0.7's LFO Rate<Key and Amt<Vel (2026-11-20, pitch targets): Rate<Key +100 % gave LFO rates of 2.44, 4.88 and 9.78 Hz on notes 45, 57 and 69 (a doubling an
+    /// octave about note 60); Amt<Vel +100 % gave swings of 115, 60 and 30 cents at velocities 127, 64 and 32 (the depth times velocity / 127).
+    #[test]
+    fn fitted_to_operator_the_lfo_rate_key_and_amount_velocity() {
+        let run = |note: u8, vel: u8, rate_key: i32, amt_vel: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_RATE, 580);
+            e.set(LFO_BASE + L_RATE_KEY, rate_key);
+            e.set(LFO_BASE + L_AMT_VEL, amt_vel);
+            e.note_on(note, vel);
+            let mut x = vec![0i16; 88_200];
+            e.render(&mut x);
+            let f_nom = 440.0 * 2f64.powf((f64::from(note) - 69.0) / 12.0);
+            let mut ups = vec![];
+            for i in 1..x.len() {
+                if x[i - 1] < 0 && x[i] >= 0 {
+                    ups.push(i as f64 - 1.0 + f64::from(-x[i - 1]) / f64::from(x[i] - x[i - 1]));
+                }
+            }
+            let c: Vec<(f64, f64)> = ups.windows(2).map(|w| (1200.0 * (44_100.0 / (w[1] - w[0]) / f_nom).log2(), (w[0] + w[1]) / 2.0 / 44_100.0)).filter(|v| v.1 > 0.1).collect();
+            let mean = c.iter().map(|v| v.0).sum::<f64>() / c.len() as f64;
+            let swing = c.iter().map(|v| v.0 - mean).fold(0.0, f64::max);
+            let up: Vec<f64> = (1..c.len()).filter(|&k| c[k - 1].0 < mean && c[k].0 >= mean).map(|k| c[k].1).collect();
+            ((up.len() - 1) as f64 / (up[up.len() - 1] - up[0]), swing)
+        };
+        for (note, hz) in [(45, 5.8 * 2f64.powf(-1.25)), (57, 5.8 * 2f64.powf(-0.25)), (69, 5.8 * 2f64.powf(0.75))] {
+            let (rate, _) = run(note, 127, 100, 0);
+            assert!((rate / hz - 1.0).abs() < 0.08, "note {note}: {rate} Hz, wanted about {hz}");
+        }
+        let (flat, _) = run(45, 127, 0, 0);
+        assert!((flat - 5.8).abs() < 0.4, "no Rate<Key: {flat}");
+        let (_, s127) = run(57, 127, 0, 100);
+        let (_, s64) = run(57, 64, 0, 100);
+        let (_, s32) = run(57, 32, 0, 100);
+        assert!((s64 / s127 - 0.5).abs() < 0.07 && (s32 / s127 - 0.25).abs() < 0.07, "{s127} {s64} {s32}");
+        let (_, flat64) = run(57, 64, 0, 0);
+        let (_, flat127) = run(57, 127, 0, 0);
+        assert!((flat64 / flat127 - 1.0).abs() < 0.07, "Amt<Vel at 0 leaves the depth alone");
     }
 }
