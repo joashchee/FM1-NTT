@@ -83,7 +83,12 @@ pub const L_RETRIG: u16 = 4;
 pub const L_DEST: u16 = 5;
 /// OPERATOR's Amount A, percent (-100 to 100): scales the LFO's depth on every target of destination A (the operators and the filter); the pitch and cutoff swing are proportional to it (34 % gave 0.35 of the 100 % swing).
 pub const L_AMOUNT_A: u16 = 6;
-pub const LFO_PARAMS: u16 = 7;
+/// OPERATOR's Dest B (one target, its own Amount B): 0 Off, 1 to 4 Osc Vol A to D, 5 X-Fade A/C, 6 X-Fade B/D, 7 Feedback, 8 Fixed Freq, 9 FM Drive, 10 Filter Freq, 11 Filter Q,
+/// 12 Filter Res, 13 Morph, 14 Flt Drive, 15 Filter Env, 16 Shp Drive, 17 LFO Rate, 18 LFO Amt, 19 Pitch Env, 20 Volume, 21 Pan, 22 Tone, 23 Time (the menu's order). **Only Osc Vol A to D
+/// and Volume act so far**: the gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
+pub const L_DEST_B: u16 = 7;
+pub const L_AMOUNT_B: u16 = 8;
+pub const LFO_PARAMS: u16 = 9;
 /// Bit 4 of `L_DEST`: the filter's cutoff follows the LFO. Measured: the cutoff swings by plus and minus this many octaves at 100 % (a sine, geometrically about its own value).
 pub const L_FILTER_BIT: i32 = 16;
 const L_FILTER_OCTAVES: f64 = 2.84;
@@ -170,6 +175,8 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
             L_DEST => ("LFO TARGETS (BITS: 1-8 OPERATORS 16 FILTER)", 0, 31, 15, ""),
             L_AMOUNT_A => ("LFO AMOUNT A", -100, 100, 100, "%"),
+            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 20 VOLUME; REST NOT YET)", 0, 23, 0, ""),
+            L_AMOUNT_B => ("LFO AMOUNT B", -100, 100, 100, "%"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -515,6 +522,8 @@ impl Engine for Fm4 {
         let l_dph = f64::from(self.p[(LFO_BASE + L_RATE) as usize]) / 100.0 / rate;
         let l_depth = f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0 * f64::from(self.p[(LFO_BASE + L_AMOUNT_A) as usize]) / 100.0;
         let l_filter = lfo_on && l_dest & L_FILTER_BIT != 0;
+        let l_dest_b = self.p[(LFO_BASE + L_DEST_B) as usize];
+        let l_depth_b = f64::from(self.p[(LFO_BASE + L_AMOUNT_B) as usize]) / 100.0 * f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0;
         let (mut free_ph, mut rng) = (self.lfo_ph, self.rng);
         let steps = if l_type == 6 { 16.0 } else { 1.0 };
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
@@ -530,6 +539,7 @@ impl Engine for Fm4 {
                 }
                 let mut lmul = 1.0;
                 let mut lshape = 0.0;
+                let mut gain_b = 1.0;
                 if lfo_on {
                     let prev = if l_retrig { v.lph } else { free_ph };
                     let ph = if l_retrig { v.lph } else { free_ph };
@@ -554,6 +564,7 @@ impl Engine for Fm4 {
                         _ => v.lval,
                     };
                     lshape = shape;
+                    gain_b = (1.0 + l_depth_b * shape).max(0.0);
                     lmul = 2f64.powf(l_depth * shape);
                     let next = ph + l_dph;
                     let nph = next - next.floor();
@@ -595,7 +606,7 @@ impl Engine for Fm4 {
                     let vel = 1.0 - vsens[op] * (1.0 - v.vel);
                     let key = 1.0 - kscale[op] * ((v.note as f64 - 36.0) / 91.0).clamp(0.0, 1.0) * 0.75;
                     let key2 = 2f64.powf(kscale2[op] * (v.note as f64 - 60.0) / 12.0);
-                    let amp = level[op] * s.env * vel.max(0.05) * key * key2;
+                    let amp = level[op] * s.env * vel.max(0.05) * key * key2 * if l_dest_b == 1 + op as i32 { gain_b } else { 1.0 };
                     s.out = if wave[op] == 0 {
                         (TAU * (s.ph) + pm).sin() * amp
                     } else {
@@ -627,7 +638,7 @@ impl Engine for Fm4 {
                         heard = y;
                     }
                 }
-                acc += heard;
+                acc += heard * if l_dest_b == 20 { gain_b } else { 1.0 };
             }
             *o = (acc * poly * master * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
             if lfo_on && !l_retrig {
@@ -1382,5 +1393,41 @@ mod tests {
         assert!((oct34 / oct - 0.35).abs() < 0.15, "Amount A at 34 percent: {oct34} against {oct}");
         let (oct0, _) = swing(0, 100);
         assert!(oct0 < 0.1, "no amount, no swing: {oct0}");
+    }
+
+    /// OPERATOR 0.7's LFO Dest B on Osc Vol A (2026-11-20, one sine carrier, LFO amount 10, 69 and 100 %, Amount B +100 %): the peak went 0.0436 to 0.0533, 0.0156 to
+    /// 0.0818 and 0 to 0.0968 of a clean 0.0484, a gain of 1 plus amount times the sine; Volume gives the same for a lone carrier. Dest B on Osc Vol A leaves the other operators alone.
+    #[test]
+    fn fitted_to_operator_lfo_dest_b_on_osc_volume() {
+        let range = |target: i32, amount: i32, amount_b: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_DEST, 0); // no pitch targets
+            e.set(LFO_BASE + L_AMOUNT, amount);
+            e.set(LFO_BASE + L_DEST_B, target);
+            e.set(LFO_BASE + L_AMOUNT_B, amount_b);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let peaks: Vec<f64> = x[4410..].chunks(441).map(|c| f64::from(peak(c)) / 32768.0).collect();
+            (peaks.iter().cloned().fold(f64::MAX, f64::min), peaks.iter().cloned().fold(0.0, f64::max))
+        };
+        let (clean_lo, clean_hi) = range(0, 100, 100);
+        assert!((clean_hi / clean_lo - 1.0).abs() < 0.03, "target Off leaves the level alone");
+        let one = clean_hi;
+        for (amount, lo, hi) in [(10, 0.9, 1.1), (69, 0.31, 1.69), (100, 0.0, 2.0)] {
+            let (a, b) = range(1, amount, 100);
+            assert!((a / one - lo).abs() < 0.06 && (b / one - hi).abs() < 0.06, "amount {amount}: {} to {}", a / one, b / one);
+        }
+        // Volume on a lone carrier is the same; another operator's Osc Vol does nothing to it; Amount B scales
+        let (a, b) = range(20, 69, 100);
+        assert!((a / one - 0.31).abs() < 0.06 && (b / one - 1.69).abs() < 0.06);
+        let (a, b) = range(3, 100, 100);
+        assert!((a / b - 1.0).abs() < 0.03, "Osc Vol C leaves operator A alone");
+        let (a, b) = range(1, 100, 50);
+        assert!((a / one - 0.5).abs() < 0.06 && (b / one - 1.5).abs() < 0.06, "Amount B at 50 percent");
     }
 }
