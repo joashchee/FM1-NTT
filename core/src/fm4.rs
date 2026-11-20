@@ -120,7 +120,22 @@ pub const F2_SHAPER: u16 = 3;
 pub const F2_SHP_DRIVE: u16 = 4;
 /// Dry/Wet in percent (100 is all shaped): the output is the dry signal plus the wet fraction of the difference.
 pub const F2_DRYWET: u16 = 5;
-pub const F2_PARAMS: u16 = 6;
+/// OPERATOR's Freq<Vel, percent (-100 to 100): the cutoff moves by `4 x percent / 100 x velocity / 127` octaves (measured at 650 Hz: 1300 and 2600 Hz at velocity 32 and 64 and +100 %, 5770 Hz at 100; 2555 Hz at 127 and +50 %; none at velocity 0).
+pub const F2_FREQ_VEL: u16 = 6;
+/// OPERATOR's filter Envelope amount, percent (-100 to 100): the cutoff moves by `6 x percent / 100 x env` octaves, `env` running from 1 at the strike to the sustain level. On the instrument's
+/// default envelope (Attack 0.1 ms, Decay 598 ms, Sustain 0, Release 50 ms) at 25 and 50 % the fitted cutoff started 1.5 and 2.6 octaves up and fell back to 650 Hz in about 0.65 s: twice the
+/// amount, twice the octaves at every time. Its fall was not a line or one exponential: about `2.9 e^(-t / 60 ms) + 3.4 e^(-t / 170 ms)` octaves at 100 % (scaled with the decay time here).
+pub const F2_ENV_AMOUNT: u16 = 7;
+/// Filter envelope attack in tenths of a millisecond (the instrument's default is 0.1 ms).
+pub const F2_ENV_ATTACK: u16 = 8;
+/// Filter envelope decay in milliseconds (598 by default).
+pub const F2_ENV_DECAY: u16 = 9;
+/// Filter envelope sustain, percent (0 by default).
+pub const F2_ENV_SUSTAIN: u16 = 10;
+/// Filter envelope release in milliseconds (50 by default).
+pub const F2_ENV_RELEASE: u16 = 11;
+pub const F2_PARAMS: u16 = 12;
+const F_ENV_OCTAVES: f64 = 6.0;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
 const NOISE_HZ: f64 = 400.0;
@@ -214,6 +229,12 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             F2_SHAPER => ("SHAPER (0 OFF 1 SOFT 2 HARD 3 SINE 4 4 BIT)", 0, 4, 0, ""),
             F2_SHP_DRIVE => ("SHAPER DRIVE (0.1 DB)", 0, 120, 0, ""),
             F2_DRYWET => ("SHAPER DRY/WET", 0, 100, 100, "%"),
+            F2_FREQ_VEL => ("FILTER FREQ<VEL", -100, 100, 0, "%"),
+            F2_ENV_AMOUNT => ("FILTER ENVELOPE AMOUNT", -100, 100, 0, "%"),
+            F2_ENV_ATTACK => ("FILTER ENV ATTACK (0.1 MS)", 1, 50_000, 1, ""),
+            F2_ENV_DECAY => ("FILTER ENV DECAY", 1, 10_000, 598, "ms"),
+            F2_ENV_SUSTAIN => ("FILTER ENV SUSTAIN", 0, 100, 0, "%"),
+            F2_ENV_RELEASE => ("FILTER ENV RELEASE", 1, 10_000, 50, "ms"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -341,6 +362,11 @@ struct Voice {
     /// the Noise type's low-passed value and the counter of its 400 Hz white-noise updates
     lnz: f64,
     nacc: f64,
+    /// the filter envelope: seconds since the strike, its value, the value and seconds at release
+    fe_t: f64,
+    fe_val: f64,
+    fe_r0: f64,
+    fe_tr: f64,
     vel: f64,
     ops: [Op; OPS],
     fb: [[f64; 2]; OPS],
@@ -349,7 +375,7 @@ struct Voice {
 }
 
 const IDLE_OP: Op = Op { stage: Stage::Idle, ph: 0.0, env: 0.0, out: 0.0 };
-const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, lph: 0.0, lval: 0.0, lnz: 0.0, nacc: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
+const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, lph: 0.0, lval: 0.0, lnz: 0.0, nacc: 0.0, fe_t: 0.0, fe_val: 0.0, fe_r0: 0.0, fe_tr: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
 
 pub struct Fm4 {
     rate: f64,
@@ -586,6 +612,13 @@ impl Engine for Fm4 {
         let f_kind = self.p[(FILT_BASE + F_TYPE) as usize];
         let f_morph = f64::from(self.p[(F2_BASE + F2_MORPH) as usize]) / 100.0;
         let f_sat = self.p[(F2_BASE + F2_CIRCUIT) as usize] > 0;
+        let f_fv = f64::from(self.p[(F2_BASE + F2_FREQ_VEL) as usize]) / 100.0;
+        let f_env_amt = f64::from(self.p[(F2_BASE + F2_ENV_AMOUNT) as usize]) / 100.0;
+        let f_env_on = f_on && f_env_amt != 0.0;
+        let fe_att = f64::from(self.p[(F2_BASE + F2_ENV_ATTACK) as usize]) / 10_000.0;
+        let fe_sus = f64::from(self.p[(F2_BASE + F2_ENV_SUSTAIN) as usize]) / 100.0;
+        let fe_scale = f64::from(self.p[(F2_BASE + F2_ENV_DECAY) as usize]) / 598.0;
+        let fe_rel = f64::from(self.p[(F2_BASE + F2_ENV_RELEASE) as usize]) / 1000.0;
         let shaper = self.p[(F2_BASE + F2_SHAPER) as usize];
         let shp_gain = 10f64.powf(f64::from(self.p[(F2_BASE + F2_SHP_DRIVE) as usize]) / 200.0);
         let shp_wet = f64::from(self.p[(F2_BASE + F2_DRYWET) as usize]) / 100.0;
@@ -594,6 +627,7 @@ impl Engine for Fm4 {
             let kind = self.p[(FILT_BASE + F_TYPE) as usize];
             for (i, v) in self.voices.iter().enumerate() {
                 let keyed = self.p[(FILT_BASE + F_FREQ) as usize] as f64 * 2f64.powf(self.p[(FILT_BASE + F_KEY) as usize] as f64 / 100.0 * (v.note as f64 - 60.0) / 12.0);
+                let keyed = keyed * 2f64.powf(4.0 * f_fv * v.vel);
                 fkey[i] = keyed;
                 fco[i] = biquad(kind, keyed.clamp(5.0, rate * 0.45), f_q, rate, f_morph);
             }
@@ -734,12 +768,26 @@ impl Engine for Fm4 {
                 if !v.held && (0..OPS).all(|k| alg.carriers >> k & 1 == 0 || v.ops[k].env < 1e-4) {
                     v.active = false;
                 }
-                if f_on && (l_filter || (10..=12).contains(&l_dest_b)) && lfo_on && n & 7 == 0 {
-                    let mut oct = if l_filter { L_FILTER_OCTAVES * depth_v * lshape } else { 0.0 };
+                if f_on && n & 7 == 0 && (f_env_on || (lfo_on && (l_filter || (10..=12).contains(&l_dest_b)))) {
+                    let mut oct = if lfo_on && l_filter { L_FILTER_OCTAVES * depth_v * lshape } else { 0.0 };
+                    if f_env_on {
+                        let dt = 8.0 / rate;
+                        if v.held {
+                            v.fe_t += dt;
+                            let shape = (2.9 * (-v.fe_t / (0.06 * fe_scale)).exp() + 3.4 * (-v.fe_t / (0.17 * fe_scale)).exp()) / 6.3;
+                            let up = 1.0 - (-4.6 * v.fe_t / fe_att.max(1e-5)).exp();
+                            v.fe_val = fe_sus + (1.0 - fe_sus) * shape * up;
+                            v.fe_r0 = v.fe_val;
+                        } else {
+                            v.fe_tr += dt;
+                            v.fe_val = v.fe_r0 * (-4.6 * v.fe_tr / fe_rel.max(1e-4)).exp();
+                        }
+                        oct += F_ENV_OCTAVES * f_env_amt * v.fe_val;
+                    }
                     let mut q = f_q;
-                    if l_dest_b == 10 {
+                    if lfo_on && l_dest_b == 10 {
                         oct += L_FILTER_B_OCTAVES * depth_bv * lshape;
-                    } else if l_dest_b >= 11 {
+                    } else if lfo_on && l_dest_b >= 11 {
                         // Filter Q and Filter Res act alike: the resonance goes up by amount x value (to 1.0, where the filter nearly rings)
                         q = 0.5 / (1.0 - 0.97 * (f_res + depth_bv * lshape).clamp(0.0, 1.0));
                     }
@@ -2119,5 +2167,91 @@ mod tests {
             20.0 * (c.hypot(s) / (x.len() as f64 / 4.0) * 12.0 / 0.0484).max(1e-9).log10()
         };
         assert!(saw(2) > saw(0) + 20.0, "Hard fills in the 12th harmonic: {} against {}", saw(2), saw(0));
+    }
+
+    /// OPERATOR 0.7's filter Envelope and Freq<Vel (2026-11-20; Saw D, a 24 dB filter at 846 Hz, the default filter envelope Attack 0.1 ms, Decay 598 ms, Sustain 0, Release 50 ms). The
+    /// fitted cutoff (about 650 Hz at rest) at Envelope 50 % read 3805, 2111, 1442, 1171, 1002, 919, 800, 721 and 673 Hz at 20, 60, 100, 140, 180, 220, 300, 420 and 540 ms, and at 25 %
+    /// 1806, 1192, 968, 872, 814, 773, 721, 684 and 661 Hz: the same octaves halved. Freq<Vel +100 % at velocity 32, 64 and 100 read 1300, 2600 and 5770 Hz; +50 % at 64 and 127 read 1300 and 2555 Hz.
+    #[test]
+    fn fitted_to_operator_the_filter_envelope_and_freq_vel() {
+        let q = 0.5 / (1.0 - 0.97 * 0.27);
+        let cutoffs = |setup: &dyn Fn(&mut Fm4), vel: u8, starts: &[usize]| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_WAVE), 10);
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(FILT_BASE + F_FREQ, 846);
+            setup(&mut e);
+            e.note_on(57, vel);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x.iter().map(|&v| f64::from(v) / 32768.0).collect();
+            let h = |f: f64, fc: f64| {
+                let xx = f / fc;
+                1.0 / ((1.0 - xx * xx).powi(2) + (xx / q).powi(2))
+            };
+            starts
+                .iter()
+                .map(|&a| {
+                    let db: Vec<f64> = (1..=10)
+                        .map(|k| {
+                            let w = std::f64::consts::TAU * k as f64 * 220.0 / 44_100.0;
+                            let (mut c, mut s) = (0.0, 0.0);
+                            for i in 0..1764 {
+                                let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / 1764.0).cos();
+                                c += x[a + i] * win * (w * i as f64).cos();
+                                s += x[a + i] * win * (w * i as f64).sin();
+                            }
+                            20.0 * (c.hypot(s) / 441.0 * k as f64).max(1e-9).log10()
+                        })
+                        .collect();
+                    let mut best = (f64::MAX, 0.0);
+                    for g in 0..220 {
+                        let fc = 200.0 * 2f64.powf(g as f64 / 40.0);
+                        let m: Vec<f64> = (1..=10).map(|k| 20.0 * h(k as f64 * 220.0, fc).log10()).collect();
+                        let off = db.iter().zip(&m).map(|(d, m)| d - m).sum::<f64>() / 10.0;
+                        let e: f64 = db.iter().zip(&m).map(|(d, m)| (d - m - off).powi(2)).sum();
+                        if e < best.0 {
+                            best = (e, fc);
+                        }
+                    }
+                    best.1
+                })
+                .collect::<Vec<f64>>()
+        };
+        // the instrument's own corner is 0.9173 of the displayed one (the engine factor): fm4's is the displayed 712 Hz
+        let rest = 846.0 * 2f64.powf(-0.25);
+        let starts = [0usize, 2646, 4410, 6174, 7938, 13_230, 23_814];
+        let want50 = [3805.0, 2111.0, 1442.0, 1171.0, 1002.0, 800.0, 673.0];
+        let got = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 50);
+        }, 127, &starts);
+        for ((g, w), a) in got.iter().zip(want50).zip(starts) {
+            let want = rest + (w - 652.6) * rest / 652.6 * 1.0;
+            let want = want.max(rest);
+            assert!((g / want - 1.0).abs() < 0.22, "Envelope 50 percent at sample {a}: {g} Hz, wanted about {want}");
+        }
+        let got25 = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 25);
+        }, 127, &starts[..4]);
+        assert!(got25[0] > rest * 2.0 && got25[0] < got[0] * 0.75, "25 percent: {got25:?} against {got:?}");
+        let off = cutoffs(&|_| {}, 127, &[0, 13_230]);
+        assert!((off[0] / rest - 1.0).abs() < 0.1 && (off[1] / rest - 1.0).abs() < 0.1, "Envelope 0 leaves the cutoff: {off:?}");
+        // after the release the cutoff goes back: a held note at the end of the decay is at rest
+        let tail = cutoffs(&|e| {
+            e.set(F2_BASE + F2_ENV_AMOUNT, 50);
+        }, 127, &[30_000]);
+        assert!((tail[0] / rest - 1.0).abs() < 0.12, "end of the decay: {tail:?}");
+        // Freq<Vel
+        let at = |fv: i32, vel: u8| cutoffs(&|e| {
+            e.set(F2_BASE + F2_FREQ_VEL, fv);
+        }, vel, &[13_230])[0];
+        let (a32, a64, a127) = (at(100, 32), at(100, 64), at(0, 127));
+        assert!((a32 / a127 - 2.0).abs() < 0.3 && (a64 / a127 - 4.0).abs() < 0.6, "Freq<Vel +100: {a32} {a64} against {a127}");
+        let (b64, b127) = (at(50, 64), at(50, 127));
+        assert!((b64 / a127 - 2.0).abs() < 0.3 && (b127 / a127 - 4.0).abs() < 0.8, "Freq<Vel +50: {b64} {b127}");
+        assert!((at(100, 1) / a127 - 1.0).abs() < 0.1, "none at velocity 0");
     }
 }
