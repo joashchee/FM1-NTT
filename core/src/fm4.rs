@@ -101,6 +101,11 @@ pub const L_SYNC_DIV: u16 = 12;
 /// OPERATOR's GLO Tempo, beats a minute (its default is 120). 1/8T at 120 measured 6.0 Hz times the engine factor (5.52).
 pub const L_TEMPO: u16 = 13;
 pub const LFO_PARAMS: u16 = 14;
+/// The filter's second block (after the LFO so no earlier id moves): OPERATOR's Morph, and later its circuits and drive.
+pub const F2_BASE: u16 = LFO_BASE + LFO_PARAMS;
+/// Morph, percent: with `F_TYPE` 4 the filter is a mix of its low-pass, band-pass and high-pass outputs along keyframes, **LP at 0 %, BP at 25 %, HP at 50 %, notch (LP plus HP) at 75 %, LP again at 100 %**, mixed linearly between them, in each of the two stages of 24 dB (fitted to OPERATOR 0.7 at 26 settings: 0.7 dB rms).
+pub const F2_MORPH: u16 = 0;
+pub const F2_PARAMS: u16 = 1;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
 const NOISE_HZ: f64 = 400.0;
@@ -112,7 +117,7 @@ const L_FILTER_OCTAVES: f64 = 2.84;
 const L_FILTER_B_OCTAVES: f64 = 3.75;
 /// Dest B's Fixed Freq swings a fixed operator's frequency by this many octaves either way at 100 % (+-0.40 octave at 10 %, the same on 92 and 306 Hz, symmetric in log).
 const L_FIXED_B_OCTAVES: f64 = 4.0;
-pub const P_COUNT: usize = LFO_BASE as usize + LFO_PARAMS as usize;
+pub const P_COUNT: usize = F2_BASE as usize + F2_PARAMS as usize;
 const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
 
 /// Parameter id of operator `op` (0 to 3), field `E_*` of the second block.
@@ -186,6 +191,13 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
         let d = GLOBAL[id];
         return Some((d.0.to_string(), d.1, d.2, d.3, d.4));
     }
+    if id >= F2_BASE as usize {
+        let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - F2_BASE as usize) as u16 {
+            F2_MORPH => ("FILTER MORPH (TYPE 4)", 0, 100, 0, "%"),
+            _ => return None,
+        };
+        return Some((name.to_string(), lo, hi, def, unit));
+    }
     if id >= LFO_BASE as usize {
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - LFO_BASE as usize) as u16 {
             L_ON => ("LFO (0 OFF 1 ON)", 0, 1, 0, ""),
@@ -209,7 +221,7 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
     if id >= FILT_BASE as usize {
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - FILT_BASE as usize) as u16 {
             F_ON => ("FILTER (0 OFF 1 ON)", 0, 1, 0, ""),
-            F_TYPE => ("FILTER TYPE (0 LP 1 HP 2 BP 3 NOTCH)", 0, 3, 0, ""),
+            F_TYPE => ("FILTER TYPE (0 LP 1 HP 2 BP 3 NOTCH 4 MORPH)", 0, 4, 0, ""),
             F_FREQ => ("FILTER FREQ", 30, 20000, 12000, "Hz"),
             F_RES => ("FILTER RES (0.01)", 0, 125, 27, ""),
             F_SLOPE => ("FILTER SLOPE (0 12 DB 1 24 DB)", 0, 1, 1, ""),
@@ -336,18 +348,34 @@ pub struct Fm4 {
     waves: Vec<Vec<f32>>,
 }
 
-/// A two-pole filter's coefficients `[b0, b1, b2, a1, a2]` (a0 = 1), the bilinear form of `1 / (s^2 + s / Q + 1)` and its high-pass, band-pass (peak gain 1) and
-/// notch relatives, for a corner of `fc` Hz.
-fn biquad(kind: i32, fc: f64, q: f64, rate: f64) -> [f64; 5] {
+/// A two-pole filter's coefficients `[b0, b1, b2, a1, a2]` (a0 = 1) for a corner of `fc` Hz: the bilinear form of `1 / (s^2 + s / Q + 1)`, its high-pass, band-pass (**peak gain
+/// Q**, as OPERATOR's: a constant-skirt band-pass) and notch relatives, and for kind 4 the Morph mix of the three outputs (`morph` 0 to 1; all share the denominator, so only the numerator blends).
+fn biquad(kind: i32, fc: f64, q: f64, rate: f64, morph: f64) -> [f64; 5] {
     let w = TAU * fc / rate;
     let (sn, cs) = (w.sin(), w.cos());
     let al = sn / (2.0 * q);
     let a0 = 1.0 + al;
+    let lp = ((1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0);
+    let hp = ((1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0);
+    let bp = (sn / 2.0, 0.0, -sn / 2.0);
     let (b0, b1, b2) = match kind {
-        1 => ((1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0),
-        2 => (al, 0.0, -al),
-        3 => (1.0, -2.0 * cs, 1.0),
-        _ => ((1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0),
+        1 => hp,
+        2 => bp,
+        3 => (lp.0 + hp.0, lp.1 + hp.1, lp.2 + hp.2),
+        4 => {
+            let m = morph.clamp(0.0, 1.0);
+            let (cl, cb, ch) = if m < 0.25 {
+                (1.0 - m * 4.0, m * 4.0, 0.0)
+            } else if m < 0.5 {
+                (0.0, 1.0 - (m - 0.25) * 4.0, (m - 0.25) * 4.0)
+            } else if m < 0.75 {
+                ((m - 0.5) * 4.0, 0.0, 1.0)
+            } else {
+                (1.0, 0.0, 1.0 - (m - 0.75) * 4.0)
+            };
+            (cl * lp.0 + cb * bp.0 + ch * hp.0, cl * lp.1 + cb * bp.1 + ch * hp.1, cl * lp.2 + cb * bp.2 + ch * hp.2)
+        }
+        _ => lp,
     };
     [b0 / a0, b1 / a0, b2 / a0, -2.0 * cs / a0, (1.0 - al) / a0]
 }
@@ -536,12 +564,13 @@ impl Engine for Fm4 {
         let mut fco = [[0.0f64; 5]; VOICES];
         let mut fkey = [0.0f64; VOICES];
         let f_kind = self.p[(FILT_BASE + F_TYPE) as usize];
+        let f_morph = f64::from(self.p[(F2_BASE + F2_MORPH) as usize]) / 100.0;
         if f_on {
             let kind = self.p[(FILT_BASE + F_TYPE) as usize];
             for (i, v) in self.voices.iter().enumerate() {
                 let keyed = self.p[(FILT_BASE + F_FREQ) as usize] as f64 * 2f64.powf(self.p[(FILT_BASE + F_KEY) as usize] as f64 / 100.0 * (v.note as f64 - 60.0) / 12.0);
                 fkey[i] = keyed;
-                fco[i] = biquad(kind, keyed.clamp(5.0, rate * 0.45), f_q, rate);
+                fco[i] = biquad(kind, keyed.clamp(5.0, rate * 0.45), f_q, rate, f_morph);
             }
         }
         // the pitch slides in the log domain, 99% of the way in the glide time, stepped every eighth sample
@@ -689,7 +718,7 @@ impl Engine for Fm4 {
                         // Filter Q and Filter Res act alike: the resonance goes up by amount x value (to 1.0, where the filter nearly rings)
                         q = 0.5 / (1.0 - 0.97 * (f_res + depth_bv * lshape).clamp(0.0, 1.0));
                     }
-                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(oct)).clamp(5.0, rate * 0.45), q, rate);
+                    fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(oct)).clamp(5.0, rate * 0.45), q, rate, f_morph);
                 }
                 if f_on {
                     let c = &fco[vi];
@@ -901,7 +930,7 @@ mod tests {
         assert!(!e.set(P_COUNT as u16, 1) && e.get(7).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize + LFO_PARAMS as usize);
+        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize + LFO_PARAMS as usize + F2_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
     }
@@ -1846,5 +1875,53 @@ mod tests {
         assert!(hi / lo < 1.03, "Off: steady");
         let (lo, hi) = freqs(0, 8); // a tracking operator ignores it (note 57 is 220 Hz)
         assert!(hi / lo < 1.03 && (lo - 220.0).abs() < 4.0, "{lo} {hi}");
+    }
+
+    /// OPERATOR 0.7's filter Morph (2026-11-20; Saw D on operator A, a 24 dB filter at 846 Hz, Res 0.27, harmonics' levels in dB against a 1/k saw): at 25 % it is a band-pass of peak
+    /// gain Q (harmonic 3 at -16.5 dB), at 50 % a high-pass (harmonic 1 at -45, the plateau at -5), at 75 % LP plus HP, a notch on harmonic 3 (-45 dB), and 0 and 100 % are the
+    /// low-pass (harmonic 1 at -4.4). The mix is linear between the keyframes.
+    #[test]
+    fn fitted_to_operator_the_filter_morph() {
+        let profile = |kind: i32, morph: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_WAVE), 10);
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(FILT_BASE + F_FREQ, 846);
+            e.set(FILT_BASE + F_TYPE, kind);
+            e.set(F2_BASE + F2_MORPH, morph);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[13_230..].iter().map(|&v| f64::from(v) / 32768.0).collect();
+            (1..=8)
+                .map(|k| {
+                    let w = std::f64::consts::TAU * k as f64 * 220.0 / 44_100.0;
+                    let (mut c, mut s) = (0.0, 0.0);
+                    for (i, v) in x.iter().enumerate() {
+                        let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / x.len() as f64).cos();
+                        c += v * win * (w * i as f64).cos();
+                        s += v * win * (w * i as f64).sin();
+                    }
+                    20.0 * (c.hypot(s) / (x.len() as f64 / 4.0) * k as f64 / 0.0484).max(1e-9).log10()
+                })
+                .collect::<Vec<f64>>()
+        };
+        let lp = profile(0, 0);
+        let near = |a: &[f64], b: &[f64], tol: f64| a.iter().zip(b).all(|(x, y)| (x - y).abs() < tol);
+        assert!(near(&profile(4, 0), &lp, 0.2) && near(&profile(4, 100), &lp, 0.2), "Morph at 0 and 100 percent is the low-pass");
+        assert!(near(&profile(4, 25), &profile(2, 0), 0.3), "25 percent is the band-pass");
+        assert!(near(&profile(4, 50), &profile(1, 0), 0.3), "50 percent is the high-pass");
+        assert!(near(&profile(4, 75), &profile(3, 0), 0.3), "75 percent is the notch");
+        // the measured shapes: band-pass peaks near harmonic 3 about 16 dB under a 1/k saw, the notch bites harmonic 3
+        let bp = profile(2, 0);
+        assert!(bp[2] > bp[0] + 4.0 && bp[2] > bp[7] + 4.0 && (bp[2] + 11.8).abs() < 3.0, "band-pass {bp:?}");
+        let nt = profile(3, 0);
+        assert!(nt[2] < nt[1] - 15.0 && nt[2] < nt[3] - 15.0, "notch {nt:?}");
+        // between the keyframes it moves: 10 percent is between the low-pass and the band-pass
+        let m10 = profile(4, 10);
+        assert!(m10[0] < lp[0] - 1.0 && m10[0] > bp[0] + 1.0, "{m10:?}");
     }
 }
