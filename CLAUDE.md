@@ -45,9 +45,9 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
    pixel for pixel; **Tab or F1** toggles Standard (1x, panels right and below) and Zoomed (2x, one panel at the right).
    **Fn (raw button 16) turns the panel carousel** (MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND MONITOR TOOLS), **L1+R1 open the menu** (the maintainer, 2026-11-16);
    Start pauses off MACHINE; the FM-1's own controls (notes, sticks, L1/L2/R2 modifiers: README) are the pad only on MACHINE. Only the app's folder is written (`firmware/ slots/ recordings/ screenshots/`), temp name then rename.
-   Text is the project's own 5 x 7 font; every text pair passes 4.5:1; nothing scrolls (a long list is whole pages). Select and Start never
-   quit when the app has a Quit item (the maintainer's rule, 2026-11-10); until Files has one, B and Esc leave.
-7. **The r3i6nos port rules that are not about the theme** (`../r3i6nos/CLAUDE.md` 9 to 14, rule 8 excepted), all in pixels and in this repo:
+   Text is the project's own 5 x 7 font; every text pair passes 4.5:1; nothing scrolls (a long list is whole pages). **Quit is how the app is left**
+   (the main menu's Quit item, r3i6nos rule 17, 2026-11-19, and only that: not a TOOLS row, not a button, not Esc, the maintainer, 2026-11-20). Esc closes a menu or a question.
+7. **The r3i6nos port rules that are not about the theme** (`../r3i6nos/CLAUDE.md` 9 to 17, rule 8 excepted; refreshed 2026-11-20), all in pixels and in this repo. **15 (one nttplay) does not apply**: this app decodes no ansiapps format. **16 (app data on the data card) is done**: `base_dir`, `root_pick` and `r3i6nos-appdata`, every write and read under the folder they return. **17 (the input mapping) is rule 13 below.**
    a **Device report** (`fm1ntt --report [FIRMWARE]`, TOOLS > Device report -> `/roms/FM1-NTT/r36s-report.txt`, r3i6nos's grammar and shared
    writer vendored at `host/vendor/r3i6nos_report.h`, with `# NEEDS:` setup lines, progress files and the `== power ==` section), a **Rec demo**
    (`--rec-demo`, TOOLS > Rec demo -> `/roms/FM1-NTT/Demo/`: a checklist of hero features, the lock and status files in `/run/loveos/demo/`,
@@ -69,6 +69,14 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
     **CI's shellcheck is 0.9 (Ubuntu apt), the Mac's is 0.11 and misses SC2015** (`A && B || C`; 2026-11-18, `web/build.sh`): never write it.
     `scripts/check.sh` lints with the pinned `koalaman/shellcheck:v0.9.0` image when Docker runs (CI's version) and says in its output which shellcheck ran; a line
     saying it used the local one is not CI's result, so say so.
+13. **The r3i6nos input mapping** (r3i6nos rule 17, `../r3i6nos/docs/r3i6nos-mapping.md`; built here 2026-11-20, decisions 2026-11-20 below; `host/padmap.h` is the reader, the menus and the Keymap are in `host/fm1ntt.c`):
+    **L1+R1 opens the main menu** (About, Colour theme, **Keymap**, Device report, Rec demo, Benchmark, Quit in this order, never renamed, reordered or missing, then Tools), **L2+R2 the context menu**;
+    **Fn the next panel, L1+Fn the first, R1+Fn the one before** (a history); **R1 held is "increase"** (Page up and down, Home and End; on MACHINE the octave and the key). **L1, R1, L2, R2, Fn, L3, R3 are the
+    system's: no panel binds them. A panel binds the other ten buttons as it needs** (the maintainer, 2026-11-20: panels may remap the one-touch buttons while in focus, as close to the defaults as their
+    context allows); the binding is a permutation per panel (`g_bind`), so the **Keymap** (help, test, remap with conflict checking, saved in `keymap.txt`, reverts by row, page and all) can swap but never
+    double-bind, and a menu or a question always uses the defaults. **Quit is deliberate: only the main menu's Quit leaves, never a button or Esc.** Keyboard: the backquote key the main menu, the backslash key the context menu (the maintainer, 2026-11-20).
+    The right stick moves the selection off MACHINE (dead zone 0.35, 6 a second; MACHINE's knobs stay 12). **Rec demo, screenshots and the Device report use whatever colour theme is on** (the maintainer, 2026-11-20);
+    the tour sets the person's Keymap aside. Every colour theme passes 4.5:1 (the self-test checks each); the self-test never writes the person's `theme.txt` or `keymap.txt` (it uses a temp folder).
 
 ## Check before committing
 

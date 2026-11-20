@@ -231,7 +231,7 @@ static void rec_cap(Rec *r, int hero, const char *text) {
 /* Puts the app at a known place without a feature depending on where the last one left it. */
 static void rec_place(Rec *r, int panel, int mode) {
     App *a = &r->app;
-    a->panel = panel; a->mode = mode; a->confirm = CF_NONE;
+    a->panel = panel; a->mode = mode; a->confirm = CF_NONE; a->menu_kind = MK_NONE;
 }
 
 /* The tour. Pad buttons by their raw numbers: B 0, A 1, X 2, Y 3, L1 4, R1 5, L2 6, R2 7, up 8, down 9, left 10, right 11, Start 13, Fn 16. */
@@ -448,7 +448,11 @@ static int rec_demo_run(unsigned mask, const char *firmware, int firmware_raw, i
     double t0 = r3_report_ms();
     if (r->on_progress) r->on_progress(r, 0, "starting", r->ud);
     g_stamp_override = "20000101-000000";                 /* what the tour names its files with: the same on every run */
+    int saved_bind[PANEL_COUNT][NSLOT];                          /* the tour presses buttons by their default roles: the person's own Keymap is put aside for it */
+    memcpy(saved_bind, g_bind, sizeof saved_bind);
+    keymap_reset_all();
     tour(r);
+    memcpy(g_bind, saved_bind, sizeof saved_bind);
     g_stamp_override = NULL;
     if (r->firmware && fm1ntt_halted(a->m)) r3_report_line(&r->log, R3_FAIL, "firmware", "the emulated machine HALTED during the tour (a fault in the firmware or the emulator)");
     double rec_ms = r3_report_ms() - t0;

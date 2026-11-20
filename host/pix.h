@@ -38,9 +38,42 @@ static inline int px_panel_rects(int mode, PxRect out[2]) {
 static inline PxRect px_carousel_rect(int mode) { PxRect p[2]; px_panel_rects(mode, p); return (PxRect){p[0].x, p[0].y, p[0].w, 18}; }
 static inline PxRect px_content_rect(int mode) { PxRect p[2]; px_panel_rects(mode, p); return (PxRect){p[0].x, p[0].y + 20, p[0].w, p[0].h - 20}; }
 
-/* ---- the palette (every pair used for text passes 4.5:1; px_selftest checks) ---------------------------------------------- */
-enum { C_BG = 0xFF101018, C_PANEL = 0xFF181824, C_FRAME = 0xFF3C3C58, C_TEXT = 0xFFD8D8E0, C_DIM = 0xFF8C8CA0, C_HEAD = 0xFF70D0F0,
-       C_OK = 0xFF60E080, C_WARN = 0xFFF0D060, C_ERR = 0xFFFF7070, C_KEYUP = 0xFFE8E8E8, C_KEYDN = 0xFF40B0FF, C_BLACKKEY = 0xFF202030, C_SEL = 0xFF2850A0 };
+/* ---- the palette (every pair used for text passes 4.5:1 in every colour theme; px_selftest checks them all) ----------------------------------- */
+enum { PXC_BG, PXC_PANEL, PXC_FRAME, PXC_TEXT, PXC_DIM, PXC_HEAD, PXC_OK, PXC_WARN, PXC_ERR, PXC_KEYUP, PXC_KEYDN, PXC_BLACKKEY, PXC_SEL, PXC_COUNT };
+/* The colour themes of the main menu's Colour theme item (r3i6nos rule 17). Slots keep their roles in every theme, as r3i6nos's do: BG the page, PANEL a box,
+ * TEXT body text, DIM hints, HEAD titles, OK / WARN / ERR good news, caution, mistakes, SEL the selected row, KEYUP / KEYDN / BLACKKEY the piano. Midnight is the default. */
+typedef struct { const char *name; uint32_t c[PXC_COUNT]; } PxTheme;
+static const PxTheme px_themes[] = {
+    {"MIDNIGHT", {0xFF101018, 0xFF181824, 0xFF3C3C58, 0xFFD8D8E0, 0xFF8C8CA0, 0xFF70D0F0, 0xFF60E080, 0xFFF0D060, 0xFFFF7070, 0xFFE8E8E8, 0xFF40B0FF, 0xFF202030, 0xFF2850A0}},
+    {"HIGH CONTRAST", {0xFF000000, 0xFF000000, 0xFF505050, 0xFFFFFFFF, 0xFFC8C8C8, 0xFF00FFFF, 0xFF00FF00, 0xFFFFFF00, 0xFFFF8080, 0xFFFFFFFF, 0xFF00FFFF, 0xFF000000, 0xFF0000C0}},
+    {"LIGHT", {0xFFF2F2F6, 0xFFFFFFFF, 0xFFB8B8CC, 0xFF1A1A24, 0xFF555568, 0xFF00507A, 0xFF0B6B2A, 0xFF7A5200, 0xFFA01818, 0xFFD8D8E4, 0xFF1F4FA0, 0xFF20202C, 0xFFBBD2FF}},
+    {"MONO GREEN", {0xFF000800, 0xFF001000, 0xFF2C6A2C, 0xFF9CFF9C, 0xFF58B058, 0xFF9CFF9C, 0xFF9CFF9C, 0xFFD8FFD8, 0xFFD8FFD8, 0xFF9CFF9C, 0xFFD8FFD8, 0xFF003000, 0xFF0C5A0C}},
+};
+#define PX_THEME_COUNT ((int)(sizeof px_themes / sizeof *px_themes))
+static uint32_t px_pal[PXC_COUNT] = {0xFF101018, 0xFF181824, 0xFF3C3C58, 0xFFD8D8E0, 0xFF8C8CA0, 0xFF70D0F0, 0xFF60E080, 0xFFF0D060, 0xFFFF7070, 0xFFE8E8E8, 0xFF40B0FF, 0xFF202030, 0xFF2850A0};
+static int px_theme_now;
+static inline void px_theme_apply(int i) {
+    if (i < 0 || i >= PX_THEME_COUNT) i = 0;
+    for (int k = 0; k < PXC_COUNT; k++) px_pal[k] = px_themes[i].c[k];
+    px_theme_now = i;
+}
+static inline int px_theme_find(const char *name) {
+    for (int i = 0; i < PX_THEME_COUNT && name; i++) if (!strcmp(px_themes[i].name, name)) return i;
+    return -1;
+}
+#define C_BG (px_pal[PXC_BG])
+#define C_PANEL (px_pal[PXC_PANEL])
+#define C_FRAME (px_pal[PXC_FRAME])
+#define C_TEXT (px_pal[PXC_TEXT])
+#define C_DIM (px_pal[PXC_DIM])
+#define C_HEAD (px_pal[PXC_HEAD])
+#define C_OK (px_pal[PXC_OK])
+#define C_WARN (px_pal[PXC_WARN])
+#define C_ERR (px_pal[PXC_ERR])
+#define C_KEYUP (px_pal[PXC_KEYUP])
+#define C_KEYDN (px_pal[PXC_KEYDN])
+#define C_BLACKKEY (px_pal[PXC_BLACKKEY])
+#define C_SEL (px_pal[PXC_SEL])
 
 /* ---- the canvas -------------------------------------------------------------------------------------------------------- */
 static inline void px_rect(uint32_t *c, PxRect r, uint32_t col) {
@@ -149,7 +182,7 @@ static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", 
 static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
 
 enum { ED_ROWS = 24 };   /* the instrument editor's rows on a page */
-enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 16, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48 };
+enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 16, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48, PX_MENU_MAX = 12 };
 
 typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
 
@@ -211,6 +244,10 @@ typedef struct {
     char tools[PX_MAX_TOOLS][PX_NAME];
     int ntools, tool_sel;
     char confirm[96];                   /* a question awaiting A or B, "" when none */
+    /* the overlay menus (the main menu, the context menu, About, the colour theme picker): kind 0 none, 1 a list (labels, values at the right), 2 a box of text lines */
+    int menu_kind, menu_n, menu_sel;
+    char menu_title[PX_NAME], menu_foot[PX_NAME];
+    char menu_label[PX_MENU_MAX][PX_NAME], menu_value[PX_MENU_MAX][PX_NAME];
     /* monitor: the host's numbers (monitor.h), the page, and the data rain (off by default, opt-in from TOOLS) */
     MonView mon;
     MonRain rain;
@@ -317,14 +354,14 @@ static inline void px_carousel(uint32_t *c, int mode, int cur) {
 
 /* What the buttons do, per panel: the area below the FM-1's screen in Standard. */
 static const char *const PX_HINTS[PANEL_COUNT][9] = {
-    {"PAD ON MACHINE", "D-PAD A B X Y  NOTES", "SELECT START  OCT- OCT+", "STICKS  KNOBS 1-4", "L1  OP1-6 PIT GLO MONO POLY", "L1 STICKS MASTER PRESETS...", "L2  FX HOME SAVE ENV ARP SEQ", "R2  GLO EDIT PLAY REC", "L1+R1  MENU   FN  PANELS"},
-    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "L2 R2  PAGE", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO", "Y  MAKE OR STOP IT  B BACK", ""},
+    {"PAD ON MACHINE", "D-PAD A B X Y  NOTES", "SELECT START  OCT- OCT+", "STICKS KNOBS  R1+PAD OCT KEY", "L1  OP1-6 PIT GLO MONO POLY", "L1 STICKS MASTER PRESETS...", "L2  FX HOME SAVE ENV ARP SEQ", "R2  GLO EDIT PLAY REC", "L1+R1 MENU  L2+R2 CONTEXT"},
+    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "R1 UP DOWN  PAGE", "R1 LEFT RIGHT  FIRST LAST", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO", "Y  MAKE OR STOP IT  B BACK"},
     {"BOTH CORES", "UP DOWN  CORE 0 1", "LEFT RIGHT  CORE 0 1", "", "", "", "", "", ""},
-    {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "L2 R2  ONE PAGE", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", "", ""},
+    {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "R1 UP DOWN  PAGE", "R1 LEFT RIGHT  START END", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", ""},
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
-    {"SEND TO THE MIDI JACK", "A  NOTE ON, THEN OFF", "LEFT RIGHT  NOTE", "UP DOWN  OCTAVE", "X Y  VELOCITY", "L2 R2  CHANNEL", "B  ALL NOTES OFF", "", ""},
-    {"SCOPE, RECORDER, PREVIEW", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "L2  PREVIEW ON OR OFF", "UP DOWN  VOICE", "LEFT RIGHT  OCTAVE", "Y B A X  PLAY (PREVIEW)", "SELECT OR B  EDIT AN INSTRUMENT"},
-    {"THIS DEVICE, NOT THE FM-1", "L2 R2  PAGE", "X  SORT CPU MEM PID", "Y  FREEZE OR RESUME", "A BAR NEVER LIES: THE", "NUMBER AND ! * SAY IT TOO", "TOOLS: DATA RAIN", "", ""},
+    {"SEND TO THE MIDI JACK", "A  NOTE ON, THEN OFF", "LEFT RIGHT  NOTE", "UP DOWN  OCTAVE", "X Y  VELOCITY", "SELECT START  CHANNEL", "B  ALL NOTES OFF", "", ""},
+    {"SCOPE, RECORDER, PREVIEW", "A  RECORD WAV", "X  SAVE SCREENSHOT", "Y  CLEAR PEAKS", "START  PREVIEW ON OR OFF", "SELECT  SOLO ON OR OFF", "UP DOWN VOICE  LEFT RIGHT OCT", "Y B A X  PLAY (PREVIEW)", "B  EDITOR (PREVIEW OFF)"},
+    {"THIS DEVICE, NOT THE FM-1", "R1 UP DOWN  PAGE", "X  SORT CPU MEM PID", "Y  FREEZE OR RESUME", "A BAR NEVER LIES: THE", "NUMBER AND ! * SAY IT TOO", "TOOLS: DATA RAIN", "", ""},
     {"RESET, SLOTS, JIT, PANIC", "UP DOWN  PICK", "LEFT RIGHT  SLOT", "A  RUN", "B  NO TO A QUESTION", "", "", "", ""},
 };
 
@@ -955,6 +992,25 @@ static inline void px_confirm(uint32_t *c, PxRect r, const char *q) {
     px_text(c, b.x + 8, b.y + b.h - 14, "A  YES      B  NO", C_HEAD, 1, b.w - 16);
 }
 
+/* An overlay menu, centred on the whole window: a list with the chosen row on the selection colour and a value at the right of a row, or a box of text lines. */
+static inline void px_menu(uint32_t *c, const UiState *u) {
+    int n = u->menu_n < 0 ? 0 : u->menu_n > PX_MENU_MAX ? PX_MENU_MAX : u->menu_n, w = 340, h = (n < 1 ? 1 : n) * 12 + 40;
+    PxRect b = {(PX_W - w) / 2, (PX_H - h) / 2, w, h};
+    px_rect(c, b, C_PANEL);
+    px_frame(c, b, C_HEAD);
+    px_text(c, b.x + 10, b.y + 8, u->menu_title, C_HEAD, 1, w - 20);
+    for (int i = 0; i < n; i++) {
+        PxRect row = {b.x + 4, b.y + 22 + i * 12, w - 8, 12};
+        if (u->menu_kind == 1 && i == u->menu_sel) px_rect(c, row, C_SEL);
+        px_text(c, row.x + 6, row.y + 2, u->menu_label[i], u->menu_kind == 1 ? C_TEXT : i == 0 ? C_TEXT : C_DIM, 1, row.w - 12);
+        if (u->menu_kind == 1 && u->menu_value[i][0]) {
+            int vw = px_text_w(u->menu_value[i], 1);
+            px_text(c, row.x + row.w - 6 - vw, row.y + 2, u->menu_value[i], C_TEXT, 1, vw + 1);
+        }
+    }
+    px_text(c, b.x + 10, b.y + h - 14, u->menu_foot, C_HEAD, 1, w - 20);
+}
+
 /* The player's column (160 x 480 at the right of the 2x picture): whose demo, how far, what the tour is doing, which keys, the sound, and what it is. */
 static inline void px_panel_player(uint32_t *c, PxRect r, const UiState *u) {
     int x = r.x + 8, w = r.w - 16;
@@ -1025,7 +1081,7 @@ static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
     }
     if (u->confirm[0]) px_confirm(c, cr, u->confirm);
     /* the foot of the panel */
-    px_hint(c, pr[0], narrow ? "L1 R1 PANELS  FN 1X" : "L1 R1 PANELS   START PAUSE   FN ZOOM 2X");
+    px_hint(c, pr[0], narrow ? "L1 R1 MENU  FN PANEL" : "L1 R1 MENU  L2 R2 CONTEXT  FN PANEL  START PAUSE  TAB ZOOM");
     if (!narrow) {
         PxRect b = pr[1];
         px_box(c, (PxRect){b.x + 4, b.y + 8, b.w - 8, b.h - 16}, PX_PANEL_NAMES[p]);
@@ -1033,6 +1089,7 @@ static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
             px_text(c, b.x + 12, b.y + 22 + i * 14, PX_HINTS[p][i], i == 0 ? C_HEAD : C_DIM, 1, b.w - 24);
         px_text(c, b.x + 12, b.y + b.h - 30, "B ESC LEAVES A QUESTION", C_DIM, 1, b.w - 24);
     }
+    if (u->menu_kind) px_menu(c, u);
 }
 
 /* ---- contrast, for the self-test ---------------------------------------------------------------------------------------- */

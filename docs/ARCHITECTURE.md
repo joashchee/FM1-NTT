@@ -46,7 +46,7 @@ is 1:1.
 ### The panel carousel (as TinyNTT's)
 
 The top 18 rows of the right panel are the carousel: the panel before, the current one in the middle, the one after; **Fn** (raw button 16) turns it forward, Home and End both ways
-on a keyboard; it goes round. **L1 + R1** together open the menu (TOOLS) and close it again, back to the panel it came from. Standard also has, below the screen, what the buttons do on this panel. Eight panels:
+on a keyboard; it goes round. **L1 + R1** together open the main menu over the panel (About, Colour theme, Device report, Rec demo, Benchmark, Quit, then Tools) and close it again; **L2 + R2** open the context menu (the panel's own actions); **L1 + Fn** is the first panel and **R1 + Fn** the one shown before (`docs/r3i6nos-mapping.md` in r3i6nos, rule 13 in `CLAUDE.md`). Standard also has, below the screen, what the buttons do on this panel. Eight panels:
 
 | Panel | What it is for | Controls (pad) |
 |---|---|---|

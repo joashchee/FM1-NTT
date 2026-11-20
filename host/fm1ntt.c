@@ -43,6 +43,7 @@
 #include "threads.h"
 #include "toast.h"
 #include "midi_in.h"
+#include "padmap.h"
 
 #ifndef FM1NTT_BUILD
 #define FM1NTT_BUILD "unknown"
@@ -62,11 +63,11 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 16
+#define NTOOLS 15
 #define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
-enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_X, A_Y, A_L2, A_R2 };
+enum { MK_NONE, MK_MAIN, MK_CTX, MK_ABOUT, MK_THEME, MK_KEYMAP };     /* the overlay menus (r3i6nos rule 17): the main menu, the context menu, About, the colour theme picker */
 
 typedef struct {
     fm1ntt_machine *m;
@@ -80,7 +81,14 @@ typedef struct {
     int pad_sent[32];
     float axis[4], axis_acc[4];
     uint32_t axis_t;
-    int scale, key_shift, menu_back;
+    int scale, key_shift;
+    int panel_prev;                     /* the panel shown before this one, plus one (R1 + Fn goes back to it, and again); 0 none yet */
+    int menu_kind, menu_sel, theme_before;   /* the overlay menu open (MK_*), its selection, and the theme to go back to when the picker is cancelled */
+    int km_page, km_sel, km_state, km_other, km_new, km_panel;   /* the Keymap: page, row, 0 browsing / 1 waiting for the new button / 2 a conflict to swap / 3 reset all asked; the other slot; the panel in focus when it opened */
+    char km_note[56];                   /* a line for the Keymap's foot: why a button was refused */
+    char km_hist[5][48];                /* the Keymap's test page: the last presses */
+    int km_nhist;
+    PmStick rstick;                     /* the right stick as the d-pad on the panels that are not MACHINE */
     Toast toast;                        /* the hot-plug toast over row 0 */
     MidiIn min;                         /* USB MIDI input (host/midi_in.h): a ring the main loop empties into the instrument or the machine */
     int min_on;                         /* the reader started */
@@ -182,6 +190,7 @@ typedef struct {
 
 enum { JOB_NONE, JOB_REPORT, JOB_BENCH };
 static void job_start(App *a, int kind);
+static void scale_next(App *a);
 static int job_pct(const App *a);
 static void rain_still(App *a);
 static int files_press(App *a, int act);
@@ -1097,8 +1106,8 @@ static void ed_press(App *a, int act) {
     case A_RIGHT: ed_change(a, 1, 0); break;
     case A_X: ed_change(a, -big, 0); break;
     case A_Y: ed_change(a, big, 0); break;
-    case A_L2: a->ed_group = (a->ed_group + groups - 1) % groups; a->ed_sel = 0; break;
-    case A_R2: a->ed_group = (a->ed_group + 1) % groups; a->ed_sel = 0; break;
+    case A_SELECT: a->ed_group = (a->ed_group + groups - 1) % groups; a->ed_sel = 0; break;
+    case A_START: a->ed_group = (a->ed_group + 1) % groups; a->ed_sel = 0; break;
     case A_OK: ed_save(a); break;
     case A_BACK: a->ed_on = 0; break;
     default: break;
@@ -1195,7 +1204,6 @@ static void tools_run(App *a) {
     case 9: a->want_demo = 1; break;
     case 10: job_start(a, JOB_BENCH); break;
     case 11: a->pace_mode = (a->pace_mode + 1) % 5; if (a->pace_mode == PACE_AUTO) a->pace_lvl = 0; apply_prefs(a); say(a, 0, a->pace_mode == PACE_AUTO ? "Pace AUTO: slows the main loop only when the unit cannot keep up" : a->pace_mode ? "Pace fixed: the main loop is slowed, the sound is not" : "Pace off: exact timing", NULL); break;
-    case 15: request_quit(a); break;
     case 14: a->remember = !a->remember; a->fl_dirty = 0; if (a->remember) a->fl_rev = fm1ntt_flash_revision(a->m); say(a, 0, a->remember ? "Remembering the firmware's saved settings between runs" : "Saved settings are no longer kept", NULL); break;
     case 13: a->bg_demos = !a->bg_demos; say(a, 0, a->bg_demos ? "Background demos on: one at a time, paused while you play" : "Background demos off", NULL); break;
     case 12: a->rain_on = !a->rain_on; if (a->rain_on && a->reduced_motion) rain_still(a); say(a, 0, a->rain_on ? (a->reduced_motion ? "Data rain on, as a still page (reduced motion)" : "Data rain on: it shows on the MONITOR panel") : "Data rain off", NULL); break;
@@ -1216,13 +1224,17 @@ static void act(App *a, int act) {
         return;
     }
     int rows = a->nfiles > 0 ? a->nfiles : 1;                       /* the rows of FILES (Quit is on TOOLS); never zero, so the wrap has a divisor */
+    /* Start pauses on every panel that has no use for it (MIDI's and SOUND's are their own); Page up and down are R1 + up and down (docs/r3i6nos-mapping.md) */
+    if (act == A_START && a->panel != PANEL_SOUND && a->panel != PANEL_MIDI) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); return; }
     switch (a->panel) {
     case PANEL_FILES:
         if (files_press(a, act)) break;                                     /* the firmware's page, when it is open or A opens it */
-        if (act == A_UP) a->file_sel = (a->file_sel + rows - 1) % rows;
+        if (act == A_HOME) a->file_sel = 0;
+        else if (act == A_END) a->file_sel = rows - 1;
+        else if (act == A_UP) a->file_sel = (a->file_sel + rows - 1) % rows;
         else if (act == A_DOWN) a->file_sel = (a->file_sel + 1) % rows;
-        else if (act == A_L2) a->file_sel = a->file_sel - (a->mode == MODE_ZOOMED ? 20 : 22) < 0 ? 0 : a->file_sel - (a->mode == MODE_ZOOMED ? 20 : 22);
-        else if (act == A_R2) a->file_sel = a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22) >= rows ? rows - 1 : a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22);
+        else if (act == A_PGUP) a->file_sel = a->file_sel - (a->mode == MODE_ZOOMED ? 20 : 22) < 0 ? 0 : a->file_sel - (a->mode == MODE_ZOOMED ? 20 : 22);
+        else if (act == A_PGDN) a->file_sel = a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22) >= rows ? rows - 1 : a->file_sel + (a->mode == MODE_ZOOMED ? 20 : 22);
         else if (act == A_X) { scan_files(a); say(a, 0, "Rescanned the folder", NULL); }
         else if (act == A_OK) {
             if (a->file_sel < a->nfiles) {
@@ -1238,10 +1250,12 @@ static void act(App *a, int act) {
     case PANEL_MEMORY:
         if (act == A_UP) mem_move(a, -8);
         else if (act == A_DOWN) mem_move(a, 8);
-        else if (act == A_L2) mem_move(a, -(long)mem_page(a));
-        else if (act == A_R2) mem_move(a, (long)mem_page(a));
+        else if (act == A_PGUP) mem_move(a, -(long)mem_page(a));
+        else if (act == A_PGDN) mem_move(a, (long)mem_page(a));
         else if (act == A_X) mem_move(a, -0x10000);
         else if (act == A_Y) mem_move(a, 0x10000);
+        else if (act == A_HOME) a->mem_off = 0;
+        else if (act == A_END) mem_move(a, 1L << 30);
         else if (act == A_LEFT || act == A_RIGHT) { a->mem_region = (a->mem_region + (act == A_RIGHT ? 1 : 2)) % 3; a->mem_off = 0; }
         break;
     case PANEL_MIDI:
@@ -1251,15 +1265,15 @@ static void act(App *a, int act) {
         else if (act == A_DOWN) a->midi_note = a->midi_note - 12 < 0 ? 0 : a->midi_note - 12;
         else if (act == A_X) a->midi_vel = a->midi_vel - 8 < 1 ? 1 : a->midi_vel - 8;
         else if (act == A_Y) a->midi_vel = a->midi_vel + 8 > 127 ? 127 : a->midi_vel + 8;
-        else if (act == A_L2) a->midi_chan = (a->midi_chan + 15) % 16;
-        else if (act == A_R2) a->midi_chan = (a->midi_chan + 1) % 16;
+        else if (act == A_SELECT) a->midi_chan = (a->midi_chan + 15) % 16;
+        else if (act == A_START) a->midi_chan = (a->midi_chan + 1) % 16;
         else if (act == A_BACK) panic_all(a);
         break;
     case PANEL_SOUND:
         if (a->ed_on) { ed_press(a, act); break; }
         if (act == A_BACK && a->inst) { a->ed_on = 1; a->ed_group = 0; a->ed_sel = 0; break; }
-        if (act == A_L2) pv_toggle(a);
-        else if (act == A_R2) pv_solo_toggle(a);
+        if (act == A_START) pv_toggle(a);
+        else if (act == A_SELECT) pv_solo_toggle(a);
         else if (a->pv_on && act == A_UP) pv_select(a, a->pv_sel - 1);
         else if (a->pv_on && act == A_DOWN) pv_select(a, a->pv_sel + 1);
         else if (a->pv_on && act == A_LEFT) { if (a->pv_oct > -2) a->pv_oct--; }
@@ -1270,14 +1284,14 @@ static void act(App *a, int act) {
         break;
     case PANEL_MONITOR: {
         int narrow = a->mode == MODE_ZOOMED, pages = mon_pages(narrow, a->mon.v.nprocs);
-        if (act == A_L2 || act == A_R2) { a->mon_page = (a->mon_page + (act == A_R2 ? 1 : pages - 1)) % pages; a->mon.force = 1; }
+        if (act == A_HOME || act == A_END) { a->mon_page = act == A_HOME ? 0 : pages - 1; a->mon.force = 1; }
+        else if (act == A_PGUP || act == A_PGDN) { a->mon_page = (a->mon_page + (act == A_PGDN ? 1 : pages - 1)) % pages; a->mon.force = 1; }
         else if (act == A_X) { a->mon.v.sort = (a->mon.v.sort + 1) % MON_SORTS; a->mon.force = 1; { static const char *const sn[MON_SORTS] = {"Sorted by CPU", "Sorted by memory", "Sorted by PID"}; say(a, 0, sn[a->mon.v.sort % MON_SORTS], NULL); } }
         else if (act == A_Y) { a->mon.paused = !a->mon.paused; a->mon.force = 0; say(a, 0, a->mon.paused ? "Monitor frozen: nothing is read" : "Monitor running", NULL); }
         break;
     }
     case PANEL_TOOLS:
-        if (act == A_UP) a->tool_sel = (a->tool_sel + NTOOLS - 1) % NTOOLS;
-        else if (act == A_DOWN) a->tool_sel = (a->tool_sel + 1) % NTOOLS;
+        if (act == A_UP || act == A_DOWN || act == A_PGUP || act == A_PGDN || act == A_HOME || act == A_END) a->tool_sel = pm_list_step(a->tool_sel, NTOOLS, NTOOLS, act);
         else if (act == A_LEFT) a->slot = (a->slot + 2) % 4 + 1;
         else if (act == A_RIGHT) a->slot = a->slot % 4 + 1;
         else if (act == A_OK) tools_run(a);
@@ -1286,11 +1300,406 @@ static void act(App *a, int act) {
     }
 }
 
+/* ---- the pad's bindings, and the Keymap that shows, tests and changes them (r3i6nos rule 17) ------------------------------------------------------------------------
+ * Ten buttons are the app's to bind: B A X Y, the d-pad, Select and Start. L1, R1, L2, R2, Fn, L3 and R3 are the system's (the mapping) and are never bound. Each panel has its own
+ * binding, a permutation of the ten buttons over ten SLOTS (a slot is named for the button that has it by default), so a remap is always a swap and two actions never share
+ * a button. What a slot does is the panel's own (SLOT_LABEL); off MACHINE a slot is an action (SLOT_ACT), and R1 held turns the d-pad's four into pages and Home and End. */
+#define NSLOT 10
+enum { SL_UP, SL_LEFT, SL_DOWN, SL_RIGHT, SL_Y, SL_B, SL_A, SL_X, SL_SELECT, SL_START };
+static const int DEF_BTN[NSLOT] = {8, 10, 9, 11, 3, 0, 1, 2, 12, 13};                    /* raw buttons: up left down right Y B A X Select Start (MACHINE's note order) */
+static const int SLOT_ACT[NSLOT] = {A_UP, A_LEFT, A_DOWN, A_RIGHT, A_Y, A_BACK, A_OK, A_X, A_SELECT, A_START};
+static int g_bind[PANEL_COUNT][NSLOT], g_bind_ready;                                     /* set up on first use, so no path has to remember to */
+static void keymap_reset_all(void) { for (int p = 0; p < PANEL_COUNT; p++) memcpy(g_bind[p], DEF_BTN, sizeof DEF_BTN); g_bind_ready = 1; }
+static int is_bindable(int b) { for (int i = 0; i < NSLOT; i++) if (DEF_BTN[i] == b) return 1; return 0; }
+/* The slot a raw button has on a panel (panel -1: the defaults, which the menus and a question use), or -1. */
+static int slot_of(int panel, int b) {
+    if (!g_bind_ready) keymap_reset_all();
+    const int *t = panel >= 0 && panel < PANEL_COUNT ? g_bind[panel] : DEF_BTN;
+    for (int i = 0; i < NSLOT; i++) if (t[i] == b) return i;
+    return -1;
+}
+/* The action a pad button makes off MACHINE, R1 held or not. */
+static int pad_action(int panel, int b, int r1) { int sl = slot_of(panel, b); return sl < 0 ? A_NONE : pm_r1(SLOT_ACT[sl], r1); }
+static int act_of_pad(int b) { return pad_action(-1, b, 0); }
+static int act_of_pad_r1(int b, int r1) { return pad_action(-1, b, r1); }
+/* A button's name, for the Keymap. */
+static const char *btn_name(int b) {
+    static const char *const n[17] = {"B", "A", "X", "Y", "L1", "R1", "L2", "R2", "UP", "DOWN", "LEFT", "RIGHT", "SELECT", "START", "L3", "R3", "FN"};
+    return b >= 0 && b < 17 ? n[b] : "?";
+}
+/* What each slot does on each panel, for the Keymap ("" none). MACHINE's slots are notes 1 to 8, then OCTAVE - and +; the other panels follow act(). */
+static const char *const SLOT_LABEL[PANEL_COUNT][NSLOT] = {
+    /*        UP             LEFT            DOWN            RIGHT          Y                  B                 A                X                  SELECT           START */
+    /*MACHINE*/ {"NOTE 1 (C)", "NOTE 2 (D)", "NOTE 3 (E)", "NOTE 4 (F)", "NOTE 5 (G)", "NOTE 6 (A)", "NOTE 7 (B)", "NOTE 8 (C)", "OCTAVE -", "OCTAVE +"},
+    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "", "MAKE OR STOP A DEMO", "BACK FROM A PAGE", "OPEN, LOAD", "RESCAN, PLAY DEMO", "", "PAUSE"},
+    /*CPU*/     {"OTHER CORE", "OTHER CORE", "OTHER CORE", "OTHER CORE", "", "", "", "", "", "PAUSE"},
+    /*MEMORY*/  {"ONE ROW UP", "PREVIOUS REGION", "ONE ROW DOWN", "NEXT REGION", "64 KIB FORTH", "", "", "64 KIB BACK", "", "PAUSE"},
+    /*CONSOLE*/ {"", "", "", "", "", "", "", "", "", "PAUSE"},
+    /*MIDI*/    {"OCTAVE UP", "NOTE -", "OCTAVE DOWN", "NOTE +", "VELOCITY +", "ALL NOTES OFF", "NOTE ON (HOLD)", "VELOCITY -", "CHANNEL -", "CHANNEL +"},
+    /*SOUND*/   {"VOICE UP", "OCTAVE -", "VOICE DOWN", "OCTAVE +", "PEAKS / ROOT NOTE", "EDITOR / THIRD", "RECORD / FIFTH", "SHOT / OCTAVE NOTE", "SOLO ON OR OFF", "PREVIEW ON OR OFF"},
+    /*MONITOR*/ {"", "", "", "", "FREEZE OR RESUME", "", "", "SORT", "", "PAUSE"},
+    /*TOOLS*/   {"PREVIOUS TOOL", "SLOT -", "NEXT TOOL", "SLOT +", "", "NO TO A QUESTION", "RUN", "", "", "PAUSE"},
+};
+/* MACHINE under a held button: the same slots, other jobs (L1 the ten black-key functions, L2 the FM-1's second row, R2 the transport, R1 the key and the octave). */
+static const char *const MOD_LABEL[4][NSLOT] = {
+    {"OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "PIT", "GLO", "MONO", "POLY"},
+    {"SEL (NO BUTTON)", "FX", "HOME", "SAVE", "ENV", "LFO", "ARP", "SEQ", "KEY DOWN", "KEY UP"},
+    {"GLO", "EDIT", "PLAY / STOP", "REC", "", "", "", "", "", ""},
+    {"KEY UP", "OCTAVE -", "KEY DOWN", "OCTAVE +", "", "", "", "", "", ""},
+};
+static const char *const MOD_NAME[4] = {"+ L1", "+ L2", "+ R2", "+ R1"};
+/* The Keymap's pages: the system's (fixed), each panel's bindings, MACHINE's held-button sets, and the test. ctx is a panel, KM_SYS or KM_TEST; mod 0 none, 1..4 L1 L2 R2 R1. */
+enum { KM_SYS = -2, KM_TEST = -3 };
+typedef struct { int ctx, mod, part; } KmPage;
+#define KM_MAXP 24
+static const char *const KM_SYS_ROWS[][2] = {
+    {"L1 + R1", "MAIN MENU"}, {"L2 + R2", "CONTEXT MENU"}, {"FN", "NEXT PANEL"}, {"L1 + FN", "FIRST PANEL"}, {"R1 + FN", "PANEL BEFORE (AGAIN: BACK)"},
+    {"` KEY", "MAIN MENU"}, {"\\ KEY", "CONTEXT MENU"}, {"HOME / END KEYS", "PANEL BEFORE / NEXT"}, {"TAB, F1", "ZOOM 1X / 2X"}, {"P", "PAUSE"}, {"ESC", "CLOSES A MENU"},
+    {"R1 + D-PAD UP DOWN", "PAGE UP, PAGE DOWN"}, {"R1 + D-PAD LEFT RIGHT", "HOME, END"}, {"R1 + RIGHT STICK", "THE SAME, 6 A SECOND"}, {"RIGHT STICK", "SELECTION (NOT MACHINE)"},
+    {"STICKS ON MACHINE", "KNOBS 1 TO 4"}, {"L3", "NO VIRTUAL MOUSE"}, {"R3", "NO VIRTUAL KEYBOARD"}, {"L1 L2 R1 R2 FN L3 R3", "THE SYSTEM'S, NEVER BOUND"},
+    {"IN A MENU", "D-PAD, A, B (FIXED)"}, {"QUIT", "THE MAIN MENU ONLY"},
+};
+#define KM_SYS_N ((int)(sizeof KM_SYS_ROWS / sizeof *KM_SYS_ROWS))
+#define KM_SYS_PER 11
+static int km_pages(KmPage out[KM_MAXP]) {
+    int n = 0;
+    for (int part = 0; part * KM_SYS_PER < KM_SYS_N; part++) out[n++] = (KmPage){KM_SYS, 0, part};
+    for (int p = 0; p < PANEL_COUNT; p++) {
+        int any = p == PANEL_MACHINE;
+        for (int i = 0; i < NSLOT && !any; i++) if (SLOT_LABEL[p][i][0] && i != SL_START) any = 1;
+        if (!any) continue;
+        out[n++] = (KmPage){p, 0, 0};
+        if (p == PANEL_MACHINE) for (int m = 1; m <= 4; m++) out[n++] = (KmPage){p, m, 0};
+    }
+    out[n++] = (KmPage){KM_TEST, 0, 0};
+    return n;
+}
+/* The bindings are kept in keymap.txt in the app's folder: a line "PANEL b b b b b b b b b b" for each panel that is not the default. */
+static void keymap_path(char *out, size_t n) { char b[300]; base_dir(b, sizeof b); snprintf(out, n, "%s/keymap.txt", b); }
+static void keymap_save(void) {
+    if (!g_bind_ready) keymap_reset_all();
+    char path[340], d[300], text[PANEL_COUNT * 120];
+    size_t len = 0;
+    text[0] = 0;
+    for (int p = 0; p < PANEL_COUNT; p++) {
+        if (!memcmp(g_bind[p], DEF_BTN, sizeof DEF_BTN)) continue;
+        len += (size_t)snprintf(text + len, sizeof text - len, "%s", PX_PANEL_NAMES[p]);
+        for (int i = 0; i < NSLOT; i++) len += (size_t)snprintf(text + len, sizeof text - len, " %d", g_bind[p][i]);
+        len += (size_t)snprintf(text + len, sizeof text - len, "\n");
+    }
+    keymap_path(path, sizeof path);
+    base_dir(d, sizeof d);
+    if (mkdir_p(d) == 0) write_atomic(path, text, len);
+}
+/* One saved line, accepted only when it is a permutation of the ten bindable buttons (a hand-edited or damaged file never leaves a button double-bound or a system button taken). */
+static int keymap_parse_line(const char *line) {
+    char name[40];
+    int v[NSLOT], used = 0, off = 0;
+    if (sscanf(line, "%39s%n", name, &off) != 1) return -1;
+    int pn = -1;
+    for (int p = 0; p < PANEL_COUNT; p++) if (!strcmp(name, PX_PANEL_NAMES[p])) pn = p;
+    if (pn < 0) return -1;
+    for (int i = 0; i < NSLOT; i++) {
+        int k = 0;
+        if (sscanf(line + off, "%d%n", &v[i], &k) != 1 || !is_bindable(v[i]) || (used >> v[i] & 1)) return -1;
+        used |= 1 << v[i];
+        off += k;
+    }
+    memcpy(g_bind[pn], v, sizeof v);
+    return pn;
+}
+static void keymap_load(void) {
+    char path[340], why[64];
+    size_t n = 0;
+    keymap_path(path, sizeof path);
+    if (!g_bind_ready) keymap_reset_all();
+    uint8_t *b = read_file(path, &n, why, sizeof why);
+    if (!b) return;
+    char *txt = malloc(n + 1);
+    if (txt) {
+        memcpy(txt, b, n);
+        txt[n] = 0;
+        for (char *l = strtok(txt, "\n"); l; l = strtok(NULL, "\n")) keymap_parse_line(l);
+        free(txt);
+    }
+    free(b);
+}
+
+/* ---- the overlay menus: the main menu (L1 + R1), the context menu (L2 + R2), About, the colour theme (r3i6nos rule 17, docs/r3i6nos-mapping.md) ------------------------
+ * The main menu's first items are fixed, in this order: About, Colour theme, Keymap, Device report, Rec demo, Benchmark, Quit; the app's own follow (here: Tools, the panel
+ * that holds the rest). Never renamed, reordered or missing; Benchmark would be hidden only when there was nothing to measure, and there is (TOOLS > Benchmark). */
+enum { MM_ABOUT, MM_THEME, MM_KEYMAP, MM_REPORT, MM_DEMO, MM_BENCH, MM_QUIT, MM_TOOLS, MM_COUNT };
+static const char *const MM_LABEL[MM_COUNT] = {"ABOUT", "COLOUR THEME", "KEYMAP", "DEVICE REPORT", "REC DEMO", "BENCHMARK", "QUIT", "TOOLS"};
+#define ABOUT_LINES 6
+
+/* The panel changes, whoever asked (the carousel, a chord, the menu): the one before is remembered for R1 + Fn, and what the old panel held is let go. */
+static void panel_switch(App *a, int p) {
+    if (p < 0 || p >= PANEL_COUNT) return;
+    for (int b = 0; b < 32; b++) if (a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; }
+    if (p != a->panel) { a->panel_prev = a->panel + 1; a->panel = p; }
+    pv_leave(a);
+    if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
+}
+/* R1 + Fn: the panel shown before this one (a history, not "number minus one"); pressed twice it comes back. */
+static void panel_back(App *a) {
+    if (a->panel_prev <= 0) { say(a, 0, "No earlier panel yet", NULL); return; }
+    panel_switch(a, a->panel_prev - 1);
+}
+
+/* The colour theme is kept in the app's folder (theme.txt, temp name then rename), so it survives a restart. */
+static void theme_path(char *out, size_t n) { char b[300]; base_dir(b, sizeof b); snprintf(out, n, "%s/theme.txt", b); }
+static void theme_save(void) {
+    char p[340], line[64];
+    theme_path(p, sizeof p);
+    snprintf(line, sizeof line, "%s\n", px_themes[px_theme_now].name);
+    char d[300];
+    base_dir(d, sizeof d);
+    if (mkdir_p(d) == 0) write_atomic(p, line, strlen(line));
+}
+static void theme_load(void) {
+    char p[340], why[64];
+    size_t n = 0;
+    theme_path(p, sizeof p);
+    uint8_t *b = read_file(p, &n, why, sizeof why);
+    if (!b) return;
+    char name[PX_NAME] = {0};
+    for (size_t i = 0; i < n && i < sizeof name - 1 && b[i] != '\n' && b[i] != '\r'; i++) name[i] = (char)b[i];
+    free(b);
+    int i = px_theme_find(name);
+    if (i >= 0) px_theme_apply(i);
+}
+
+/* What the context menu holds on each panel: the panel's own actions, as the same code that a press runs (an action code), or a special one. */
+enum { CX_PANIC = 1, CX_PAUSE, CX_SCALE, CX_SHOT, CX_ACT = 0x100 };
+typedef struct { int panel; const char *label; int code; } CtxItem;
+static const CtxItem CTX[] = {
+    {PANEL_MACHINE, "PANIC: ALL NOTES OFF", CX_PANIC}, {PANEL_MACHINE, "PAUSE / RESUME", CX_PAUSE}, {PANEL_MACHINE, "NEXT SCALE", CX_SCALE},
+    {PANEL_FILES, "LOAD THE SELECTED FILE", CX_ACT | A_OK}, {PANEL_FILES, "RESCAN THE FOLDER", CX_ACT | A_X},
+    {PANEL_CPU, "SWITCH CPU", CX_ACT | A_UP},
+    {PANEL_MEMORY, "NEXT REGION", CX_ACT | A_RIGHT}, {PANEL_MEMORY, "BACK TO THE TOP", CX_ACT | A_HOME}, {PANEL_MEMORY, "NEXT PAGE", CX_ACT | A_PGDN},
+    {PANEL_MIDI, "PANIC: ALL NOTES OFF", CX_ACT | A_BACK},
+    {PANEL_SOUND, "RECORD / STOP", CX_ACT | A_OK}, {PANEL_SOUND, "PREVIEW ON / OFF", CX_ACT | A_START}, {PANEL_SOUND, "SOLO ON / OFF", CX_ACT | A_SELECT}, {PANEL_SOUND, "CLEAR PEAKS", CX_ACT | A_Y},
+    {PANEL_MONITOR, "SORT", CX_ACT | A_X}, {PANEL_MONITOR, "FREEZE / RESUME", CX_ACT | A_Y}, {PANEL_MONITOR, "NEXT PAGE", CX_ACT | A_PGDN},
+    {PANEL_TOOLS, "RUN THE SELECTED TOOL", CX_ACT | A_OK},
+};
+#define NCTX ((int)(sizeof CTX / sizeof *CTX))
+/* The items for the focus now: the panel's, then Screenshot (every panel has it); an open page or editor offers to close it instead. Returns how many (at most PX_MENU_MAX). */
+static int ctx_items(const App *a, const char *label[], int code[]) {
+    int n = 0;
+    if (a->info_on || a->ed_on) { label[n] = "CLOSE THIS PAGE"; code[n++] = CX_ACT | A_BACK; }
+    else {
+        for (int i = 0; i < NCTX && n < PX_MENU_MAX - 2; i++) if (CTX[i].panel == a->panel) { label[n] = CTX[i].label; code[n++] = CTX[i].code; }
+        if (a->panel == PANEL_SOUND && a->inst) { label[n] = "EDIT THE INSTRUMENT"; code[n++] = CX_ACT | A_BACK; }       /* B does it too, unless the preview is on and B plays a note */
+    }
+    label[n] = "SAVE A SCREENSHOT"; code[n++] = CX_SHOT;
+    return n;
+}
+static void ctx_run(App *a, int code) {
+    if (code == CX_PANIC) panic_all(a);
+    else if (code == CX_PAUSE) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); }
+    else if (code == CX_SCALE) scale_next(a);
+    else if (code == CX_SHOT) screenshot(a);
+    else if (code & CX_ACT) act(a, code & 0xFF);
+}
+
+static void menu_open_main(App *a) { a->menu_kind = MK_MAIN; a->menu_sel = 0; }
+static void menu_open_ctx(App *a) { a->menu_kind = MK_CTX; a->menu_sel = 0; }
+static void menu_close(App *a) { a->menu_kind = MK_NONE; a->menu_sel = 0; a->km_state = 0; }
+/* The theme picker closed without a choice puts back the theme it was opened over. */
+static void menu_cancel(App *a) {
+    if (a->menu_kind == MK_THEME) px_theme_apply(a->theme_before);
+    menu_close(a);
+}
+/* L1 + R1: opens the main menu, or closes whatever menu is open. */
+static void menu_chord(App *a) {
+    for (int b = 0; b < 32; b++) if (a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; }
+    if (a->menu_kind) menu_cancel(a); else menu_open_main(a);
+    if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
+}
+/* ---- the Keymap: help, test and remap (every r3i6nos app has it in its main menu) --------------------------------------------------------------------------------------
+ * Browsing: up and down pick a row, left and right turn the pages, A remaps the row (press the new button; one that another action has is a conflict, asked before it is swapped;
+ * L1 L2 R1 R2 Fn L3 R3 are the system's and refused), X puts the row back, Y the page, Start everything (asked). Changes are kept in keymap.txt at once. The last page tests: every
+ * press is shown with what it does on the panel the menu was opened over, and nothing is acted. L1 + R1 leaves. */
+static const KmPage *km_cur(const App *a, KmPage pg[KM_MAXP], int *np) {
+    *np = km_pages(pg);
+    int i = a->km_page < 0 || a->km_page >= *np ? 0 : a->km_page;
+    return &pg[i];
+}
+static void km_set(App *a, int panel, int slot, int btn) {                  /* slot gets btn; whoever had btn gets the old one: always a permutation */
+    int old = g_bind[panel][slot], o = slot_of(panel, btn);
+    if (o >= 0 && o != slot) g_bind[panel][o] = old;
+    g_bind[panel][slot] = btn;
+    keymap_save();
+}
+static void km_open(App *a) {
+    KmPage pg[KM_MAXP];
+    int np = km_pages(pg);
+    a->menu_kind = MK_KEYMAP; a->menu_sel = 0; a->km_sel = 0; a->km_state = 0; a->km_panel = a->panel; a->km_nhist = 0; a->km_note[0] = 0;
+    a->km_page = 0;
+    for (int i = 0; i < np; i++) if (pg[i].ctx == a->panel && pg[i].mod == 0) a->km_page = i;       /* the page of the panel the menu was opened over */
+}
+/* A pad button went down while the Keymap waits for the new button. */
+static void km_capture(App *a, int b, const KmPage *pg) {
+    int slot = a->km_sel;
+    if (!is_bindable(b)) { snprintf(a->km_note, sizeof a->km_note, "%s IS THE SYSTEM'S: NOT BINDABLE", btn_name(b)); return; }
+    if (b == g_bind[pg->ctx][slot]) { a->km_state = 0; return; }              /* the same button: nothing changes */
+    int o = slot_of(pg->ctx, b);
+    if (o >= 0 && SLOT_LABEL[pg->ctx][o][0]) { a->km_state = 2; a->km_other = o; a->km_new = b; return; }   /* in use for something: ask */
+    km_set(a, pg->ctx, slot, b);                                              /* free, or used for nothing here: just swap */
+    a->km_state = 0;
+}
+/* One action while the Keymap is open and no button is awaited (a press or a stick step). */
+static void keymap_press(App *a, int action) {
+    KmPage pg[KM_MAXP];
+    int np;
+    const KmPage *p = km_cur(a, pg, &np);
+    int edit = p->ctx >= 0 && p->mod == 0;
+    a->km_note[0] = 0;
+    if (a->km_state == 2) {
+        if (action == A_OK) { km_set(a, p->ctx, a->km_sel, a->km_new); snprintf(a->km_note, sizeof a->km_note, "SWAPPED AND SAVED"); a->km_state = 0; }
+        else if (action == A_BACK) a->km_state = 0;
+        return;
+    }
+    if (a->km_state == 3) {
+        if (action == A_OK) { keymap_reset_all(); keymap_save(); snprintf(a->km_note, sizeof a->km_note, "EVERY PANEL IS BACK TO ITS DEFAULTS"); a->km_state = 0; }
+        else if (action == A_BACK) a->km_state = 0;
+        return;
+    }
+    if (a->km_state == 1) { if (action == A_BACK) a->km_state = 0; return; }
+    if (action == A_BACK) { menu_cancel(a); return; }
+    if (p->ctx == KM_TEST) return;
+    if (action == A_LEFT || action == A_RIGHT) { a->km_page = (a->km_page + (action == A_RIGHT ? 1 : np - 1)) % np; a->km_sel = 0; return; }
+    if (action == A_HOME || action == A_END) { a->km_page = action == A_HOME ? 0 : np - 1; a->km_sel = 0; return; }
+    if (p->ctx == KM_SYS) return;
+    if (action == A_UP || action == A_DOWN || action == A_PGUP || action == A_PGDN) { a->km_sel = pm_list_step(a->km_sel, NSLOT, NSLOT, action == A_PGUP ? A_HOME : action == A_PGDN ? A_END : action); return; }
+    if (action == A_OK) {
+        if (!edit) snprintf(a->km_note, sizeof a->km_note, "CHANGE A BUTTON ON THE BASE PAGE");
+        else a->km_state = 1;
+    } else if (action == A_X && edit) {
+        km_set(a, p->ctx, a->km_sel, DEF_BTN[a->km_sel]);
+        snprintf(a->km_note, sizeof a->km_note, "THAT ROW IS BACK TO ITS DEFAULT");
+    } else if (action == A_Y && edit) {
+        memcpy(g_bind[p->ctx], DEF_BTN, sizeof DEF_BTN); keymap_save();
+        snprintf(a->km_note, sizeof a->km_note, "THIS PAGE IS BACK TO ITS DEFAULTS");
+    } else if (action == A_START) a->km_state = 3;
+}
+/* The test page: a press is noted, with what it does on the panel the Keymap was opened over, and nothing else happens. */
+static void km_test_note(App *a, const char *what, const char *does) {
+    if (a->km_nhist == 5) { memmove(a->km_hist[0], a->km_hist[1], 4 * sizeof a->km_hist[0]); a->km_nhist = 4; }
+    snprintf(a->km_hist[a->km_nhist++], sizeof a->km_hist[0], "%s  %s", what, does);
+}
+static void km_test_pad(App *a, int b) {
+    static const char *const sys[17] = {"", "", "", "", "A MODIFIER (HOLD)", "INCREASE (HOLD)", "A MODIFIER, L2 + R2", "A MODIFIER, L2 + R2", "", "", "", "", "", "", "NO VIRTUAL MOUSE", "NO VIRTUAL KEYBOARD", "NEXT PANEL"};
+    int sl = slot_of(a->km_panel, b);
+    const char *d = b >= 0 && b < 17 && sys[b][0] ? sys[b] : sl >= 0 && SLOT_LABEL[a->km_panel][sl][0] ? SLOT_LABEL[a->km_panel][sl] : "NOTHING HERE";
+    km_test_note(a, btn_name(b), d);
+}
+/* One action while a menu is open (a press, or a step of the right stick). A chooses, B closes, the rest moves the selection. */
+static void menu_press(App *a, int action) {
+    const char *cl[PX_MENU_MAX];
+    int cc[PX_MENU_MAX], n = MM_COUNT;
+    if (a->menu_kind == MK_CTX) n = ctx_items(a, cl, cc);
+    else if (a->menu_kind == MK_THEME) n = PX_THEME_COUNT;
+    else if (a->menu_kind == MK_ABOUT) { menu_close(a); return; }          /* any key closes About */
+    else if (a->menu_kind == MK_KEYMAP) { keymap_press(a, action); return; }
+    if (action == A_BACK) { menu_cancel(a); return; }
+    if (action == A_OK) {
+        int sel = a->menu_sel < n ? a->menu_sel : 0, kind = a->menu_kind;
+        if (kind == MK_THEME) { theme_save(); say(a, 0, "Colour theme %s", px_themes[px_theme_now].name); menu_close(a); return; }
+        menu_close(a);
+        if (kind == MK_CTX) { ctx_run(a, cc[sel]); return; }
+        switch (sel) {
+        case MM_ABOUT: a->menu_kind = MK_ABOUT; break;
+        case MM_THEME: a->menu_kind = MK_THEME; a->menu_sel = px_theme_now; a->theme_before = px_theme_now; break;
+        case MM_KEYMAP: km_open(a); break;
+        case MM_REPORT: job_start(a, JOB_REPORT); break;
+        case MM_DEMO: a->want_demo = 1; break;
+        case MM_BENCH: job_start(a, JOB_BENCH); break;
+        case MM_QUIT: request_quit(a); break;
+        case MM_TOOLS: panel_switch(a, PANEL_TOOLS); break;
+        default: break;
+        }
+        return;
+    }
+    a->menu_sel = pm_list_step(a->menu_sel, n, PX_MENU_MAX, action);
+    if (a->menu_kind == MK_THEME) px_theme_apply(a->menu_sel);               /* the picker shows each theme as the selection moves */
+}
+static void fill_menu(const App *a, UiState *u) {
+    u->menu_kind = a->menu_kind == MK_ABOUT ? 2 : a->menu_kind ? 1 : 0;      /* how it is drawn: 1 a list with a chosen row, 2 lines of text */
+    if (!a->menu_kind) return;
+    u->menu_sel = a->menu_sel;
+    const char *cl[PX_MENU_MAX];
+    int cc[PX_MENU_MAX];
+    if (a->menu_kind == MK_MAIN) {
+        snprintf(u->menu_title, sizeof u->menu_title, "MENU");
+        snprintf(u->menu_foot, sizeof u->menu_foot, "A CHOOSE  B CLOSE");
+        u->menu_n = MM_COUNT;
+        for (int i = 0; i < MM_COUNT; i++) snprintf(u->menu_label[i], PX_NAME, "%s", MM_LABEL[i]);
+        snprintf(u->menu_value[MM_THEME], PX_NAME, "%s", px_themes[px_theme_now].name);
+    } else if (a->menu_kind == MK_CTX) {
+        snprintf(u->menu_title, sizeof u->menu_title, "%s", PX_PANEL_NAMES[a->panel]);
+        snprintf(u->menu_foot, sizeof u->menu_foot, "A CHOOSE  B CLOSE");
+        u->menu_n = ctx_items(a, cl, cc);
+        for (int i = 0; i < u->menu_n; i++) snprintf(u->menu_label[i], PX_NAME, "%s", cl[i]);
+    } else if (a->menu_kind == MK_THEME) {
+        snprintf(u->menu_title, sizeof u->menu_title, "COLOUR THEME");
+        snprintf(u->menu_foot, sizeof u->menu_foot, "A KEEP  B BACK");
+        u->menu_n = PX_THEME_COUNT;
+        for (int i = 0; i < PX_THEME_COUNT; i++) { snprintf(u->menu_label[i], PX_NAME, "%s", px_themes[i].name); snprintf(u->menu_value[i], PX_NAME, "%s", i == a->theme_before ? "*" : ""); }
+    } else if (a->menu_kind == MK_KEYMAP) {
+        KmPage pg[KM_MAXP];
+        int np;
+        const KmPage *p = km_cur(a, pg, &np);
+        int pi = (int)(p - pg) + 1;
+        const char *name = p->ctx == KM_SYS ? "SYSTEM" : p->ctx == KM_TEST ? "TEST" : PX_PANEL_NAMES[p->ctx];
+        snprintf(u->menu_title, sizeof u->menu_title, "KEYMAP < %d/%d > %s%s", pi, np, name, p->ctx >= 0 && p->mod ? MOD_NAME[p->mod - 1] : p->ctx == KM_SYS && p->part ? " 2" : "");
+        if (p->ctx == KM_SYS) {
+            int n = 0;
+            for (int i = p->part * KM_SYS_PER; i < KM_SYS_N && n < KM_SYS_PER; i++, n++) { snprintf(u->menu_label[n], PX_NAME, "%s", KM_SYS_ROWS[i][0]); snprintf(u->menu_value[n], PX_NAME, "%s", KM_SYS_ROWS[i][1]); }
+            u->menu_n = n; u->menu_sel = -1;
+            snprintf(u->menu_foot, sizeof u->menu_foot, "< > PAGES  B CLOSE");
+        } else if (p->ctx == KM_TEST) {
+            u->menu_kind = 2;
+            snprintf(u->menu_label[0], PX_NAME, "PRESS ANY BUTTON: NOTHING IS DONE");
+            for (int i = 0; i < 5; i++) snprintf(u->menu_label[1 + i], PX_NAME, "%s", i < a->km_nhist ? a->km_hist[i] : "");
+            char held[PX_NAME] = "HELD:";
+            for (int b = 0; b < 17; b++) if (a->pad_mask >> b & 1) { size_t l = strlen(held); snprintf(held + l, sizeof held - l, " %s", btn_name(b)); }
+            snprintf(u->menu_label[6], PX_NAME, "%s", held);
+            snprintf(u->menu_label[7], PX_NAME, "STICKS L %.1f %.1f  R %.1f %.1f", a->axis[0], a->axis[1], a->axis[2], a->axis[3]);
+            u->menu_n = 8;
+            snprintf(u->menu_foot, sizeof u->menu_foot, "L1 + R1 LEAVES");
+        } else {
+            u->menu_n = NSLOT;
+            for (int i = 0; i < NSLOT; i++) {
+                const char *lab = p->mod ? MOD_LABEL[p->mod - 1][i] : SLOT_LABEL[p->ctx][i];
+                snprintf(u->menu_label[i], PX_NAME, "%s", lab[0] ? lab : "-");
+                snprintf(u->menu_value[i], PX_NAME, "%s%s", btn_name(g_bind[p->ctx][i]), g_bind[p->ctx][i] != DEF_BTN[i] ? " *" : "");
+            }
+            u->menu_sel = a->km_sel;
+            if (a->km_note[0]) snprintf(u->menu_foot, sizeof u->menu_foot, "%s", a->km_note);
+            else if (a->km_state == 1) snprintf(u->menu_foot, sizeof u->menu_foot, "PRESS THE NEW BUTTON (SAME: CANCEL)");
+            else if (a->km_state == 2) snprintf(u->menu_foot, sizeof u->menu_foot, "%s USES %s. A SWAPS  B NO", SLOT_LABEL[p->ctx][a->km_other], btn_name(a->km_new));
+            else if (a->km_state == 3) snprintf(u->menu_foot, sizeof u->menu_foot, "ALL BACK TO DEFAULTS? A YES  B NO");
+            else if (p->mod) snprintf(u->menu_foot, sizeof u->menu_foot, "SET BUTTONS ON THE BASE PAGE  B CLOSE");
+            else snprintf(u->menu_foot, sizeof u->menu_foot, "A REMAP  X/Y/START RESET ROW/PAGE/ALL");
+        }
+    } else {
+        char v[64];
+        snprintf(u->menu_title, sizeof u->menu_title, "ABOUT");
+        snprintf(u->menu_foot, sizeof u->menu_foot, "ANY KEY CLOSES");
+        snprintf(v, sizeof v, "V%s %s", fm1ntt_version(), FM1NTT_BUILD);
+        const char *lines[ABOUT_LINES] = {"FM1-NTT", v, "FM-1 FIRMWARE SANDBOX AND EMULATOR", "MIT LICENCE", "BASED ON THE MIT FM1-EMU", "EACH FIRMWARE KEEPS ITS OWN LICENCE"};
+        u->menu_n = ABOUT_LINES;
+        for (int i = 0; i < ABOUT_LINES; i++) snprintf(u->menu_label[i], PX_NAME, "%s", lines[i]);
+    }
+}
+
 /* ---- the UI state, from the app and the core --------------------------------------------------------------------------- */
 static void fill_ui(App *a, UiState *u, int use_lock) {
     memset(u, 0, sizeof *u);
     u->midi_in_devs = a->min_on ? a->min.devs : -1; u->midi_in_got = a->min_routed;
     u->panel = a->panel;
+    fill_menu(a, u);
     if (use_lock) lock(a);
     int loaded = fm1ntt_loaded(a->m);
     u->fw_name = a->file;
@@ -1417,7 +1826,6 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->tools[9], PX_NAME, "  REC DEMO");
     snprintf(u->tools[10], PX_NAME, "  BENCHMARK%s", a->job_kind == JOB_BENCH ? " (RUNNING)" : "");
     snprintf(u->tools[14], PX_NAME, "  REMEMBER SETTINGS: %s", a->remember ? "ON" : "OFF");
-    snprintf(u->tools[15], PX_NAME, "  QUIT");
     if (a->pace_mode == PACE_AUTO) snprintf(u->tools[11], PX_NAME, "  PACE: AUTO (NOW %d)", a->pace_lvl);
     else if (a->pace_mode) snprintf(u->tools[11], PX_NAME, "  PACE: %d", a->pace_mode);
     else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
@@ -1495,16 +1903,8 @@ static int button_of_key(SDL_Keycode k) {
     default: return -1;
     }
 }
-/* The R36S pad's raw buttons: B 0, A 1, X 2, Y 3, L1 4, R1 5, L2 6, R2 7, up 8, down 9, left 10, right 11, Select 12, Start 13, Fn 16;
- * axes 0 1 the left stick (x, y), 2 3 the right (y is down in SDL). Every other panel: the d-pad and A B X Y L2 R2 as actions. */
-static int act_of_pad(int b) {
-    switch (b) {
-    case 8: return A_UP; case 9: return A_DOWN; case 10: return A_LEFT; case 11: return A_RIGHT;
-    case 1: return A_OK; case 0: return A_BACK; case 2: return A_X; case 3: return A_Y; case 6: return A_L2; case 7: return A_R2;
-    default: return A_NONE;
-    }
-}
-
+/* The R36S pad's raw buttons: B 0, A 1, X 2, Y 3, L1 4, R1 5, L2 6, R2 7, up 8, down 9, left 10, right 11, Select 12, Start 13, L3 14, R3 15, Fn 16;
+ * axes 0 1 the left stick (x, y), 2 3 the right (y is down in SDL). What the ten bindable buttons do is each panel's binding (g_bind, the Keymap). */
 /* On MACHINE the pad plays. Without a modifier: the d-pad and face buttons are eight notes of the chosen scale (up C, left D, down E,
  * right F, Y G, B A, A B, X the next C), Select OCT-, Start OCT+, the sticks the four knobs. L1 held: the sticks are master, presets,
  * select and algorithm; the d-pad, faces, Select and Start the ten black-key functions (OP1-OP6, PIT, GLO, MONO, POLY); Fn changes the
@@ -1516,14 +1916,13 @@ static const struct { const char *name; int n; int semi[8]; } SCALES[] = {
     {"CHROMATIC", 8, {0, 1, 2, 3, 4, 5, 6, 7}},
 };
 #define NSCALES ((int)(sizeof SCALES / sizeof SCALES[0]))
+static void scale_next(App *a) { a->scale = (a->scale + 1) % NSCALES; say(a, 0, "Scale %s", SCALES[a->scale].name); }
 #define KEY_MIN (-6)
 #define KEY_MAX 5
 static const char *const KEY_NAMES[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 static const char *key_name(int shift) { return KEY_NAMES[((shift % 12) + 12) % 12]; }
-/* The pad's button as a position 0..7 in the scale (up left down right Y B A X), or -1. */
-static int degree_of_pad(int b) {
-    switch (b) { case 8: return 0; case 10: return 1; case 9: return 2; case 11: return 3; case 3: return 4; case 0: return 5; case 1: return 6; case 2: return 7; default: return -1; }
-}
+/* The pad's button as a position 0..7 in the scale (by default up left down right Y B A X; the Keymap can swap them), or -1. */
+static int degree_of_pad(int b) { int sl = slot_of(PANEL_MACHINE, b); return sl >= 0 && sl < 8 ? sl : -1; }
 /* The matrix id of a scale position: C4 is note key 7 (F3 is key 0) plus the key's shift; -1 when it falls off the 27 keys. */
 static int note_id_of_degree(int scale, int shift, int deg) {
     int n = SCALES[scale].n, semi = SCALES[scale].semi[deg % n] + 12 * (deg / n), k = 7 + shift + semi;
@@ -1532,18 +1931,19 @@ static int note_id_of_degree(int scale, int shift, int deg) {
 static int pad_mod(unsigned mask) {
     return mask >> PAD_L1 & 1 ? MOD_L1 : mask >> PAD_L2 & 1 ? MOD_L2 : mask >> PAD_R2 & 1 ? MOD_R2 : MOD_NONE;
 }
-/* Under a modifier, the FM-1 button a pad button presses (matrix id 0..13), -1 none, -2 a name the FM-1 has no button for. */
+/* Under a modifier, the FM-1 button a pad button presses (matrix id 0..13), -1 none, -2 a name the FM-1 has no button for. By slot, so the Keymap's swaps carry through. */
 static int button_of_pad_mod(int mod, int b) {
-    if (mod == MOD_L2) switch (b) { case 8: return -2; case 10: return 2; case 9: return 8; case 11: return 9; case 3: return 4; case 0: return 5; case 1: return 10; case 2: return 11; default: return -1; }
-    if (mod == MOD_R2) switch (b) { case 8: return 7; case 10: return 6; case 9: return 12; case 11: return 13; default: return -1; }
-    return -1;
+    static const int l2[NSLOT] = {-2, 2, 8, 9, 4, 5, 10, 11, -1, -1}, r2[NSLOT] = {7, 6, 12, 13, -1, -1, -1, -1, -1, -1};
+    int sl = slot_of(PANEL_MACHINE, b);
+    if (sl < 0) return -1;
+    return mod == MOD_L2 ? l2[sl] : mod == MOD_R2 ? r2[sl] : -1;
 }
 /* The manual puts ten functions on the piano's black keys: OP1 to OP6, PIT, GLO, MONO, POLY. They are note keys (F#3, G#3, A#3, C#4, D#4,
  * F#4, G#4, A#4, C#5, D#5: note key indexes 1 3 5 8 10 13 15 17 20 22), in that order; the ORDER is assumed from the manual's list, not
  * measured. The pad under L1 presses them in the d-pad and face order: up left down right Y B A X, then Select and Start. */
 static const int FUNCTION_KEYS[10] = {1, 3, 5, 8, 10, 13, 15, 17, 20, 22};
 static const char *const FUNCTION_NAMES[10] = {"OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "PIT", "GLO", "MONO", "POLY"};
-static int function_of_pad(int b) { return b == PAD_SELECT ? 8 : b == PAD_START ? 9 : degree_of_pad(b); }
+static int function_of_pad(int b) { return slot_of(PANEL_MACHINE, b); }
 /* A stick's deflection (-1..1, positive = up for y, right for x) as whole clicks over dt ms; the remainder stays in acc. */
 static int stick_clicks(float *acc, float v, uint32_t dt_ms) {
     float m = v < 0 ? -v : v;
@@ -1561,7 +1961,13 @@ static void sticks_tick(App *a, uint32_t now) {
     uint32_t dt = a->axis_t ? now - a->axis_t : 0;
     a->axis_t = now;
     if (dt > 200) dt = 200;
-    if (a->panel != PANEL_MACHINE || a->confirm) { for (int i = 0; i < 4; i++) a->axis_acc[i] = 0; return; }
+    if (a->panel != PANEL_MACHINE || a->confirm || a->menu_kind) {
+        for (int i = 0; i < 4; i++) a->axis_acc[i] = 0;
+        int steps[8], n = pm_stick_tick(&a->rstick, a->axis[2], a->axis[3], a->pad_mask >> PAD_R1 & 1, now, steps, 8);   /* the right stick moves the selection, 6 a second at most */
+        for (int i = 0; i < n; i++) { if (a->menu_kind) menu_press(a, steps[i]); else act(a, steps[i]); }
+        return;
+    }
+    memset(&a->rstick, 0, sizeof a->rstick);
     int l1 = pad_mod(a->pad_mask) == MOD_L1;
     /* knob 1..4 are encoders 2..5; with L1: presets 6, select 0, algorithm 1, and the left stick's x is the master level */
     static const int plain[4] = {2, 3, 4, 5}, held[4] = {-1, 6, 0, 1};
@@ -1580,19 +1986,27 @@ static void sticks_tick(App *a, uint32_t now) {
 }
 /* One pad button pressed on MACHINE. */
 static void pad_machine_press(App *a, int b) {
-    int mod = pad_mod(a->pad_mask), id = -1;
-    if (mod == MOD_L2 && (b == PAD_SELECT || b == PAD_START)) {
-        a->key_shift += b == PAD_START ? 1 : -1;
+    int mod = pad_mod(a->pad_mask), id = -1, sl = slot_of(PANEL_MACHINE, b), r1 = a->pad_mask >> PAD_R1 & 1;
+    if (sl < 0) return;
+    if (mod == MOD_L2 && (sl == SL_SELECT || sl == SL_START)) {
+        a->key_shift += sl == SL_START ? 1 : -1;
         if (a->key_shift > KEY_MAX) a->key_shift = KEY_MIN;
         if (a->key_shift < KEY_MIN) a->key_shift = KEY_MAX;
         say(a, 0, "Key %s", key_name(a->key_shift));
         return;
     }
-    if (mod == MOD_NONE) {
+    if (mod == MOD_NONE && r1 && sl <= SL_RIGHT) {              /* R1 held, "increase": up and down transpose the key, left and right the octave (the machine's OCT buttons) */
+        if (sl == SL_UP || sl == SL_DOWN) {
+            a->key_shift += sl == SL_UP ? 1 : -1;
+            if (a->key_shift > KEY_MAX) a->key_shift = KEY_MIN;
+            if (a->key_shift < KEY_MIN) a->key_shift = KEY_MAX;
+            say(a, 0, "Key %s", key_name(a->key_shift));
+        } else id = sl == SL_RIGHT ? 1 : 0;
+    } else if (mod == MOD_NONE) {
         int d = degree_of_pad(b);
         if (d >= 0) { id = note_id_of_degree(a->scale, a->key_shift, d); if (id < 0) say(a, 0, "That note is off the FM-1's keys", NULL); }
-        else if (b == PAD_SELECT) id = 0;
-        else if (b == PAD_START) id = 1;
+        else if (sl == SL_SELECT) id = 0;
+        else if (sl == SL_START) id = 1;
     } else if (mod == MOD_L1) {
         int f = function_of_pad(b);
         if (f >= 0) { id = FM1_KEY_BASE + FUNCTION_KEYS[f]; snprintf(a->msg, sizeof a->msg, "%s", FUNCTION_NAMES[f]); a->msg_style = 0; }
@@ -1606,7 +2020,7 @@ static int act_of_key(SDL_Keycode k) {
     switch (k) {
     case SDLK_UP: return A_UP; case SDLK_DOWN: return A_DOWN; case SDLK_LEFT: return A_LEFT; case SDLK_RIGHT: return A_RIGHT;
     case SDLK_RETURN: case SDLK_KP_ENTER: return A_OK; case SDLK_BACKSPACE: return A_BACK;
-    case SDLK_INSERT: return A_X; case SDLK_DELETE: return A_Y; case SDLK_PAGEUP: return A_L2; case SDLK_PAGEDOWN: return A_R2;
+    case SDLK_INSERT: return A_X; case SDLK_DELETE: return A_Y; case SDLK_PAGEUP: return A_PGUP; case SDLK_PAGEDOWN: return A_PGDN;
     default: return A_NONE;
     }
 }
@@ -1646,53 +2060,79 @@ static void handle(App *a, const SDL_Event *e) {
             case SDLK_MINUS: pot(a, -64); break;
             case SDLK_EQUALS: pot(a, 64); break;
             default: break;
-        } else act(a, act_of_key(k));
+        } else {
+            int ac = act_of_key(k);
+            if (a->panel == PANEL_SOUND) ac = ac == A_PGUP ? A_START : ac == A_PGDN ? A_SELECT : ac;       /* Page Up the preview, Page Down Solo (and, in the editor, the group) */
+            else if (a->panel == PANEL_MIDI) ac = ac == A_PGUP ? A_SELECT : ac == A_PGDN ? A_START : ac;   /* the channel */
+            act(a, ac);
+        }
     } else if (e->type == SDL_JOYAXISMOTION) {
         if (e->jaxis.axis < 4) a->axis[e->jaxis.axis] = e->jaxis.value / 32768.0f;
     } else if (e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYBUTTONUP) {
         int down = e->type == SDL_JOYBUTTONDOWN, b = e->jbutton.button;
         if (b < 32 && !down && a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; return; }   /* the release matches the press */
-        if (b == PAD_START && !machine_panel) { if (down) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); } return; }
-        if (a->panel == PANEL_MIDI && !a->confirm && b == 1) { midi_ok(a, down); return; }
-        if (a->panel == PANEL_SOUND && a->inst && b == PAD_SELECT && !a->confirm) { if (down) { a->ed_on = !a->ed_on; a->ed_group = 0; a->ed_sel = 0; } return; }   /* Select opens and closes the editor, whether or not the preview is playing the pad */
-        if (a->panel == PANEL_SOUND && a->pv_on && !a->ed_on && !a->confirm && (b == 0 || b == 1 || b == 2 || b == 3)) {   /* the pad plays a chord's notes: Y the root, B the third, A the fifth, X the octave */
-            static const int semi[4] = {4, 7, 12, 0};   /* by raw button 0 B, 1 A, 2 X, 3 Y: semitones above the root */
-            pv_note(a, &a->pv_pad[b], 60 + 12 * a->pv_oct + semi[b], down);
+        if (b == PAD_L3 || b == PAD_R3) { if (down) say(a, 0, b == PAD_L3 ? "FM1-NTT has no virtual mouse" : "FM1-NTT has no virtual keyboard", NULL); return; }   /* a reply, not a silent no-op (the mapping) */
+        if (machine_panel) { if (down) pad_machine_press(a, b); return; }
+        int ctx = a->confirm ? -1 : a->panel, sl = slot_of(ctx, b), base = sl >= 0 ? SLOT_ACT[sl] : A_NONE;   /* a question is answered with A and B wherever they were moved to */
+        if (a->panel == PANEL_MIDI && !a->confirm && base == A_OK) { midi_ok(a, down); return; }
+        if (a->panel == PANEL_SOUND && a->pv_on && !a->ed_on && !a->confirm && (base == A_Y || base == A_BACK || base == A_OK || base == A_X)) {   /* the pad plays a chord's notes: Y the root, B the third, A the fifth, X the octave */
+            int k = base == A_Y ? 0 : base == A_BACK ? 1 : base == A_OK ? 2 : 3;
+            static const int semi[4] = {0, 4, 7, 12};
+            pv_note(a, &a->pv_pad[k], 60 + 12 * a->pv_oct + semi[k], down);
             return;
         }
-        if (machine_panel) { if (down) pad_machine_press(a, b); }
-        else if (down) act(a, act_of_pad(b));
+        if (down) act(a, pad_action(ctx, b, a->pad_mask >> PAD_R1 & 1));
     }
 }
 
 /* One event as the whole app takes it: quit, Fn, the carousel, then the panel's own controls. Rec demo's tour calls this too, so it
  * records the real input path. */
-static void release_pad(App *a) {
-    for (int b = 0; b < 32; b++) if (a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; }
-}
-/* L1 and R1 together open the menu (TOOLS) and close it again, back to the panel it was opened from. */
-static void menu_toggle(App *a) {
-    release_pad(a);
-    if (a->panel != PANEL_TOOLS) { a->menu_back = a->panel; a->panel = PANEL_TOOLS; }
-    else a->panel = a->menu_back;
-    pv_leave(a);
-    if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0);
+/* The keyboard's way to the menus (the pad has L1 + R1 and L2 + R2): ` the main menu, \ the context menu. r3i6nos proposes F10 for the main menu, but F10 is the FM-1's
+ * button 10 here (button_of_key), so it cannot be. */
+static int is_menu_key(const SDL_Event *e) { return e->type == SDL_KEYDOWN && !e->key.repeat && e->key.keysym.sym == SDLK_BACKQUOTE; }
+static int is_ctx_key(const SDL_Event *e) { return e->type == SDL_KEYDOWN && !e->key.repeat && e->key.keysym.sym == SDLK_BACKSLASH; }
+/* While a menu is open it takes every press: the d-pad (with R1 held, pages and Home and End), A, B, a keyboard's arrows, Enter and Esc. The rest is let go. */
+static void menu_input(App *a, const SDL_Event *e) {
+    if (a->menu_kind == MK_KEYMAP) {                                        /* the Keymap wants the raw button: to bind it, or to show it */
+        KmPage pg[KM_MAXP];
+        int np;
+        const KmPage *p = km_cur(a, pg, &np);
+        if (e->type == SDL_JOYBUTTONDOWN) {
+            if (p->ctx == KM_TEST) { km_test_pad(a, e->jbutton.button); return; }
+            if (a->km_state == 1) { a->km_note[0] = 0; km_capture(a, e->jbutton.button, p); return; }
+        } else if (e->type == SDL_KEYDOWN && p->ctx == KM_TEST && e->key.keysym.sym != SDLK_ESCAPE && !e->key.repeat) { km_test_note(a, SDL_GetKeyName(e->key.keysym.sym), "KEY"); return; }
+    }
+    if (e->type == SDL_KEYDOWN) {
+        if (e->key.repeat && e->key.keysym.sym != SDLK_UP && e->key.keysym.sym != SDLK_DOWN) return;
+        SDL_Keycode k = e->key.keysym.sym;
+        menu_press(a, k == SDLK_ESCAPE ? A_BACK : k == SDLK_HOME ? A_HOME : k == SDLK_END ? A_END : k == SDLK_PAGEUP ? A_PGUP : k == SDLK_PAGEDOWN ? A_PGDN : act_of_key(k));
+    } else if (e->type == SDL_JOYBUTTONDOWN) menu_press(a, act_of_pad_r1(e->jbutton.button, a->pad_mask >> PAD_R1 & 1));
 }
 static void dispatch(App *a, const SDL_Event *e) {
     if (a->pl.on && (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && !(e->type == SDL_KEYDOWN && e->key.repeat)) { player_stop(a); return; }   /* a press ends the demo and is used up */
     if (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYAXISMOTION || e->type == SDL_JOYHATMOTION) a->last_input_ms = SDL_GetTicks();   /* the data rain's whole-panel mode ends on any of them */
     if ((e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && toast_key(&a->toast, SDL_GetTicks())) return;   /* a failure's key is used up */
-    int turn = is_carousel(e);
-    if (e->type == SDL_JOYBUTTONDOWN && e->jbutton.button < 32) a->pad_mask |= 1u << e->jbutton.button;
-    if (e->type == SDL_JOYBUTTONUP && e->jbutton.button < 32) a->pad_mask &= ~(1u << e->jbutton.button);
-    int chord = e->type == SDL_JOYBUTTONDOWN && (e->jbutton.button == PAD_L1 || e->jbutton.button == PAD_R1) && (a->pad_mask >> PAD_L1 & 1) && (a->pad_mask >> PAD_R1 & 1);
-    int fn_scale = e->type == SDL_JOYBUTTONDOWN && e->jbutton.button == PAD_FN && a->panel == PANEL_MACHINE && !a->confirm && (a->pad_mask >> PAD_L1 & 1);
+    int turn = is_carousel(e), pad_down = e->type == SDL_JOYBUTTONDOWN, pb = pad_down || e->type == SDL_JOYBUTTONUP ? e->jbutton.button : -1;
+    if (pad_down && pb < 32) a->pad_mask |= 1u << pb;
+    if (e->type == SDL_JOYBUTTONUP && pb < 32) a->pad_mask &= ~(1u << pb);
+    int l1 = a->pad_mask >> PAD_L1 & 1, r1 = a->pad_mask >> PAD_R1 & 1, l2 = a->pad_mask >> PAD_L2 & 1, r2 = a->pad_mask >> PAD_R2 & 1;
+    int chord = pad_down && (pb == PAD_L1 || pb == PAD_R1) && l1 && r1;                                   /* L1 + R1: the main menu */
+    int ctx_chord = pad_down && (pb == PAD_L2 || pb == PAD_R2) && l2 && r2 && !l1 && !r1;                 /* L2 + R2: the context menu (L1 or R1 too is reserved: nothing) */
+    int fn_down = pad_down && pb == PAD_FN && !a->confirm && !a->menu_kind;
+    int fn_first = fn_down && l1, fn_prev = fn_down && r1 && !l1;
     if (e->type == SDL_QUIT) { rec_stop(a); a->quit = 1; }
-    else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->confirm) a->confirm = CF_NONE; else if (a->info_on) a->info_on = 0; else if (a->ed_on) a->ed_on = 0; else request_quit(a); }
+    else if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE && !e->key.repeat) { if (a->menu_kind) menu_cancel(a); else if (a->confirm) a->confirm = CF_NONE; else if (a->info_on) a->info_on = 0; else if (a->ed_on) a->ed_on = 0; else say(a, 0, "Quit is in the main menu (L1 + R1, or `)", NULL); }   /* leaving is deliberate: only the menu's Quit does it */
     else if (is_toggle(e)) a->mode ^= 1;
-    else if (chord) { if (!a->confirm) menu_toggle(a); }
-    else if (fn_scale) { a->scale = (a->scale + 1) % NSCALES; say(a, 0, "Scale %s", SCALES[a->scale].name); }
-    else if (turn && !a->confirm) { release_pad(a); a->panel = panel_step(a->panel, turn); pv_leave(a); if (a->panel != PANEL_MIDI && a->midi_held) midi_ok(a, 0); }
+    else if (chord || (is_menu_key(e) && !a->confirm)) { if (!a->confirm) menu_chord(a); }
+    else if (ctx_chord || (is_ctx_key(e) && !a->confirm)) {
+        if (a->confirm) { /* a question is open: A or B first */ }
+        else if (a->menu_kind == MK_CTX) menu_cancel(a);
+        else if (!a->menu_kind) { for (int b = 0; b < 32; b++) if (a->pad_sent[b]) { key_id(a, a->pad_sent[b] - 1, 0); a->pad_sent[b] = 0; } menu_open_ctx(a); }
+    }
+    else if (a->menu_kind && !a->confirm) menu_input(a, e);                                               /* a menu takes every press */
+    else if (fn_first) panel_switch(a, 0);                                                                /* L1 + Fn: the first panel */
+    else if (fn_prev) panel_back(a);                                                                      /* R1 + Fn: the one before */
+    else if (turn && !a->confirm) panel_switch(a, panel_step(a->panel, turn));
     else if (turn) { /* a question is open: A or B first */ }
     else handle(a, e);
 }
@@ -1937,7 +2377,7 @@ static int files_press(App *a, int act) {
             else if (show_spawn(a, i) == 0) say(a, 0, "Making the demo: it runs at the lowest priority", NULL);
             else say(a, 2, "Cannot start the demo worker", NULL);
         } else if (act == A_BACK) a->info_on = 0;
-        else if (act == A_UP || act == A_DOWN || act == A_L2 || act == A_R2) {}       /* the page does not move */
+        else if (act == A_UP || act == A_DOWN || act == A_PGUP || act == A_PGDN) {}       /* the page does not move */
         return 1;
     }
     if (act == A_OK && a->file_sel < a->nfiles && fw_is_firmware(a->fpaths[a->file_sel])) { info_open(a, a->file_sel); return 1; }
@@ -2351,17 +2791,17 @@ static int mon_selftest(const char *root, App *app) {
     MCHECK((int)g_mon_reads == reads_app && !ui->rain_on && ui->mon.ncores == 0);                      /* another panel: the monitor's data is not even copied */
     app->panel = PANEL_MONITOR; app->mon_page = 0;
     fill_ui(app, ui, 0); MCHECK(ui->mon.app.loaded == fm1ntt_loaded(app->m) && ui->mon.app.jit_pref == app->jit_pref && ui->mon.app.jit_avail == fm1ntt_jit_available());   /* the setting reaches the panel, loaded or not */
-    act(app, A_R2); MCHECK(app->mon_page == 1 && app->mon.force);
-    act(app, A_R2); MCHECK(app->mon_page == 2 || mon_pages(0, app->mon.v.nprocs) == 2);
-    for (int i = 0; i < 5; i++) act(app, A_L2);
+    act(app, A_PGDN); MCHECK(app->mon_page == 1 && app->mon.force);
+    act(app, A_PGDN); MCHECK(app->mon_page == 2 || mon_pages(0, app->mon.v.nprocs) == 2);
+    for (int i = 0; i < 5; i++) act(app, A_PGUP);
     MCHECK(app->mon_page >= 0 && app->mon_page < mon_pages(0, app->mon.v.nprocs));
     app->mon_page = 0;
-    act(app, A_L2); MCHECK(app->mon_page == mon_pages(0, app->mon.v.nprocs) - 1);                      /* the pages wrap */
+    act(app, A_PGUP); MCHECK(app->mon_page == mon_pages(0, app->mon.v.nprocs) - 1);                      /* the pages wrap */
     int s0 = app->mon.v.sort;
     act(app, A_X); MCHECK(app->mon.v.sort == (s0 + 1) % MON_SORTS);
     act(app, A_Y); MCHECK(app->mon.paused && !app->mon.force);
     act(app, A_Y); MCHECK(!app->mon.paused);
-    app->mode = MODE_ZOOMED; act(app, A_R2); app->mode = MODE_STANDARD;
+    app->mode = MODE_ZOOMED; act(app, A_PGDN); app->mode = MODE_STANDARD;
     MCHECK(app->rain_on == 0);                                                                         /* off by default: nothing turns it on but its TOOLS row */
     app->panel = PANEL_TOOLS; app->tool_sel = 12;
     act(app, A_OK); MCHECK(app->rain_on == 1);
@@ -3003,12 +3443,189 @@ static int selftest(void) {
         memset(&p, 0, sizeof p);
         p.panel = PANEL_CPU;
         dispatch(&p, &fn); CHECK(p.panel == PANEL_MEMORY);
-        dispatch(&p, &l1); CHECK(p.panel == PANEL_MEMORY);                /* L1 alone does nothing */
-        dispatch(&p, &r1); CHECK(p.panel == PANEL_TOOLS && p.menu_back == PANEL_MEMORY);   /* both: the menu */
-        dispatch(&p, &r1); CHECK(p.panel == PANEL_MEMORY);                /* both again: back */
+        dispatch(&p, &l1); CHECK(p.panel == PANEL_MEMORY && p.menu_kind == MK_NONE);        /* L1 alone does nothing */
+        dispatch(&p, &r1); CHECK(p.menu_kind == MK_MAIN && p.panel == PANEL_MEMORY);        /* both: the main menu, the panel stays under it */
+        dispatch(&p, &r1); CHECK(p.menu_kind == MK_NONE && p.panel == PANEL_MEMORY);        /* both again: closed */
         l1.type = r1.type = fn.type = SDL_JOYBUTTONUP; dispatch(&p, &l1); dispatch(&p, &r1); dispatch(&p, &fn); CHECK(p.pad_mask == 0);
         fn.type = SDL_JOYBUTTONDOWN;
         l1.type = r1.type = SDL_JOYBUTTONDOWN;
+    }
+    /* rule 17, the input mapping (docs/r3i6nos-mapping.md): the main menu's six fixed items, the chords, R1 held as "increase", L2 and R2, L3 and R3 */
+    {
+        App p;
+        memset(&p, 0, sizeof p);
+        SDL_Event ev = {.type = SDL_JOYBUTTONDOWN};
+#define PD(btn) do { ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = (btn); dispatch(&p, &ev); } while (0)
+#define PU(btn) do { ev.type = SDL_JOYBUTTONUP; ev.jbutton.button = (btn); dispatch(&p, &ev); } while (0)
+#define TAP(btn) do { PD(btn); PU(btn); } while (0)
+        UiState *u = calloc(1, sizeof *u);
+        CHECK(u != NULL);
+        if (!u) return 1;
+        /* theme.txt and keymap.txt go to a folder of their own: a self-test never touches the person's real ones */
+        char kdir[300];
+        snprintf(kdir, sizeof kdir, "%s/fm1ntt-keymap-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+        char *kd = mkdtemp(kdir), *sv_dir = getenv("FM1NTT_DIR") ? strdup(getenv("FM1NTT_DIR")) : NULL;
+        CHECK(kd != NULL);
+        if (kd) setenv("FM1NTT_DIR", kd, 1);
+        /* the carousel and its history: Fn next; R1 + Fn the panel before (again: back); L1 + Fn the first panel (MACHINE keeps its next-scale) */
+        p.panel = PANEL_CPU;
+        TAP(PAD_FN); CHECK(p.panel == PANEL_MEMORY);
+        PD(PAD_R1); TAP(PAD_FN); CHECK(p.panel == PANEL_CPU); TAP(PAD_FN); CHECK(p.panel == PANEL_MEMORY); PU(PAD_R1);
+        PD(PAD_L1); TAP(PAD_FN); CHECK(p.panel == PANEL_MACHINE); PU(PAD_L1);
+        PD(PAD_R1); TAP(PAD_FN); CHECK(p.panel == PANEL_MEMORY); PU(PAD_R1);                /* the one before MACHINE was MEMORY */
+        memset(&p, 0, sizeof p); p.panel = PANEL_CPU;
+        PD(PAD_R1); TAP(PAD_FN); CHECK(p.panel == PANEL_CPU && !strncmp(p.msg, "No earlier", 10)); PU(PAD_R1);   /* no history yet: says so */
+        p.panel = PANEL_MACHINE; p.scale = 0;
+        PD(PAD_L1); TAP(PAD_FN); CHECK(p.panel == PANEL_MACHINE && p.scale == 0); PU(PAD_L1);   /* L1 + Fn is the first panel everywhere: there is no scale binding on it any more */
+        /* the main menu: L1 + R1; the six fixed items in this order and then the app's own; Quit leaves; B and a second L1 + R1 close it */
+        p.panel = PANEL_CPU;
+        PD(PAD_L1); PD(PAD_R1); CHECK(p.menu_kind == MK_MAIN); PU(PAD_R1); PU(PAD_L1);
+        fill_menu(&p, u);
+        CHECK(u->menu_n == MM_COUNT && MM_COUNT == 8 && !strcmp(u->menu_label[0], "ABOUT") && !strcmp(u->menu_label[1], "COLOUR THEME") && !strcmp(u->menu_label[2], "KEYMAP") && !strcmp(u->menu_label[3], "DEVICE REPORT") &&
+              !strcmp(u->menu_label[4], "REC DEMO") && !strcmp(u->menu_label[5], "BENCHMARK") && !strcmp(u->menu_label[6], "QUIT") && !strcmp(u->menu_label[7], "TOOLS"));
+        CHECK(u->menu_kind == 1);                                                           /* drawn as a list with a chosen row */
+        CHECK(u->menu_value[MM_THEME][0] != 0);
+        TAP(1 /* A */); CHECK(p.menu_kind == MK_ABOUT);                                     /* About: A on the first item; any key closes it */
+        fill_menu(&p, u); CHECK(u->menu_n == ABOUT_LINES && !strcmp(u->menu_label[0], "FM1-NTT") && u->menu_label[1][0] == 'V');
+        TAP(5 /* R1 */); CHECK(p.menu_kind == MK_NONE);
+        PD(PAD_L1); PD(PAD_R1); PU(PAD_R1); PU(PAD_L1); TAP(0 /* B */); CHECK(p.menu_kind == MK_NONE && !p.quit);
+        PD(PAD_L1); PD(PAD_R1); PU(PAD_R1); PU(PAD_L1); for (int i = 0; i < MM_QUIT; i++) TAP(9 /* down */); CHECK(p.menu_sel == MM_QUIT); TAP(1); CHECK(p.quit == 1 && p.menu_kind == MK_NONE); p.quit = 0;
+        PD(PAD_L1); PD(PAD_R1); PU(PAD_R1); PU(PAD_L1); TAP(8 /* up wraps */); CHECK(p.menu_sel == MM_COUNT - 1); TAP(1); CHECK(p.panel == PANEL_TOOLS);   /* Tools: the app's own item */
+        /* R1 held in a menu: Page down goes to the last row, Home the first */
+        PD(PAD_L1); PD(PAD_R1); PU(PAD_R1); PU(PAD_L1); PD(PAD_R1); TAP(9); CHECK(p.menu_sel == MM_COUNT - 1); TAP(10); CHECK(p.menu_sel == 0); PU(PAD_R1); TAP(0);
+        /* the colour theme: moving shows each theme, B puts back the one in use, A keeps it; every theme passes the 4.5:1 text pairs */
+        px_theme_apply(0);
+        PD(PAD_L1); PD(PAD_R1); PU(PAD_R1); PU(PAD_L1); TAP(9); TAP(1); CHECK(p.menu_kind == MK_THEME && p.menu_sel == 0);
+        TAP(9); CHECK(px_theme_now == 1 && px_pal[PXC_BG] == px_themes[1].c[PXC_BG]); TAP(0); CHECK(p.menu_kind == MK_NONE && px_theme_now == 0 && C_BG == px_themes[0].c[PXC_BG]);
+        for (int t = 0; t < PX_THEME_COUNT; t++) {
+            px_theme_apply(t);
+            const uint32_t fgs[] = {C_TEXT, C_DIM, C_HEAD, C_OK, C_WARN, C_ERR};
+            for (unsigned i = 0; i < sizeof fgs / sizeof *fgs; i++) { CHECK(px_contrast(fgs[i], C_PANEL) >= 4.5); CHECK(px_contrast(fgs[i], C_BG) >= 4.5); }
+            CHECK(px_contrast(C_TEXT, C_SEL) >= 4.5 && px_contrast(C_BG, C_KEYDN) >= 4.5 && px_contrast(C_KEYUP, C_BLACKKEY) >= 4.5);
+            CHECK(px_contrast(C_OK, C_FRAME) >= 3.0 && px_contrast(C_WARN, C_FRAME) >= 3.0 && px_contrast(C_ERR, C_FRAME) >= 3.0);
+            CHECK(px_theme_find(px_themes[t].name) == t);
+        }
+        px_theme_apply(0);
+        CHECK(px_theme_find("NOPE") == -1 && px_theme_find(NULL) == -1);
+        /* the context menu: L2 + R2, the panel's own items and a screenshot; nothing pressed before the chord acts; B closes; L1 or R1 too is reserved */
+        p.panel = PANEL_MIDI; p.midi_chan = 5;
+        PD(PAD_L2); PD(PAD_R2); CHECK(p.menu_kind == MK_CTX && p.midi_chan == 5); PU(PAD_R2); PU(PAD_L2); CHECK(p.midi_chan == 5);
+        fill_menu(&p, u); CHECK(u->menu_n == 2 && !strcmp(u->menu_title, "MIDI") && !strcmp(u->menu_label[1], "SAVE A SCREENSHOT"));
+        TAP(0); CHECK(p.menu_kind == MK_NONE);
+        PD(PAD_L1); PD(PAD_L2); PD(PAD_R2); CHECK(p.menu_kind == MK_NONE); PU(PAD_R2); PU(PAD_L2); PU(PAD_L1);
+        TAP(PAD_L2); TAP(PAD_R2); CHECK(p.midi_chan == 5);                                  /* L2 and R2 are the system's: a panel has no use for them */
+        TAP(PAD_SELECT); CHECK(p.midi_chan == 4); TAP(PAD_START); TAP(PAD_START); CHECK(p.midi_chan == 6 && !p.paused);   /* MIDI's own: the channel (Start does not pause here) */
+        { const char *cl[PX_MENU_MAX]; int cc[PX_MENU_MAX]; for (int pn = 0; pn < PANEL_COUNT; pn++) { p.panel = pn; int n = ctx_items(&p, cl, cc); CHECK(n >= 1 && n <= PX_MENU_MAX && !strcmp(cl[n - 1], "SAVE A SCREENSHOT")); } }
+        /* R1 held is "increase": the d-pad pages and jumps; the pad's L2 and R2 are not keys on press */
+        CHECK(act_of_pad_r1(9, 1) == A_PGDN && act_of_pad_r1(8, 1) == A_PGUP && act_of_pad_r1(10, 1) == A_HOME && act_of_pad_r1(11, 1) == A_END);
+        CHECK(act_of_pad_r1(9, 0) == A_DOWN && act_of_pad_r1(8, 0) == A_UP && act_of_pad_r1(10, 0) == A_LEFT && act_of_pad_r1(11, 0) == A_RIGHT);
+        CHECK(act_of_pad_r1(PAD_L2, 0) == A_NONE && act_of_pad_r1(PAD_R2, 1) == A_NONE && act_of_pad_r1(1, 1) == A_OK && act_of_pad_r1(0, 1) == A_BACK);
+        p.panel = PANEL_TOOLS; p.tool_sel = 3;
+        PD(PAD_R1); TAP(9); CHECK(p.tool_sel == NTOOLS - 1); TAP(8); CHECK(p.tool_sel == 0); TAP(11); CHECK(p.tool_sel == NTOOLS - 1); TAP(10); CHECK(p.tool_sel == 0); PU(PAD_R1);
+        TAP(9); CHECK(p.tool_sel == 1);
+        /* L3 and R3: the app has no virtual mouse or keyboard and says so */
+        p.panel = PANEL_CPU; TAP(PAD_L3); CHECK(strstr(p.msg, "virtual mouse") != NULL); TAP(PAD_R3); CHECK(strstr(p.msg, "virtual keyboard") != NULL);
+        /* the keyboard: ` the main menu, \ the context menu, Esc closes a menu before it would quit; F10 stays the FM-1's button */
+        SDL_Event kb = {.type = SDL_KEYDOWN};
+        kb.key.keysym.sym = SDLK_BACKQUOTE; dispatch(&p, &kb); CHECK(p.menu_kind == MK_MAIN);
+        kb.key.keysym.sym = SDLK_ESCAPE; dispatch(&p, &kb); CHECK(p.menu_kind == MK_NONE && !p.quit);
+        kb.key.keysym.sym = SDLK_BACKSLASH; dispatch(&p, &kb); CHECK(p.menu_kind == MK_CTX);
+        kb.key.keysym.sym = SDLK_BACKSLASH; dispatch(&p, &kb); CHECK(p.menu_kind == MK_NONE);
+        CHECK(!is_menu_key(&kb) && button_of_key(SDLK_F10) == 10);
+        /* the right stick steps a list 6 a second at most; Page up and down with R1; Home or End once for a push; nothing inside the dead zone */
+        PmStick st;
+        memset(&st, 0, sizeof st);
+        int out[16], total = 0;
+        CHECK(pm_stick_tick(&st, 0, 0.3f, 0, 1000, out, 16) == 0 && pm_stick_tick(&st, 0, -0.3f, 0, 1100, out, 16) == 0);
+        total = pm_stick_tick(&st, 0, 1.0f, 0, 1200, out, 16); CHECK(total == 1 && out[0] == A_DOWN);   /* the first step of a push comes at once */
+        for (int t = 1; t <= 10; t++) total += pm_stick_tick(&st, 0, 1.0f, 0, 1200 + 100 * t, out, 16);
+        CHECK(total >= 6 && total <= 7);                                                                 /* about 6 a second */
+        CHECK(pm_stick_tick(&st, 0, 0, 0, 2300, out, 16) == 0);
+        CHECK(pm_stick_tick(&st, 0, -1.0f, 1, 2400, out, 16) == 1 && out[0] == A_PGUP);
+        CHECK(pm_stick_tick(&st, 0, 0, 1, 2500, out, 16) == 0 && pm_stick_tick(&st, 1.0f, 0, 1, 2600, out, 16) == 1 && out[0] == A_END);
+        int more = 0; for (int t = 1; t <= 10; t++) more += pm_stick_tick(&st, 1.0f, 0, 1, 2600 + 100 * t, out, 16); CHECK(more == 0);   /* held: End is not repeated */
+        CHECK(pm_stick_tick(&st, 0, 0, 1, 3700, out, 16) == 0 && pm_stick_tick(&st, -1.0f, 0, 1, 3800, out, 16) == 1 && out[0] == A_HOME);
+        CHECK(pm_stick_rate(0.35f) == 0 && pm_stick_rate(1.0f) == PM_STICK_RATE && pm_stick_rate(-1.0f) == PM_STICK_RATE);
+        { int rows = 20, per = 6; CHECK(pm_list_step(0, rows, per, A_UP) == 19 && pm_list_step(19, rows, per, A_DOWN) == 0 && pm_list_step(15, rows, per, A_PGDN) == 19 && pm_list_step(3, rows, per, A_PGUP) == 0 &&
+                                        pm_list_step(7, rows, per, A_HOME) == 0 && pm_list_step(7, rows, per, A_END) == 19 && pm_list_step(7, rows, per, A_LEFT) == 7 && pm_list_step(7, 0, per, A_DOWN) == 0); }
+        /* the right stick drives a menu and a list through sticks_tick, and MACHINE's knobs keep their 12 a second */
+        memset(&p, 0, sizeof p); p.panel = PANEL_TOOLS; p.axis[3] = 1.0f;
+        sticks_tick(&p, 5000); for (int i = 1; i <= 10; i++) sticks_tick(&p, 5000 + 100 * i); CHECK(p.tool_sel >= 6 && p.tool_sel <= 7);
+        memset(&p, 0, sizeof p); p.panel = PANEL_MACHINE; menu_open_main(&p); p.axis[3] = 1.0f; sticks_tick(&p, 6000); CHECK(p.menu_sel == 1);
+        /* Esc closes a menu and never quits: leaving is the main menu's Quit */
+        memset(&p, 0, sizeof p); p.panel = PANEL_CPU;
+        kb.key.keysym.sym = SDLK_ESCAPE; dispatch(&p, &kb); CHECK(!p.quit && strstr(p.msg, "Quit is in the main menu") != NULL);
+        /* Start pauses where a panel has no use for it; L2 and R2 are the system's and do nothing on a panel */
+        TAP(PAD_START); CHECK(p.paused == 1); TAP(PAD_START); CHECK(p.paused == 0); TAP(PAD_L2); TAP(PAD_R2); CHECK(p.paused == 0 && p.menu_kind == MK_NONE);
+        /* MACHINE: R1 held shifts the octave with left and right (the OCT buttons) and transposes with up and down; the d-pad plays notes without it */
+        memset(&p, 0, sizeof p); p.panel = PANEL_MACHINE; p.m = fm1ntt_new();
+        PD(PAD_R1); PD(10); CHECK(p.pad_sent[10] == 0 + 1 && p.key_shift == 0); PU(10); CHECK(p.pad_sent[10] == 0);
+        PD(11); CHECK(p.pad_sent[11] == 1 + 1); PU(11);
+        PD(8); CHECK(p.key_shift == 1 && p.pad_sent[8] == 0); PU(8); PD(9); PD(9); CHECK(p.key_shift == -1); PU(9);
+        PU(PAD_R1); PD(8); CHECK(p.pad_sent[8] == FM1_KEY_BASE + 6 + 1); PU(8);   /* the key is one lower: two down transposes */
+        fm1ntt_free(p.m); p.m = NULL;
+        /* the Keymap: a main menu item, pages (system, each panel, MACHINE's held sets, the test), remap with conflict checking, swaps, reset, saving */
+        keymap_reset_all();
+        { KmPage pg[KM_MAXP]; int np = km_pages(pg), sys = 0, mach = 0;
+          for (int i = 0; i < np; i++) { sys += pg[i].ctx == KM_SYS; mach += pg[i].ctx == PANEL_MACHINE; }
+          CHECK(np <= KM_MAXP && pg[0].ctx == KM_SYS && pg[np - 1].ctx == KM_TEST && sys >= 2 && mach == 5);   /* MACHINE: the base page and L1, L2, R2, R1 */
+          for (int i = 0; i < np; i++) CHECK(pg[i].ctx != PANEL_CONSOLE); }
+        memset(&p, 0, sizeof p); p.panel = PANEL_TOOLS;
+        menu_open_main(&p); p.menu_sel = MM_KEYMAP; menu_press(&p, A_OK);
+        CHECK(p.menu_kind == MK_KEYMAP && p.km_state == 0 && p.km_panel == PANEL_TOOLS);
+        fill_menu(&p, u); CHECK(u->menu_kind == 1 && u->menu_n == NSLOT && strstr(u->menu_title, "TOOLS") != NULL && !strcmp(u->menu_label[SL_A], "RUN") && !strcmp(u->menu_value[SL_A], "A"));
+        for (int i = 0; i < SL_A; i++) TAP(9);                                              /* down to the RUN row */
+        CHECK(p.km_sel == SL_A);
+        TAP(1); CHECK(p.km_state == 1);                                                     /* A: waits for the new button */
+        PD(PAD_L1); CHECK(p.km_state == 1 && strstr(p.km_note, "L1") != NULL && g_bind[PANEL_TOOLS][SL_A] == 1); PU(PAD_L1);   /* a system button is refused and says why */
+        fill_menu(&p, u); CHECK(strstr(u->menu_foot, "L1") != NULL);
+        PD(PAD_START); PU(PAD_START); CHECK(p.km_state == 2 && p.km_other == SL_START);      /* Start has PAUSE here: a conflict, asked */
+        fill_menu(&p, u); CHECK(strstr(u->menu_foot, "PAUSE") != NULL && strstr(u->menu_foot, "START") != NULL);
+        TAP(0); CHECK(p.km_state == 0 && g_bind[PANEL_TOOLS][SL_A] == 1 && g_bind[PANEL_TOOLS][SL_START] == 13);   /* B cancels: nothing changed */
+        TAP(1); PD(PAD_START); PU(PAD_START); TAP(1);                                       /* again, then A swaps */
+        CHECK(p.km_state == 0 && g_bind[PANEL_TOOLS][SL_A] == 13 && g_bind[PANEL_TOOLS][SL_START] == 1);
+        { int seen = 0; for (int i = 0; i < NSLOT; i++) seen |= 1 << g_bind[PANEL_TOOLS][i]; CHECK(seen == (1 << 0 | 1 << 1 | 1 << 2 | 1 << 3 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 11 | 1 << 12 | 1 << 13)); }   /* still a permutation of the ten buttons */
+        CHECK(pad_action(PANEL_TOOLS, 13, 0) == A_OK && pad_action(PANEL_TOOLS, 1, 0) == A_START && pad_action(PANEL_CPU, 1, 0) == A_OK && act_of_pad(1) == A_OK);   /* per panel; the menus keep the defaults */
+        TAP(9); CHECK(p.km_sel == SL_A + 1);
+        TAP(1); PD(PAD_R1 - 2 /* L1 */); PU(PAD_R1 - 2); TAP(2 /* X: held by SL_X, which has no label on TOOLS */); CHECK(p.km_state == 0 && g_bind[PANEL_TOOLS][SL_X] == g_bind[PANEL_TOOLS][SL_X] && g_bind[PANEL_TOOLS][SL_A + 1] == 2);   /* a button used for nothing here is swapped without asking */
+        TAP(2 /* X */);
+        TAP(0);                                                                             /* B closes the Keymap */
+        CHECK(p.menu_kind == MK_NONE);
+        /* the new binding is what the panel answers to: RUN is on Select... wait for the pad on TOOLS */
+        p.panel = PANEL_TOOLS; p.tool_sel = 2; p.msg[0] = 0; TAP(13); CHECK(p.msg[0] != 0);   /* the RUN tool (panic) answers to the button RUN was moved to */
+        /* saved to keymap.txt, parsed back only when sound, and reverted by row, page and all */
+        keymap_save();
+        { int keep[NSLOT]; memcpy(keep, g_bind[PANEL_TOOLS], sizeof keep); keymap_reset_all(); CHECK(g_bind[PANEL_TOOLS][SL_A] == 1); keymap_load(); CHECK(!memcmp(keep, g_bind[PANEL_TOOLS], sizeof keep) && !memcmp(g_bind[PANEL_CPU], DEF_BTN, sizeof DEF_BTN)); }
+        CHECK(keymap_parse_line("MIDI 8 10 9 11 3 0 1 2 12 13") == PANEL_MIDI);
+        CHECK(keymap_parse_line("MIDI 8 8 9 11 3 0 1 2 12 13") == -1 && keymap_parse_line("MIDI 4 10 9 11 3 0 1 2 12 13") == -1 && keymap_parse_line("MIDI 8 10 9 11 3 0 1 2 12") == -1 &&
+              keymap_parse_line("NOPE 8 10 9 11 3 0 1 2 12 13") == -1 && keymap_parse_line("") == -1 && keymap_parse_line("MIDI 8 10 9 11 3 0 1 2 12 99") == -1);
+        menu_open_main(&p); p.menu_sel = MM_KEYMAP; menu_press(&p, A_OK); p.km_sel = SL_A; TAP(2 /* X: this row back */);
+        CHECK(g_bind[PANEL_TOOLS][SL_A] == 1 && strstr(p.km_note, "BACK") != NULL);
+        km_set(&p, PANEL_TOOLS, SL_Y, 12); TAP(3 /* Y: this page back */); CHECK(!memcmp(g_bind[PANEL_TOOLS], DEF_BTN, sizeof DEF_BTN));
+        km_set(&p, PANEL_CPU, SL_Y, 12); km_set(&p, PANEL_MIDI, SL_A, 12);
+        TAP(PAD_START); CHECK(p.km_state == 3); TAP(0); CHECK(p.km_state == 0 && g_bind[PANEL_CPU][SL_Y] == 12);   /* Start asks; B says no */
+        TAP(PAD_START); TAP(1); CHECK(!memcmp(g_bind[PANEL_CPU], DEF_BTN, sizeof DEF_BTN) && !memcmp(g_bind[PANEL_MIDI], DEF_BTN, sizeof DEF_BTN));
+        /* the pages turn with left and right (R1 + right the last: the test page, where every press is shown and nothing is done, and L1 + R1 leaves) */
+        int pg0 = p.km_page; TAP(10); CHECK(p.km_page == pg0 - 1); TAP(11); CHECK(p.km_page == pg0);
+        PD(PAD_R1); TAP(11); PU(PAD_R1);
+        { KmPage pg[KM_MAXP]; int np = km_pages(pg); CHECK(p.km_page == np - 1); }
+        fill_menu(&p, u); CHECK(u->menu_kind == 2 && strstr(u->menu_title, "TEST") != NULL);
+        p.paused = 0; TAP(PAD_START); TAP(0); TAP(1);
+        CHECK(p.menu_kind == MK_KEYMAP && !p.paused && p.km_nhist == 3);
+        fill_menu(&p, u); CHECK(!strncmp(u->menu_label[1], "START", 5) && !strncmp(u->menu_label[2], "B", 1) && strstr(u->menu_label[3], "A") != NULL);
+        PD(PAD_L1); fill_menu(&p, u); CHECK(strstr(u->menu_label[6], "L1") != NULL); PD(PAD_R1); CHECK(p.menu_kind == MK_NONE); PU(PAD_R1); PU(PAD_L1);   /* the chord leaves */
+        keymap_reset_all(); keymap_save();
+        if (kd) {
+            char f[340];
+            snprintf(f, sizeof f, "%s/keymap.txt", kd); remove(f);
+            snprintf(f, sizeof f, "%s/theme.txt", kd); remove(f);
+            rmdir(kd);
+        }
+        if (sv_dir) { setenv("FM1NTT_DIR", sv_dir, 1); free(sv_dir); } else unsetenv("FM1NTT_DIR");
+        free(u);
+#undef PD
+#undef PU
+#undef TAP
     }
     /* the controls map to the matrix */
     CHECK(note_of_key('z') == 0 && note_of_key('/') == 16 && note_of_key('q') == 12 && note_of_key('o') == 26 && note_of_key('1') == -1);
@@ -3052,8 +3669,8 @@ static int selftest(void) {
         CHECK(p.key_shift == 0 && p.pad_sent[PAD_START] == FM1_KEY_BASE + 22 + 1);
         ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);
         CHECK(p.pad_sent[PAD_START] == 0);
-        ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = PAD_FN; dispatch(&p, &ev);       /* L1 + Fn: next scale, the panel stays */
-        CHECK(p.scale == 1 && p.panel == PANEL_MACHINE);
+        ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = PAD_FN; dispatch(&p, &ev);       /* L1 + Fn: the first panel; no longer the scale */
+        CHECK(p.scale == 0 && p.panel == PANEL_MACHINE);
         ev.type = SDL_JOYBUTTONUP; dispatch(&p, &ev);
         l1.type = SDL_JOYBUTTONUP; dispatch(&p, &l1);
         SDL_Event l2 = {.type = SDL_JOYBUTTONDOWN};
@@ -3125,20 +3742,20 @@ static int selftest(void) {
     act(&a, A_UP); CHECK(a.file_sel == 0);
     act(&a, A_UP); CHECK(a.file_sel == 2);                                     /* wraps to the last file: Quit is a TOOLS row now */
     act(&a, A_DOWN); CHECK(a.file_sel == 0);
-    a.panel = PANEL_TOOLS; a.tool_sel = 15; act(&a, A_OK); CHECK(a.quit == 1); a.quit = 0; a.panel = PANEL_FILES;
+    menu_open_main(&a); a.menu_sel = MM_QUIT; menu_press(&a, A_OK); CHECK(a.quit == 1 && a.menu_kind == MK_NONE); a.quit = 0; a.panel = PANEL_FILES;   /* Quit is the main menu's, and only its */
     /* the CPU view and the memory view */
     UiState *ui = calloc(1, sizeof *ui);
     a.panel = PANEL_CPU; a.mode = MODE_STANDARD;
     fill_ui(&a, ui, 0);
     CHECK(ui->ncpu >= 1 && (!strcmp(ui->run_state, "RUN") || !strcmp(ui->run_state, "HALT")));
-    CHECK(ui->nfiles == 3 && ui->files[1][0] == '*' && !strcmp(ui->tools[15], "  QUIT"));
+    CHECK(ui->nfiles == 3 && ui->files[1][0] == '*' && ui->ntools == NTOOLS && strstr(ui->tools[NTOOLS - 1], "REMEMBER") != NULL);   /* Quit is not a TOOLS row: leaving is the main menu's */
     a.cpu_sel = 0; act(&a, A_LEFT); CHECK(a.cpu_sel == 1); act(&a, A_UP); CHECK(a.cpu_sel == 0);
     a.panel = PANEL_MEMORY; a.mem_region = 1;
     fill_ui(&a, ui, 0);
     CHECK(ui->mem_n == 256 && ui->mem[0] == 0xAA && ui->mem_base == 0x02000000u);
     act(&a, A_UP); CHECK(a.mem_off == 0);                                      /* clamped at the start */
     act(&a, A_DOWN); CHECK(a.mem_off == 8);
-    act(&a, A_R2); CHECK(a.mem_off == 264);
+    act(&a, A_PGDN); CHECK(a.mem_off == 264);
     for (int i = 0; i < 100; i++) act(&a, A_Y);
     uint32_t base = 0; size_t size = 0;
     fm1ntt_region(a.m, 1, &base, &size);
@@ -3152,7 +3769,7 @@ static int selftest(void) {
     act(&a, A_UP); CHECK(a.midi_note == 73);
     for (int i = 0; i < 20; i++) act(&a, A_Y);
     CHECK(a.midi_vel == 127);
-    act(&a, A_R2); CHECK(a.midi_chan == 1);
+    act(&a, A_START); CHECK(a.midi_chan == 1);
     midi_ok(&a, 1); CHECK(a.midi_held == 1 && a.midi_log_n == 3 && a.midi_log[0] == 0x91 && a.midi_log[1] == 73);
     midi_ok(&a, 1); CHECK(a.midi_log_n == 3);                                  /* no double note on */
     midi_ok(&a, 0); CHECK(a.midi_held == 0 && a.midi_log[3] == 0x81 && a.midi_log[5] == 0);
@@ -3294,7 +3911,7 @@ static int selftest(void) {
             a.paused = 0;
             fm1ntt_evq_free(a.mevq); a.mevq = NULL; a.mq_live = 0;
         }
-        act(&a, A_L2); CHECK(a.pv_on == 1);
+        act(&a, A_START); CHECK(a.pv_on == 1);
         act(&a, A_DOWN); CHECK(a.pv_sel == 1); pv_name(&a, nm, sizeof nm); CHECK(!strcmp(nm, "SECOND"));
         act(&a, A_DOWN); CHECK(a.pv_sel == 0);
         act(&a, A_RIGHT); act(&a, A_RIGHT); act(&a, A_RIGHT); CHECK(a.pv_oct == 2);
@@ -3310,21 +3927,21 @@ static int selftest(void) {
         CHECK(e1 > e0 + 2048 * 20);                                              /* it sounds */
         ev.type = SDL_KEYUP; handle(&a, &ev); CHECK(a.pv_key[12] == 0);
         memset(&ev, 0, sizeof ev); ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = 3; handle(&a, &ev);   /* the pad's Y: the root */
-        CHECK(a.pv_pad[3] == 60 + 1);
+        CHECK(a.pv_pad[0] == 60 + 1);
         /* Solo (R2): the machine is not run, the engine still sounds, and leaving the preview ends it */
         {
             Fm1Cpu c0, c1;
             fm1ntt_cpu(a.m, 0, &c0);
-            act(&a, A_R2); CHECK(a.pv_solo == 1);
+            act(&a, A_SELECT); CHECK(a.pv_solo == 1);
             int16_t solo_out[2 * 2048];
             audio_step(&a, solo_out, 2048);
             fm1ntt_cpu(a.m, 0, &c1);
             long es = 0; for (int i = 0; i < 2 * 2048; i++) es += abs(solo_out[i]);
             CHECK(c1.insns == c0.insns && es > 2048 * 20);                       /* no instruction ran, and the held chord sounds */
-            act(&a, A_R2); CHECK(a.pv_solo == 0);
-            act(&a, A_R2); act(&a, A_L2); CHECK(!a.pv_on && !a.pv_solo);          /* turning the preview off turns solo off */
-            act(&a, A_R2); CHECK(!a.pv_solo && a.msg_style == 2);                 /* solo with the preview off says why not */
-            act(&a, A_L2); act(&a, A_R2); CHECK(a.pv_solo == 1);
+            act(&a, A_SELECT); CHECK(a.pv_solo == 0);
+            act(&a, A_SELECT); act(&a, A_START); CHECK(!a.pv_on && !a.pv_solo);          /* turning the preview off turns solo off */
+            act(&a, A_SELECT); CHECK(!a.pv_solo && a.msg_style == 2);                 /* solo with the preview off says why not */
+            act(&a, A_START); act(&a, A_SELECT); CHECK(a.pv_solo == 1);
         }
         a.panel = PANEL_MIDI; pv_leave(&a);                                      /* leaving SOUND: off, every note released */
         CHECK(!a.pv_on && !a.pv_solo && a.pv_pad[3] == 0);
@@ -3380,24 +3997,24 @@ static int selftest(void) {
                     act(&a, A_Y); act(&a, A_Y);
                     int c1 = fm1ntt_inst_get(a.inst, 2);
                     act(&a, A_UP); act(&a, A_UP); act(&a, A_UP); CHECK(a.ed_sel == 10 && a.ed_sel != 2);   /* up wraps through the top */
-                    act(&a, A_R2); CHECK(a.ed_group == 1 && a.ed_sel == 0);
+                    act(&a, A_START); CHECK(a.ed_group == 1 && a.ed_sel == 0);
                     fill_ui(&a, ui, 0);
                     CHECK(ui->ed_total == 11 && !strcmp(ui->ed_title, "ARPEGGIATOR") && ui->ed_row[3].min == 30 && ui->ed_row[3].max == 300);
                     act(&a, A_RIGHT); CHECK(fm1ntt_inst_arp_get(a.inst, 0) == 1);               /* ARP ON */
-                    act(&a, A_R2); CHECK(a.ed_group == 2);                                       /* the sequencer's settings, then the pattern's steps */
+                    act(&a, A_START); CHECK(a.ed_group == 2);                                       /* the sequencer's settings, then the pattern's steps */
                     fill_ui(&a, ui, 0);
                     CHECK(ui->ed_total == 11 && !strcmp(ui->ed_title, "SEQUENCER"));
-                    act(&a, A_R2); CHECK(a.ed_group == 3);
+                    act(&a, A_START); CHECK(a.ed_group == 3);
                     fill_ui(&a, ui, 0);
                     CHECK(ui->ed_total == 33 && ui->ed_pages == 2 && !strcmp(ui->ed_title, "PATTERN 1"));
                     a.ed_sel = 1; act(&a, A_Y); CHECK(fm1ntt_inst_seq_get(a.inst, 101) == 12);   /* step 1's note: a big step (a tenth of 0 to 127) up from a rest */
                     a.ed_sel = 30; fill_ui(&a, ui, 0); CHECK(ui->ed_page == 1 && ui->ed_n == 9 && ui->ed_sel == 6);   /* the second page holds the last 9 rows */
-                    act(&a, A_R2); CHECK(a.ed_group == 4);                                       /* the global settings: channels, bend range, velocity, mono */
+                    act(&a, A_START); CHECK(a.ed_group == 4);                                       /* the global settings: channels, bend range, velocity, mono */
                     fill_ui(&a, ui, 0);
                     CHECK(ui->ed_total == 7 && !strcmp(ui->ed_title, "GLOBAL") && ui->ed_row[2].max == 24);
                     a.ed_sel = 2; act(&a, A_RIGHT); CHECK(fm1ntt_inst_global_get(a.inst, 2) == 3 && a.ed_dirty);   /* BEND RANGE 2 to 3 */
                     a.ed_group = 3; a.ed_sel = 1; act(&a, A_X); CHECK(fm1ntt_inst_seq_get(a.inst, 101) == 0);
-                    act(&a, A_L2); act(&a, A_L2); act(&a, A_L2); CHECK(a.ed_group == 0);
+                    act(&a, A_SELECT); act(&a, A_SELECT); act(&a, A_SELECT); CHECK(a.ed_group == 0);
                     act(&a, A_OK);                                                               /* saved to instruments/selftest-edit.fm1i, not over the source */
                     char sp2[400]; sub_path(sp2, sizeof sp2, "instruments", "selftest-edit.fm1i");
                     CHECK(is_file(sp2) && a.msg_style == 1 && !a.ed_dirty && is_file(ip));
@@ -3407,10 +4024,11 @@ static int selftest(void) {
                     int fi = -1; for (int i = 0; i < a.nfiles; i++) if (!strcmp(a.files[i], "selftest-edit.fm1i")) fi = i;
                     CHECK(fi >= 0);
                     if (fi >= 0) { a.file_sel = fi; act(&a, A_OK); CHECK(a.panel == PANEL_SOUND && a.pv_on && a.inst != NULL && !a.ed_on); }
-                    /* Select opens and closes it with the preview playing; the pad's faces edit while it is open instead of playing; the panel draws in both layouts */
-                    SDL_Event se; memset(&se, 0, sizeof se); se.type = SDL_JOYBUTTONDOWN; se.jbutton.button = PAD_SELECT;
-                    handle(&a, &se); CHECK(a.ed_on == 1);
-                    se.jbutton.button = 3; handle(&a, &se); CHECK(a.pv_pad[3] == 0);            /* Y did not play a note */
+                    /* the context menu opens it with the preview playing (B plays the third then); the pad's faces edit while it is open instead of playing; the panel draws in both layouts */
+                    SDL_Event se; memset(&se, 0, sizeof se); se.type = SDL_JOYBUTTONDOWN; se.jbutton.button = 0;
+                    { const char *cl[PX_MENU_MAX]; int cc[PX_MENU_MAX], n = ctx_items(&a, cl, cc), has = 0; for (int i = 0; i < n; i++) has |= !strcmp(cl[i], "EDIT THE INSTRUMENT"); CHECK(has); }
+                    ctx_run(&a, CX_ACT | A_BACK); CHECK(a.ed_on == 1);
+                    se.jbutton.button = 3; handle(&a, &se); CHECK(a.pv_pad[0] == 0);            /* Y did not play a note */
                     uint32_t *ecv = calloc((size_t)PX_W * PX_H, 4);
                     for (int md = 0; md < 2 && ecv; md++) {
                         a.mode = md ? MODE_ZOOMED : MODE_STANDARD;
@@ -3424,7 +4042,7 @@ static int selftest(void) {
                     }
                     free(ecv);
                     a.mode = MODE_STANDARD;
-                    se.jbutton.button = PAD_SELECT; handle(&a, &se); CHECK(a.ed_on == 0);
+                    se.jbutton.button = 0; handle(&a, &se); CHECK(a.ed_on == 0);                 /* B closes it */
                     a.panel = PANEL_SOUND;
                     remove(sp2);
                 }
@@ -3443,10 +4061,10 @@ static int selftest(void) {
     SDL_AtomicSet(&a.rec_w, 4000);
     rec_pump(&a); CHECK(a.rec_frames == 2000);
     /* a quit while recording asks first, and stopping saves the file */
-    a.panel = PANEL_TOOLS; a.tool_sel = 15;                                                     /* Quit is the last TOOLS row */
-    act(&a, A_OK); CHECK(a.confirm == CF_QUIT && !a.quit);
+    a.panel = PANEL_TOOLS; menu_open_main(&a); a.menu_sel = MM_QUIT;                             /* Quit is the main menu's */
+    menu_press(&a, A_OK); CHECK(a.confirm == CF_QUIT && !a.quit);
     act(&a, A_BACK); CHECK(a.confirm == CF_NONE && a.rec != NULL && !a.quit);
-    act(&a, A_OK); act(&a, A_OK); CHECK(a.quit == 1 && a.rec == NULL);
+    menu_open_main(&a); a.menu_sel = MM_QUIT; menu_press(&a, A_OK); CHECK(a.confirm == CF_QUIT); act(&a, A_OK); CHECK(a.quit == 1 && a.rec == NULL);
     char rdir[300]; sub_path(rdir, sizeof rdir, "recordings", NULL);
     d = opendir(rdir);
     int wavs = 0, parts = 0;
@@ -3957,6 +4575,8 @@ int main(int argc, char **argv) {
 
     draw_splash(canvas, "STARTING", 20);                 /* at once, before anything heavy */
     present(ren, tex, canvas);
+    keymap_load();                                       /* the buttons the person changed in the Keymap (keymap.txt) */
+    theme_load();                                        /* the colour theme the person chose last time (theme.txt in the app's folder; a tiny read) */
 
     if (a.pin) { int e, u; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(u); }       /* the window's thread: the first core (the audio thread takes the last) */
     SDL_AudioSpec want = {.freq = FM1_SAMPLE_RATE, .format = AUDIO_S16SYS, .channels = 2, .samples = AUDIO_FRAMES, .callback = audio_cb, .userdata = &a}, got;
