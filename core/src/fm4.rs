@@ -105,7 +105,13 @@ pub const LFO_PARAMS: u16 = 14;
 pub const F2_BASE: u16 = LFO_BASE + LFO_PARAMS;
 /// Morph, percent: with `F_TYPE` 4 the filter is a mix of its low-pass, band-pass and high-pass outputs along keyframes, **LP at 0 %, BP at 25 %, HP at 50 %, notch (LP plus HP) at 75 %, LP again at 100 %**, mixed linearly between them, in each of the two stages of 24 dB (fitted to OPERATOR 0.7 at 26 settings: 0.7 dB rms).
 pub const F2_MORPH: u16 = 0;
-pub const F2_PARAMS: u16 = 1;
+/// OPERATOR's filter Circuit: 0 Clean (linear; Drive does nothing), 1 to 4 OSR, MS2, SMP, PRD, **which measured identical** (a sine, a saw, and a high Res, at several Drives): a
+/// saturating stage `u / (1 + |u|)` with `u = 0.96 x 10^(drive / 20) x input` (the input in units of a full-level sine of operator A), fitted to the sine's fundamental and its 3rd and 5th
+/// harmonics at nine Drives (0.10 dB rms; tanh, atan, clip and others fitted 1.4 to 4 dB worse). Odd harmonics only, even at Drive 0 (a sine at full level has its 3rd at -19.5 dB).
+pub const F2_CIRCUIT: u16 = 1;
+/// Drive in tenths of a dB, 0 to 24.0 (the knob read +0.3, +0.5, +0.8, +2.8, +6.8, +11, +15 and +23 dB; it ends near +24).
+pub const F2_DRIVE: u16 = 2;
+pub const F2_PARAMS: u16 = 3;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
 const NOISE_HZ: f64 = 400.0;
@@ -194,6 +200,8 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
     if id >= F2_BASE as usize {
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - F2_BASE as usize) as u16 {
             F2_MORPH => ("FILTER MORPH (TYPE 4)", 0, 100, 0, "%"),
+            F2_CIRCUIT => ("FILTER CIRCUIT (0 CLEAN 1-4 SATURATING)", 0, 4, 0, ""),
+            F2_DRIVE => ("FILTER DRIVE (0.1 DB)", 0, 240, 0, ""),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -565,6 +573,8 @@ impl Engine for Fm4 {
         let mut fkey = [0.0f64; VOICES];
         let f_kind = self.p[(FILT_BASE + F_TYPE) as usize];
         let f_morph = f64::from(self.p[(F2_BASE + F2_MORPH) as usize]) / 100.0;
+        let f_sat = self.p[(F2_BASE + F2_CIRCUIT) as usize] > 0;
+        let f_drive = 0.96 * 10f64.powf(f64::from(self.p[(F2_BASE + F2_DRIVE) as usize]) / 200.0);
         if f_on {
             let kind = self.p[(FILT_BASE + F_TYPE) as usize];
             for (i, v) in self.voices.iter().enumerate() {
@@ -721,6 +731,10 @@ impl Engine for Fm4 {
                     fco[vi] = biquad(f_kind, (fkey[vi] * 2f64.powf(oct)).clamp(5.0, rate * 0.45), q, rate, f_morph);
                 }
                 if f_on {
+                    if f_sat {
+                        let u = heard * f_drive;
+                        heard = u / (1.0 + u.abs());
+                    }
                     let c = &fco[vi];
                     for z in v.fz.iter_mut().take(f_stages) {
                         let y = c[0] * heard + z[0];
@@ -1923,5 +1937,79 @@ mod tests {
         // between the keyframes it moves: 10 percent is between the low-pass and the band-pass
         let m10 = profile(4, 10);
         assert!(m10[0] < lp[0] - 1.0 && m10[0] > bp[0] + 1.0, "{m10:?}");
+    }
+
+    /// OPERATOR 0.7's filter circuits and Drive (2026-11-20): a sine through the filter wide open with a non-Clean circuit had its fundamental at -5.3 dB, 3rd harmonic at -19.5 and 5th at
+    /// -30.8 dB re the fundamental at Drive 0, and (+6.8 dB) -2.1, -15.8 and -25.0, (+15) +0.1, -12.8 and -20.0, (+23) +1.2, -11.1 and -17.0; Clean did nothing with Drive. A Saw D through
+    /// the 846 Hz filter ran 4 to 7 dB lower on every harmonic (-3.9, -6.7, -5.6, -6.2, -5.9 ...), the shape of the clean filter. OSR, MS2, SMP and PRD measured the same.
+    #[test]
+    fn fitted_to_operator_the_filter_circuits_and_drive() {
+        let sine = |circuit: i32, drive10: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(F2_BASE + F2_CIRCUIT, circuit);
+            e.set(F2_BASE + F2_DRIVE, drive10);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[13_230..].iter().map(|&v| f64::from(v) / 32768.0 / 0.0484).collect();
+            let amp = |k: f64| {
+                let w = std::f64::consts::TAU * k * 220.0 / 44_100.0;
+                let (mut c, mut s) = (0.0, 0.0);
+                for (i, v) in x.iter().enumerate() {
+                    let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / x.len() as f64).cos();
+                    c += v * win * (w * i as f64).cos();
+                    s += v * win * (w * i as f64).sin();
+                }
+                c.hypot(s) / (x.len() as f64 / 4.0)
+            };
+            let f = amp(1.0);
+            (20.0 * f.log10(), 20.0 * (amp(3.0) / f).log10(), 20.0 * (amp(5.0) / f).log10(), 20.0 * (amp(2.0) / f).max(1e-9).log10())
+        };
+        for (drive, fund, h3, h5) in [(0, -5.3, -19.5, -30.8), (68, -2.1, -15.8, -25.0), (150, 0.1, -12.8, -20.0), (230, 1.2, -11.1, -17.0)] {
+            let (f, a3, a5, a2) = sine(4, drive);
+            assert!((f - fund).abs() < 0.5 && (a3 - h3).abs() < 0.7 && (a5 - h5).abs() < 1.0, "drive {drive}: {f} {a3} {a5}");
+            assert!(a2 < -60.0, "odd harmonics only: {a2}");
+        }
+        let clean = sine(0, 230);
+        assert!(clean.0.abs() < 0.3 && clean.1 < -60.0, "Clean ignores Drive: {clean:?}");
+        let (f, ..) = sine(1, 0);
+        assert!((f - sine(3, 0).0).abs() < 1e-9, "the four saturating circuits are one");
+        // a Saw D through the 846 Hz filter: every harmonic about 6 dB under the clean one
+        let saw = |circuit: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_WAVE), 10);
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(FILT_BASE + F_FREQ, 846);
+            e.set(F2_BASE + F2_CIRCUIT, circuit);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[13_230..].iter().map(|&v| f64::from(v) / 32768.0).collect();
+            (1..=8)
+                .map(|k| {
+                    let w = std::f64::consts::TAU * k as f64 * 220.0 / 44_100.0;
+                    let (mut c, mut s) = (0.0, 0.0);
+                    for (i, v) in x.iter().enumerate() {
+                        let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / x.len() as f64).cos();
+                        c += v * win * (w * i as f64).cos();
+                        s += v * win * (w * i as f64).sin();
+                    }
+                    20.0 * (c.hypot(s) / (x.len() as f64 / 4.0) * k as f64 / 0.0484).max(1e-9).log10()
+                })
+                .collect::<Vec<f64>>()
+        };
+        let (clean, circ) = (saw(0), saw(4));
+        for k in 1..8 {
+            let d = circ[k] - clean[k];
+            assert!((d + 6.0).abs() < 1.0, "harmonic {}: {d} dB against the clean filter", k + 1);
+        }
+        assert!((circ[0] - clean[0] + 3.9).abs() < 0.8, "harmonic 1: {}", circ[0] - clean[0]);
     }
 }
