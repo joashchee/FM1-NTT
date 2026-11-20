@@ -71,7 +71,8 @@ pub const FILT_PARAMS: u16 = 6;
 /// The LFO (OPERATOR's LFO page, measured 2026-11-20): pitch only so far. Off by default so older patches are unchanged.
 pub const LFO_BASE: u16 = FILT_BASE + FILT_PARAMS;
 pub const L_ON: u16 = 0;
-/// 0 sine, 1 square, 2 triangle, 3 saw up, 4 saw down, 5 sample and hold (a new value each cycle), 6 noise (a new value 16 times a cycle). Types 5 and 6 are not fitted.
+/// 0 sine, 1 square, 2 triangle, 3 saw up, 4 saw down, 5 sample and hold (a uniform value each cycle: 45 cycles of OPERATOR's spanned -112 to 113 cents of 120), 6 noise (white
+/// noise at 400 Hz through a one-pole low-pass whose corner is the LFO rate: correlation times of 6.4, 27 and 200 ms at 27.5, 5.8 and 0.7 Hz, and a spread of sqrt(rate)).
 pub const L_TYPE: u16 = 1;
 /// Hertz times 100 (OPERATOR's default is 6.32 Hz).
 pub const L_RATE: u16 = 2;
@@ -101,6 +102,8 @@ pub const L_SYNC_DIV: u16 = 12;
 pub const L_TEMPO: u16 = 13;
 pub const LFO_PARAMS: u16 = 14;
 /// The Synced menu's lengths in quarter notes.
+/// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
+const NOISE_HZ: f64 = 400.0;
 const SYNC_QUARTERS: [f64; 15] = [0.125, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 1.0, 4.0 / 3.0, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0];
 /// Bit 4 of `L_DEST`: the filter's cutoff follows the LFO. Measured: the cutoff swings by plus and minus this many octaves at 100 % (a sine, geometrically about its own value).
 pub const L_FILTER_BIT: i32 = 16;
@@ -299,6 +302,9 @@ struct Voice {
     /// this note's LFO phase (0 to 1) and its held random value
     lph: f64,
     lval: f64,
+    /// the Noise type's low-passed value and the counter of its 400 Hz white-noise updates
+    lnz: f64,
+    nacc: f64,
     vel: f64,
     ops: [Op; OPS],
     fb: [[f64; 2]; OPS],
@@ -307,7 +313,7 @@ struct Voice {
 }
 
 const IDLE_OP: Op = Op { stage: Stage::Idle, ph: 0.0, env: 0.0, out: 0.0 };
-const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, lph: 0.0, lval: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
+const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, lph: 0.0, lval: 0.0, lnz: 0.0, nacc: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
 
 pub struct Fm4 {
     rate: f64,
@@ -551,7 +557,6 @@ impl Engine for Fm4 {
         let l_depth_b = f64::from(self.p[(LFO_BASE + L_AMOUNT_B) as usize]) / 100.0 * f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0;
         let (l_ratekey, l_amtvel) = (f64::from(self.p[(LFO_BASE + L_RATE_KEY) as usize]) / 100.0, f64::from(self.p[(LFO_BASE + L_AMT_VEL) as usize]) / 100.0);
         let (mut free_ph, mut rng) = (self.lfo_ph, self.rng);
-        let steps = if l_type == 6 { 16.0 } else { 1.0 };
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
         for (n, o) in out.iter_mut().enumerate() {
             let refresh = n & 7 == 0;
@@ -574,6 +579,15 @@ impl Engine for Fm4 {
                 if lfo_on {
                     let prev = if l_retrig { v.lph } else { free_ph };
                     let ph = if l_retrig { v.lph } else { free_ph };
+                    if l_type == 6 {
+                        v.nacc += NOISE_HZ / rate;
+                        if v.nacc >= 1.0 {
+                            v.nacc -= 1.0;
+                            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            let w = f64::from(rng >> 8) / f64::from(1u32 << 23) - 1.0;
+                            v.lnz += (1.0 - (-std::f64::consts::TAU * l_hz * ratek / NOISE_HZ).exp()) * (w - v.lnz);
+                        }
+                    }
                     let shape = match l_type {
                         0 => (std::f64::consts::TAU * ph).sin(),
                         1 => {
@@ -592,6 +606,7 @@ impl Engine for Fm4 {
                         }
                         3 => 2.0 * ph - 1.0,
                         4 => 1.0 - 2.0 * ph,
+                        6 => v.lnz,
                         _ => v.lval,
                     };
                     lshape = shape;
@@ -602,7 +617,7 @@ impl Engine for Fm4 {
                     lmul = 2f64.powf(depth_v * shape);
                     let next = ph + l_dph * ratek;
                     let nph = next - next.floor();
-                    if l_type >= 5 && ((nph * steps).floor() != (prev * steps).floor() || nph < prev) {
+                    if l_type == 5 && nph < prev {
                         rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                         v.lval = f64::from(rng >> 8) / f64::from(1u32 << 23) - 1.0;
                     }
@@ -1678,5 +1693,62 @@ mod tests {
             c.hypot(s)
         };
         assert!(amp(6000.0 - 1760.0) > 0.3 * amp(1760.0), "a sideband at the rate minus the carrier");
+    }
+
+    /// OPERATOR 0.7's S&H and Noise LFO types (2026-11-20, pitch at 10 %, +-120 cents): S&H held a value per cycle spread across -112 to 113 cents; Noise had a spread of 15.1
+    /// cents with an autocorrelation of 0.48 at 20 ms at 5.8 Hz, 33.3 cents (0.46 at 5 ms on a 404 Hz carrier) at 27.5 Hz and 5.1 cents (0.60 at 100 ms) at 0.77 Hz.
+    #[test]
+    fn fitted_to_operator_sample_and_hold_and_noise() {
+        // the pitch in cents on a 5 ms grid
+        let trace = |ty: i32, hz100: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_TYPE, ty);
+            e.set(LFO_BASE + L_RATE, hz100);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100 * 10];
+            e.render(&mut x);
+            let mut ups = vec![];
+            for i in 1..x.len() {
+                if x[i - 1] < 0 && x[i] >= 0 {
+                    ups.push(i as f64 - 1.0 + f64::from(-x[i - 1]) / f64::from(x[i] - x[i - 1]));
+                }
+            }
+            let c: Vec<(f64, f64)> = ups.windows(2).map(|w| (1200.0 * (44_100.0 / (w[1] - w[0]) / 220.0).log2(), (w[0] + w[1]) / 2.0 / 44_100.0)).filter(|v| v.1 > 0.2).collect();
+            let mut g = vec![];
+            let mut k = 0;
+            let mut t = 0.2;
+            while t < 9.8 {
+                while k + 1 < c.len() && c[k].1 < t {
+                    k += 1;
+                }
+                g.push(c[k].0);
+                t += 0.005;
+            }
+            g
+        };
+        let stat = |g: &[f64], lag: usize| {
+            let m = g.iter().sum::<f64>() / g.len() as f64;
+            let var = g.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / g.len() as f64;
+            let ac = (0..g.len() - lag).map(|i| (g[i] - m) * (g[i + lag] - m)).sum::<f64>() / (g.len() - lag) as f64 / var;
+            (var.sqrt(), ac)
+        };
+        let g = trace(5, 632);
+        let (std, _) = stat(&g, 1);
+        assert!((std - 69.0).abs() < 18.0, "S&H spread {std}");
+        assert!(g.iter().all(|v| v.abs() < 130.0), "within the 120 cents");
+        // Noise at the default rate
+        let (std, ac20) = stat(&trace(6, 632), 4);
+        assert!((std - 15.5).abs() < 5.0, "Noise spread {std}");
+        assert!(ac20 > 0.3 && ac20 < 0.65, "Noise correlation at 20 ms {ac20}");
+        // a faster rate is wider and shorter, a slower one narrower and longer (the spread goes as the square root of the rate)
+        let (fast, _) = stat(&trace(6, 3000), 1);
+        let (slow, ac100) = stat(&trace(6, 77), 20);
+        assert!((fast / std - 2.2).abs() < 0.6, "30 Hz against 6.3 Hz: {}", fast / std);
+        assert!((slow / std - 0.33).abs() < 0.12, "0.77 Hz against 6.3 Hz: {}", slow / std);
+        assert!(ac100 > 0.4, "Noise at 0.77 Hz is still correlated at 100 ms: {ac100}");
     }
 }
