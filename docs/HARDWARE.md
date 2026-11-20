@@ -57,3 +57,41 @@ The maintainer put three official files in `docs/`, **kept on this machine only 
 - **EDIT-mode key order, settled in the emulator (2026-11-18):** with the stock firmware in EDIT, pressing the black keys F#3, G#3, A#3, C#4 and D#4 (note keys 1, 3, 5, 8, 10) selects **OP1 to OP5**, F#4 (13) **OP6**, G#4 (15) **PIT**, A#4 (17) **GLO**; C#5 and D#5 (20, 22) are MONO and POLY (a mode change with no screen change, so by position, not seen). That is the order the README assumed; **still not tried on a real unit.**
 
 **Corrections to what was written before:** the reference kit says octave shifting spans 8 octaves; the manual gives -3 to +3 (seven octaves) plus a separate transpose of +/-12. The older "closed binary on stock firmware" line stands for the sound engine, but the stock firmware *runs* in the core.
+
+## From the FM-1 reverse-engineering notes (read 2026-11-20)
+
+Source: `AL-255/FM-1-RE`, its `README.md` and `docs/architecture.md` (WTFPL; static analysis of the **stock V13 firmware, dated 2026-07-03**). Its disassembly
+and extracted loader binaries were **not** read or copied (rule 2); function addresses are left out here. Written in our own words, and **none of it was run
+here or checked on a unit**: it is that project's reading of one firmware version, with the confidence it states (addresses and sizes exact for that image,
+what a function is for tagged high, medium or low).
+
+- **Where it agrees with what is above:** JieLi AC791N / WL82; RAM at 0x01C00000 (`.data` first, then `.bss`); execute-in-place flash at 0x02000000;
+  a six-operator engine that is a port of Google's msfa (the Dexed core), proven by byte-exact DX7 lookup tables; 12 voices; 240 x 240 SPI LCD; 41-key matrix,
+  two encoders, two ADC wheels; USB-MIDI, UART MIDI, BLE-MIDI.
+- **Where it adds or differs:**
+  - **CPU:** one **pi32v2** core at **240 MHz** (a 24 MHz crystal through a PLL), 16-bit little-endian instruction words. It says "CPU" in the singular; the "two cores" above comes
+    from `awesome-fm-1`. Which is right for the FM-1 is open. The notes call `JL-BR22` strings library lineage, not the chip's name.
+  - **Engine numbers:** **44118 Hz** sample rate (not 44100), **64-sample blocks**, integer fixed-point, 12 voices of 468 bytes each, a ping-pong buffer pumped by DMA,
+    then the effects chain (reverb, phaser, chorus, filters) after the mix, then the internal DAC. Our `fm6` renders at the host rate, so a stock-firmware comparison should
+    allow the 44118 against 44100 difference (0.04 %, 0.7 cent) before blaming the engine.
+  - **Flash: 1 MB, linearly mapped.** XIP address is flash offset minus 0x4120 plus 0x02000000 for the app image (`app.bin` at flash 0x4120, 0x8E59C long). Layout: header and
+    second-stage loader at 0, **app area from 0x4000 (encrypted with the chip key)**, a **VM region at 0x94000** (0x55000: the key-value store for config, the Bluetooth address and the wheel
+    calibration), a Bluetooth pairing region at 0xE9000, **user patches at 0xEA000** (0x12000), and the chip's key and MAC data in the last 4 KB (0xFF000).
+  - **Boot:** the mask ROM loads the second-stage loader from flash 0xA0, which maps the app area and jumps to the app; the app clears `.bss`, copies `.data` from flash, copies a boot-parameter struct,
+    raises the PLL, starts an RTOS and the UI task. Interrupts go through one C dispatcher and a RAM vector table. **This is the sequence a core that runs the stock firmware would have to reproduce.**
+  - **OS:** a FreeRTOS-derived kernel with JieLi's task and timer API, a device framework, an audio-stream pipeline and a dlmalloc heap.
+  - **USB:** a composite device, **"FM-1 Midi" plus "FM-1 Audio" (UAC1, 24-bit stereo)**, strings "Jieli Technology" and a serial that is the hex chip id; the descriptor template carries VID:PID
+    `4c4a:4155` and captures of a running unit show `4c4a:c755`. USB-MIDI uses a 64-byte bulk pair.
+  - **MIDI:** DX7 SysEx works: a 32-voice bulk dump (4096 bytes plus checksum), single-voice dumps, and 7-byte parameter changes into an edit buffer (155 bytes, packed to 128 for storage). Notes, CC 1, 2, 4
+    and 64, and 14-bit pitch bend are handled; **a vendor SysEx with the magic bytes `F0 35 59 F7`** carries configuration and update traffic. The arpeggiator and sequencer live in the firmware, not the host.
+  - **Update:** a UFW-format package (here a `.fwsc`, chip name AC791N) holds the flash image and update scripts; the update is a USB-MIDI session with a loader on the device. **The notes state that
+    no recovery path (rollback, interrupted-write safety) has been shown for the single-bank layout**; do not flash anything on that evidence.
+  - **Bluetooth:** a full BLE stack with BLE-MIDI on GATT; the Classic profiles (A2DP, AVRCP, HFP) are SDK carryover and unused.
+  - **Where the flash goes:** by function count the image is mostly Bluetooth (719 of 2062 entries), the RTOS (224), storage (215) and the UI (165); the synth engine is 20 entries and the MIDI layer 28.
+- **For this project:**
+  - **The 44118 Hz engine rate** is a candidate for the "0.9173 engine factor" measured on OPERATOR (`docs/PORTING.md`): that is about 44100 / 48000 (146.8 cents flat), nowhere near 44118, so the stock engine's rate does **not** explain it; OPERATOR running its engine at a different rate is the likelier cause.
+  - **The patch store** (user patches at 0xEA000, 128-byte packed voices) is what a `.fm1save` should eventually model if it is to match the unit; today it does not.
+  - **The vendor SysEx magic** `F0 35 59 F7` is worth a line in `docs/FM-1-MIDI.md` once seen on a capture (not confirmed here).
+  - **Open:** the one-core or two-core question, the flash chip revisions, and the effects chain's algorithms (named, not described).
+
+Source: https://github.com/AL-255/FM-1-RE (`docs/architecture.md`, WTFPL).
