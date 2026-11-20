@@ -86,7 +86,7 @@ pub const L_DEST: u16 = 5;
 pub const L_AMOUNT_A: u16 = 6;
 /// OPERATOR's Dest B (one target, its own Amount B): 0 Off, 1 to 4 Osc Vol A to D, 5 X-Fade A/C, 6 X-Fade B/D, 7 Feedback, 8 Fixed Freq, 9 FM Drive, 10 Filter Freq, 11 Filter Q,
 /// 12 Filter Res, 13 Morph, 14 Flt Drive, 15 Filter Env, 16 Shp Drive, 17 LFO Rate, 18 LFO Amt, 19 Pitch Env, 20 Volume, 21 Pan, 22 Tone, 23 Time (the menu's order). **Only Osc Vol A to D
-/// and Volume, FM Drive, Feedback and the filter's Freq, Q and Res act so far**: FM Drive scales every modulator's index by the same gain as Osc Vol; Feedback adds amount x Amount B x value (a fraction of the full feedback, never below 0) to the feedback of operators B to D (OPERATOR's A has none). The gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
+/// and Volume, FM Drive, Feedback, Fixed Freq and the filter's Freq, Q and Res act so far**: FM Drive scales every modulator's index by the same gain as Osc Vol; Feedback adds amount x Amount B x value (a fraction of the full feedback, never below 0) to the feedback of operators B to D (OPERATOR's A has none). The gain is 1 plus the LFO's amount times Amount B times its value (measured on Osc Vol A: 10 % gave 0.9 to 1.1, 69 % 0.32 to 1.69, 100 % 0 to 2).
 pub const L_DEST_B: u16 = 7;
 pub const L_AMOUNT_B: u16 = 8;
 /// OPERATOR's Rate<Key, percent (-100 to 100): each note's LFO rate is the set rate times `2^(percent / 100 x (note - 60) / 12)` (measured at +100 %: 2.44, 4.88 and 9.78 Hz on notes 45, 57 and 69 from 5.8). Not applied to the free-running LFO.
@@ -110,6 +110,8 @@ pub const L_FILTER_BIT: i32 = 16;
 const L_FILTER_OCTAVES: f64 = 2.84;
 /// Dest B's Filter Freq swings the cutoff by this many octaves either way at 100 % (0.75 octave peak to peak at 10 %; Dest A's is 2.84).
 const L_FILTER_B_OCTAVES: f64 = 3.75;
+/// Dest B's Fixed Freq swings a fixed operator's frequency by this many octaves either way at 100 % (+-0.40 octave at 10 %, the same on 92 and 306 Hz, symmetric in log).
+const L_FIXED_B_OCTAVES: f64 = 4.0;
 pub const P_COUNT: usize = LFO_BASE as usize + LFO_PARAMS as usize;
 const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
 
@@ -193,7 +195,7 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
             L_DEST => ("LFO TARGETS (BITS: 1-8 OPERATORS 16 FILTER)", 0, 31, 15, ""),
             L_AMOUNT_A => ("LFO AMOUNT A", -100, 100, 100, "%"),
-            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 7 FEEDBACK, 9 FM DRIVE, 10-12 FILTER FREQ Q RES, 20 VOLUME)", 0, 23, 0, ""),
+            L_DEST_B => ("LFO DEST B (1-4 OSC VOL, 7 FEEDBACK, 9 FM DRIVE, 8 FIXED FREQ, 10-12 FILTER FREQ Q RES, 20 VOLUME)", 0, 23, 0, ""),
             L_AMOUNT_B => ("LFO AMOUNT B", -100, 100, 100, "%"),
             L_RATE_KEY => ("LFO RATE<KEY", -100, 100, 0, "%"),
             L_AMT_VEL => ("LFO AMT<VEL", 0, 100, 0, "%"),
@@ -651,7 +653,7 @@ impl Engine for Fm4 {
                     let s = &mut v.ops[op];
                     let fbk = if l_dest_b == 7 && op >= 1 { (fbf[op] + depth_bv * lshape).max(0.0) * fb_max } else { fb[op] };
                     pm += fbk * 0.5 * (v.fb[op][0] + v.fb[op][1]);
-                    let inc = if fixed[op] > 0.0 { fixed[op] / rate } else { v.f0 * bend * ratio[op] * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
+                    let inc = if fixed[op] > 0.0 { fixed[op] * if l_dest_b == 8 { 2f64.powf(L_FIXED_B_OCTAVES * depth_bv * lshape) } else { 1.0 } / rate } else { v.f0 * bend * ratio[op] * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
                     s.ph += inc;
                     s.ph -= s.ph.floor();
                     // velocity: linear, from (1 - sensitivity) at velocity 0 to 1 at 127 (OPERATOR 0.7 at its default of 50%: half at 0, measured); key scaling: higher notes quieter
@@ -1810,5 +1812,39 @@ mod tests {
         assert!(hi - lo > 2.0 && hi - lo < 15.0, "Filter Freq at 10 percent: {} dB", hi - lo);
         let (lo2, hi2) = range(&spectrum(10, 100));
         assert!(hi2 - lo2 > 15.0, "and a lot at 100 percent");
+    }
+
+    /// OPERATOR 0.7's LFO Dest B on Fixed Freq (2026-11-20; a fixed operator A, Amount 10 %): the tone swung 69.7 to 120.9 Hz about 91.7 and 231.5 to 403 about 305.5, a ratio of 1.32
+    /// either way on both, plus and minus 0.40 octave, so 4 octaves at 100 %. A non-fixed operator is not touched.
+    #[test]
+    fn fitted_to_operator_lfo_dest_b_on_fixed_freq() {
+        let freqs = |fixed: i32, target: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_FIXED), fixed);
+            e.set(ext_param(0, E_FIXFREQ), 100);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_DEST, 0);
+            e.set(LFO_BASE + L_DEST_B, target);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 66_150];
+            e.render(&mut x);
+            let mut ups = vec![];
+            for i in 1..x.len() {
+                if x[i - 1] < 0 && x[i] >= 0 {
+                    ups.push(i as f64 - 1.0 + f64::from(-x[i - 1]) / f64::from(x[i] - x[i - 1]));
+                }
+            }
+            let f: Vec<f64> = ups.windows(2).filter(|w| w[0] > 4410.0).map(|w| 44_100.0 / (w[1] - w[0])).collect();
+            (f.iter().cloned().fold(f64::MAX, f64::min), f.iter().cloned().fold(0.0, f64::max))
+        };
+        let (lo, hi) = freqs(1, 8);
+        assert!((hi / 100.0 - 1.32).abs() < 0.06 && (100.0 / lo - 1.32).abs() < 0.06, "{lo} {hi}");
+        let (lo, hi) = freqs(1, 0);
+        assert!(hi / lo < 1.03, "Off: steady");
+        let (lo, hi) = freqs(0, 8); // a tracking operator ignores it (note 57 is 220 Hz)
+        assert!(hi / lo < 1.03 && (lo - 220.0).abs() < 4.0, "{lo} {hi}");
     }
 }
