@@ -156,7 +156,12 @@ pub const F2_ENV_REPEAT: u16 = 17;
 pub const F2_ENV_A_SLOPE: u16 = 18;
 pub const F2_ENV_D_SLOPE: u16 = 19;
 pub const F2_ENV_R_SLOPE: u16 = 20;
-pub const F2_PARAMS: u16 = 21;
+/// Osc<Vel per operator (A to D), percent (-100 to 100; EDIT page 4 of OPERATOR, the Phase row): the operator's frequency is multiplied by `1 + percent / 100 x velocity / 127`
+/// (measured on operator A at +100 %: 403.6, 344.8, 303.5 and 265.4 Hz at velocity 127, 90, 64 and 40 against 201.87 unmodulated: 2.00, 1.71, 1.50, 1.31 times). **Quantize** (per operator, on by
+/// default in OPERATOR) rounds that multiplier to the nearest whole number: at velocity 64 and 90 the tone sat at exactly 403.6 Hz, at 40 at 201.9. A fixed operator is not changed (not measured).
+pub const F2_OSC_VEL: u16 = 21;
+pub const F2_QUANT: u16 = 25;
+pub const F2_PARAMS: u16 = 29;
 const F_ENV_OCTAVES: f64 = 9.0;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
@@ -266,6 +271,8 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             F2_ENV_A_SLOPE => ("FILTER ENV A SLOPE", -100, 100, 0, "%"),
             F2_ENV_D_SLOPE => ("FILTER ENV D SLOPE", -100, 100, 100, "%"),
             F2_ENV_R_SLOPE => ("FILTER ENV R SLOPE", -100, 100, 100, "%"),
+            x @ 21..=24 => return Some((format!("OSC<VEL {}", ["A", "B", "C", "D"][(x - F2_OSC_VEL) as usize]), -100, 100, 0, "%")),
+            x @ 25..=28 => return Some((format!("QUANTIZE {} (OSC<VEL)", ["A", "B", "C", "D"][(x - F2_QUANT) as usize]), 0, 1, 1, "")),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -614,6 +621,13 @@ impl Engine for Fm4 {
     fn render(&mut self, out: &mut [i16]) {
         let rate = self.rate;
         // per operator, once a block: the envelope's three rates, the sustain, the level, the ratio and the velocity law
+        let ov_pct: [f64; OPS] = std::array::from_fn(|k| f64::from(self.p[(F2_BASE + F2_OSC_VEL) as usize + k]) / 100.0);
+        let ov_quant: [bool; OPS] = std::array::from_fn(|k| self.p[(F2_BASE + F2_QUANT) as usize + k] > 0);
+        // Osc<Vel: the frequency times 1 + percent x velocity, whole numbers when Quantize is on (measured on operator A)
+        let osc_vel = |op: usize, vel: f64| {
+            let m = (1.0 + ov_pct[op] * vel).max(0.0);
+            if ov_quant[op] && ov_pct[op] != 0.0 { m.round() } else { m }
+        };
         let mut ratio = [0.0; OPS];
         let mut a = [[0.0; 3]; OPS];
         let mut sustain = [0.0; OPS];
@@ -808,7 +822,7 @@ impl Engine for Fm4 {
                     let s = &mut v.ops[op];
                     let fbk = if l_dest_b == 7 && op >= 1 { (fbf[op] + depth_bv * lshape).max(0.0) * fb_max } else { fb[op] };
                     pm += fbk * 0.5 * (v.fb[op][0] + v.fb[op][1]);
-                    let inc = if fixed[op] > 0.0 { fixed[op] * if l_dest_b == 8 { 2f64.powf(L_FIXED_B_OCTAVES * depth_bv * lshape) } else { 1.0 } / rate } else { v.f0 * bend * ratio[op] * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
+                    let inc = if fixed[op] > 0.0 { fixed[op] * if l_dest_b == 8 { 2f64.powf(L_FIXED_B_OCTAVES * depth_bv * lshape) } else { 1.0 } / rate } else { v.f0 * bend * ratio[op] * osc_vel(op, v.vel) * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
                     s.ph += inc;
                     s.ph -= s.ph.floor();
                     // velocity: linear, from (1 - sensitivity) at velocity 0 to 1 at 127 (OPERATOR 0.7 at its default of 50%: half at 0, measured); key scaling: higher notes quieter
@@ -1457,6 +1471,31 @@ mod tests {
 
     /// OPERATOR 0.7's ratio (measured by the zero crossings of operator A alone, note 57): the coarse knob steps 0.5, 1, 2, 3, 4, 5, 6, 7 ... to 48 (a click each), and the
     /// fine value adds thousandths (coarse 1 and fine 26 played 1.026 times the pitch, fine 146 played 1.146; the screen read "1.026" and "1.146").
+    /// OPERATOR 0.7's Osc<Vel and Quantize (operator A alone, +100 %): 2.00, 1.71, 1.50 and 1.31 times the pitch unquantized at velocity 127, 90, 64 and 40; with Quantize on
+    /// the whole numbers 2, 2, 2 and 1.
+    #[test]
+    fn fitted_to_operator_osc_vel_and_quantize() {
+        let freq = |pct: i32, quant: i32, vel: u8| {
+            let mut e = sine();
+            e.set(P_RATIO_LAW, 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(F2_BASE + F2_OSC_VEL, pct);
+            e.set(F2_BASE + F2_QUANT, quant);
+            e.note_on(57, vel);
+            let mut b = vec![0i16; 44_100];
+            e.render(&mut b);
+            let z = &b[8000..];
+            z.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as f64 * 44_100.0 / z.len() as f64 / 220.0
+        };
+        for (vel, want) in [(127, 2.0), (90, 1.709), (64, 1.504), (40, 1.315)] {
+            assert!((freq(100, 0, vel) / want - 1.0).abs() < 0.03, "Osc<Vel at velocity {vel}: {}", freq(100, 0, vel));
+        }
+        for (vel, want) in [(127, 2.0), (90, 2.0), (64, 2.0), (40, 1.0)] {
+            assert!((freq(100, 1, vel) / want - 1.0).abs() < 0.03, "quantized at velocity {vel}: {}", freq(100, 1, vel));
+        }
+        assert!((freq(0, 1, 90) - 1.0).abs() < 0.03, "no Osc<Vel, no change");
+    }
+
     #[test]
     fn fitted_to_operator_the_ratio_table() {
         let freq = |coarse: i32, fine: i32| {
