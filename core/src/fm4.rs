@@ -2391,6 +2391,12 @@ mod tests {
         for (g, w) in o.iter().zip([0.30, 0.38, 0.50, 0.70]) {
             assert!((g - w).abs() < 0.2, "release: {o:?}");
         }
+        // measured later: Time<Vel -100 % runs the decay about 4 times as long at velocity 127 (e^1.4), +50 % half as long; Peak 50 % halves the octaves; Envelope -25 % mirrors +25 %
+        assert!(tv(-100, 127) > tv(0, 127) * 1.3 && tv(50, 127) < tv(0, 127) * 0.9 && tv(50, 127) > tv(100, 127), "Time<Vel -100, 0, +50, +100: {} {} {} {}", tv(-100, 127), tv(0, 127), tv(50, 127), tv(100, 127));
+        let pk = |p: i32| (cutoffs(&|e| { e.set(F2_BASE + F2_ENV_AMOUNT, 25); e.set(F2_BASE + F2_ENV_PEAK, p); }, 127, &[2646])[0] / rest).log2();
+        assert!((pk(50) / pk(100) - 0.5).abs() < 0.12, "Peak 50: {} octaves against {}", pk(50), pk(100));
+        let neg = cutoffs(&|e| { e.set(F2_BASE + F2_ENV_AMOUNT, -25); }, 127, &[0])[0];
+        assert!(neg < rest * 0.55, "a negative amount lowers the cutoff: {neg} against {rest}");
         // the Slopes page (fitted cutoffs of OPERATOR at the 25 % amount, 598 ms decay; the window centres 20 ms after its start): D Slope 0 is a line to 1.1 times the Decay, -100 its mirror
         let want_at = |w: f64| (rest + (w - 652.6) * rest / 652.6).max(rest);
         for (d, starts, wants) in [
