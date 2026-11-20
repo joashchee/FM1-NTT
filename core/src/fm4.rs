@@ -111,7 +111,16 @@ pub const F2_MORPH: u16 = 0;
 pub const F2_CIRCUIT: u16 = 1;
 /// Drive in tenths of a dB, 0 to 24.0 (the knob read +0.3, +0.5, +0.8, +2.8, +6.8, +11, +15 and +23 dB; it ends near +24).
 pub const F2_DRIVE: u16 = 2;
-pub const F2_PARAMS: u16 = 3;
+/// OPERATOR's Shaper, after the filter: 0 Off, 1 Soft (`u / (1 + |u|)` with `u = 0.96 x gain x input`, the circuit's own curve), 2 Hard (the input times the gain, clipped at plus and
+/// minus 1), 3 Sine (`sin(pi / 2 x u)`, folding back above 1), 4 Bit (`round(8 x clipped u) / 8`); `u` is the input times the Shp Drive gain, in units of a full-level sine of
+/// operator A. Fitted to a sine at several drives (Hard to the clip level 1.0 within 0.5 dB, Sine and 4 Bit to 0.3 dB rms); the stage follows the filter (a clipped saw has its harmonics
+/// above the cutoff filled in).
+pub const F2_SHAPER: u16 = 3;
+/// Shp Drive in tenths of a dB, 0 to 12.0 (0.25 dB a single click on OPERATOR's knob).
+pub const F2_SHP_DRIVE: u16 = 4;
+/// Dry/Wet in percent (100 is all shaped): the output is the dry signal plus the wet fraction of the difference.
+pub const F2_DRYWET: u16 = 5;
+pub const F2_PARAMS: u16 = 6;
 /// The Synced menu's lengths in quarter notes.
 /// How often OPERATOR's Noise LFO draws a new white value (fitted from three rates: the spread went as the square root of the rate, 0.126 of full scale at 5.8 Hz).
 const NOISE_HZ: f64 = 400.0;
@@ -202,6 +211,9 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
             F2_MORPH => ("FILTER MORPH (TYPE 4)", 0, 100, 0, "%"),
             F2_CIRCUIT => ("FILTER CIRCUIT (0 CLEAN 1-4 SATURATING)", 0, 4, 0, ""),
             F2_DRIVE => ("FILTER DRIVE (0.1 DB)", 0, 240, 0, ""),
+            F2_SHAPER => ("SHAPER (0 OFF 1 SOFT 2 HARD 3 SINE 4 4 BIT)", 0, 4, 0, ""),
+            F2_SHP_DRIVE => ("SHAPER DRIVE (0.1 DB)", 0, 120, 0, ""),
+            F2_DRYWET => ("SHAPER DRY/WET", 0, 100, 100, "%"),
             _ => return None,
         };
         return Some((name.to_string(), lo, hi, def, unit));
@@ -574,6 +586,9 @@ impl Engine for Fm4 {
         let f_kind = self.p[(FILT_BASE + F_TYPE) as usize];
         let f_morph = f64::from(self.p[(F2_BASE + F2_MORPH) as usize]) / 100.0;
         let f_sat = self.p[(F2_BASE + F2_CIRCUIT) as usize] > 0;
+        let shaper = self.p[(F2_BASE + F2_SHAPER) as usize];
+        let shp_gain = 10f64.powf(f64::from(self.p[(F2_BASE + F2_SHP_DRIVE) as usize]) / 200.0);
+        let shp_wet = f64::from(self.p[(F2_BASE + F2_DRYWET) as usize]) / 100.0;
         let f_drive = 0.96 * 10f64.powf(f64::from(self.p[(F2_BASE + F2_DRIVE) as usize]) / 200.0);
         if f_on {
             let kind = self.p[(FILT_BASE + F_TYPE) as usize];
@@ -742,6 +757,19 @@ impl Engine for Fm4 {
                         z[1] = c[2] * heard - c[4] * y;
                         heard = y;
                     }
+                }
+                if shaper > 0 {
+                    let u = heard * shp_gain;
+                    let wet = match shaper {
+                        1 => {
+                            let u = u * 0.96;
+                            u / (1.0 + u.abs())
+                        }
+                        2 => u.clamp(-1.0, 1.0),
+                        3 => (std::f64::consts::FRAC_PI_2 * u).sin(),
+                        _ => (u.clamp(-1.0, 1.0) * 8.0).round() / 8.0,
+                    };
+                    heard += shp_wet * (wet - heard);
                 }
                 acc += heard * if l_dest_b == 20 { gain_b } else { 1.0 };
             }
@@ -2011,5 +2039,85 @@ mod tests {
             assert!((d + 6.0).abs() < 1.0, "harmonic {}: {d} dB against the clean filter", k + 1);
         }
         assert!((circ[0] - clean[0] + 3.9).abs() < 0.8, "harmonic 1: {}", circ[0] - clean[0]);
+    }
+
+    /// OPERATOR 0.7's Shaper (2026-11-20; a sine through the open filter at Shp Drive 0.5, 4, 8 and 12 dB, and a Saw D through the 846 Hz filter at +6 dB): Hard clips at plus and minus
+    /// 1 (fund 1.042, 3rd -36.8 dB at +0.5 dB; 1.183, -15.6 at +4; 1.259, -10.4 at +12), Sine folds (1.134, -18.3 at 0 dB; -21 dB fundamental at +8), Soft is the circuit's curve, 4 Bit
+    /// quantises to 17 levels; the saw's harmonics above the cutoff are filled in, so the stage follows the filter.
+    #[test]
+    fn fitted_to_operator_the_shaper() {
+        let sine = |shaper: i32, drive10: i32, wet: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(F2_BASE + F2_SHAPER, shaper);
+            e.set(F2_BASE + F2_SHP_DRIVE, drive10);
+            e.set(F2_BASE + F2_DRYWET, wet);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[13_230..].iter().map(|&v| f64::from(v) / 32768.0 / 0.0484).collect();
+            let amp = |k: f64| {
+                let w = std::f64::consts::TAU * k * 220.0 / 44_100.0;
+                let (mut c, mut s) = (0.0, 0.0);
+                for (i, v) in x.iter().enumerate() {
+                    let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / x.len() as f64).cos();
+                    c += v * win * (w * i as f64).cos();
+                    s += v * win * (w * i as f64).sin();
+                }
+                c.hypot(s) / (x.len() as f64 / 4.0)
+            };
+            let f = amp(1.0);
+            (20.0 * f.log10(), 20.0 * (amp(3.0) / f).max(1e-9).log10())
+        };
+        // Hard: the clip level is 1.0 (nothing at Drive 0, the fitted clip of a = 1.06, 1.58, 2.5, 4)
+        let (f, h3) = sine(2, 0, 100);
+        assert!(f.abs() < 0.15 && h3 < -60.0, "Hard at 0 dB leaves a full sine alone: {f} {h3}");
+        for (drive, f_db, h3_db) in [(5, 0.36, -36.8), (40, 1.46, -15.6), (120, 2.0, -10.4)] {
+            let (f, h3) = sine(2, drive, 100);
+            assert!((f - f_db).abs() < 0.4 && (h3 - h3_db).abs() < 1.5, "Hard {drive}: {f} {h3}");
+        }
+        // Sine: a full sine folds to 1.134 with the 3rd at -18.3 dB, and at +8 dB the fundamental all but vanishes
+        let (f, h3) = sine(3, 0, 100);
+        assert!((f - 1.1).abs() < 0.3 && (h3 + 18.3).abs() < 1.0, "Sine: {f} {h3}");
+        let (f, _) = sine(3, 80, 100);
+        assert!(f < -12.0, "Sine at +8 dB: {f}");
+        // Soft is the circuit's curve: -5.3 dB with the 3rd at -19.5
+        let (f, h3) = sine(1, 0, 100);
+        assert!((f + 5.3).abs() < 0.4 && (h3 + 19.5).abs() < 1.0, "Soft: {f} {h3}");
+        // 4 Bit at Drive 0 is nearly clean (the 3rd at -47 dB)
+        let (f, h3) = sine(4, 0, 100);
+        assert!(f.abs() < 0.3 && h3 < -35.0, "4 Bit: {f} {h3}");
+        // Dry/Wet: 0 is the dry sine, 50 between
+        let (f0, h0) = sine(2, 120, 0);
+        assert!(f0.abs() < 0.15 && h0 < -60.0, "Dry: {f0} {h0}");
+        let (_, h50) = sine(2, 120, 50);
+        assert!(h50 < -10.4 - 3.0 && h50 > -40.0, "half wet: {h50}");
+        // the stage follows the filter: a clipped Saw D keeps harmonics far above the cutoff, a clean one does not
+        let saw = |shaper: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(ext_param(0, E_WAVE), 10);
+            e.set(FILT_BASE + F_ON, 1);
+            e.set(FILT_BASE + F_FREQ, 846);
+            e.set(F2_BASE + F2_SHAPER, shaper);
+            e.set(F2_BASE + F2_SHP_DRIVE, 60);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let x: Vec<f64> = x[13_230..].iter().map(|&v| f64::from(v) / 32768.0).collect();
+            let w = std::f64::consts::TAU * 12.0 * 220.0 / 44_100.0;
+            let (mut c, mut s) = (0.0, 0.0);
+            for (i, v) in x.iter().enumerate() {
+                let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / x.len() as f64).cos();
+                c += v * win * (w * i as f64).cos();
+                s += v * win * (w * i as f64).sin();
+            }
+            20.0 * (c.hypot(s) / (x.len() as f64 / 4.0) * 12.0 / 0.0484).max(1e-9).log10()
+        };
+        assert!(saw(2) > saw(0) + 20.0, "Hard fills in the 12th harmonic: {} against {}", saw(2), saw(0));
     }
 }
