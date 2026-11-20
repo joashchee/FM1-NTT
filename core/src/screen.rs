@@ -68,7 +68,7 @@ pub fn diff(a: &[u32], b: &[u32]) -> Option<(Rect, usize)> {
             n += 1;
         }
     }
-    (n > 0).then_some((Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, n))
+    (n > 0).then(|| (Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, n))
 }
 
 /// A block of connected ink (4-neighbour) of one colour: its box, pixel count and colour.

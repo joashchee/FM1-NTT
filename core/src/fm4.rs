@@ -68,7 +68,21 @@ pub const F_SLOPE: u16 = 4;
 /// Key tracking in percent (OPERATOR's Freq<Key; its default is +100).
 pub const F_KEY: u16 = 5;
 pub const FILT_PARAMS: u16 = 6;
-pub const P_COUNT: usize = FILT_BASE as usize + FILT_PARAMS as usize;
+/// The LFO (OPERATOR's LFO page, measured 2026-11-20): pitch only so far. Off by default so older patches are unchanged.
+pub const LFO_BASE: u16 = FILT_BASE + FILT_PARAMS;
+pub const L_ON: u16 = 0;
+/// 0 sine, 1 square, 2 triangle, 3 saw up, 4 saw down, 5 sample and hold (a new value each cycle), 6 noise (a new value 16 times a cycle). Types 5 and 6 are not fitted.
+pub const L_TYPE: u16 = 1;
+/// Hertz times 100 (OPERATOR's default is 6.32 Hz).
+pub const L_RATE: u16 = 2;
+/// Percent: the pitch swings by plus and minus an octave times this (measured: 10 % gave 120 cents, 69 % gave 827, 12 cents a percent).
+pub const L_AMOUNT: u16 = 3;
+/// 1 each note restarts its own LFO at phase 0, 0 one LFO runs free for every voice.
+pub const L_RETRIG: u16 = 4;
+/// Bit k set: operator k's pitch follows the LFO (OPERATOR's Osc A to D buttons; all four by default).
+pub const L_DEST: u16 = 5;
+pub const LFO_PARAMS: u16 = 6;
+pub const P_COUNT: usize = LFO_BASE as usize + LFO_PARAMS as usize;
 const MULTI: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 10.0];
 
 /// Parameter id of operator `op` (0 to 3), field `E_*` of the second block.
@@ -141,6 +155,18 @@ fn desc(id: usize) -> Option<(String, i32, i32, i32, &'static str)> {
     if id < GLOBAL.len() {
         let d = GLOBAL[id];
         return Some((d.0.to_string(), d.1, d.2, d.3, d.4));
+    }
+    if id >= LFO_BASE as usize {
+        let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - LFO_BASE as usize) as u16 {
+            L_ON => ("LFO (0 OFF 1 ON)", 0, 1, 0, ""),
+            L_TYPE => ("LFO TYPE (0 SINE 1 SQR 2 TRI 3 SAW UP 4 SAW DN 5 S&H 6 NOISE)", 0, 6, 0, ""),
+            L_RATE => ("LFO RATE (0.01 HZ)", 1, 10_000, 632, ""),
+            L_AMOUNT => ("LFO AMOUNT (PITCH)", 0, 100, 10, "%"),
+            L_RETRIG => ("LFO RETRIG (0 FREE 1 PER NOTE)", 0, 1, 1, ""),
+            L_DEST => ("LFO OPERATORS (BIT MASK)", 0, 15, 15, ""),
+            _ => return None,
+        };
+        return Some((name.to_string(), lo, hi, def, unit));
     }
     if id >= FILT_BASE as usize {
         let (name, lo, hi, def, unit): (&str, i32, i32, i32, &'static str) = match (id - FILT_BASE as usize) as u16 {
@@ -239,6 +265,9 @@ struct Voice {
     f0: f64,
     /// where the pitch is going (`f0` slides to it when glide is on)
     tf0: f64,
+    /// this note's LFO phase (0 to 1) and its held random value
+    lph: f64,
+    lval: f64,
     vel: f64,
     ops: [Op; OPS],
     fb: [[f64; 2]; OPS],
@@ -247,7 +276,7 @@ struct Voice {
 }
 
 const IDLE_OP: Op = Op { stage: Stage::Idle, ph: 0.0, env: 0.0, out: 0.0 };
-const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
+const IDLE: Voice = Voice { active: false, note: 0, held: false, age: 0, f0: 0.0, tf0: 0.0, lph: 0.0, lval: 0.0, vel: 0.0, ops: [IDLE_OP; OPS], fb: [[0.0; 2]; OPS], fz: [[0.0; 2]; 2] };
 
 pub struct Fm4 {
     rate: f64,
@@ -260,6 +289,9 @@ pub struct Fm4 {
     /// portamento time in ms (0 off), and the pitch of the last note started
     glide_ms: i32,
     last_f0: f64,
+    /// the free-running LFO's phase and the noise generator
+    lfo_ph: f64,
+    rng: u32,
     waves: Vec<Vec<f32>>,
 }
 
@@ -301,7 +333,7 @@ impl Fm4 {
                 *v = d.3;
             }
         }
-        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, glide_ms: 0, last_f0: 0.0, waves: (0..WAVES.len()).map(make_wave).collect() }
+        Fm4 { rate, p, voices: [IDLE; VOICES], clock: 0, bend: 1.0, bend_raw: 8192, bend_semis: 2.0, glide_ms: 0, last_f0: 0.0, lfo_ph: 0.0, rng: 0x1234_5678, waves: (0..WAVES.len()).map(make_wave).collect() }
     }
 
     fn op(&self, op: usize, field: u16) -> i32 {
@@ -356,6 +388,9 @@ impl Engine for Fm4 {
         let f0 = 440.0 * 2f64.powf((note as f64 - 69.0) / 12.0);
         v.f0 = if self.glide_ms > 0 && self.last_f0 > 0.0 { self.last_f0 } else { f0 };
         v.tf0 = f0;
+        v.lph = 0.0;
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        v.lval = f64::from(self.rng >> 8) / f64::from(1u32 << 23) - 1.0;
         self.last_f0 = f0;
         v.vel = velocity.min(127) as f64 / 127.0;
         for (k, o) in v.ops.iter_mut().enumerate() {
@@ -465,6 +500,13 @@ impl Engine for Fm4 {
         }
         // the pitch slides in the log domain, 99% of the way in the glide time, stepped every eighth sample
         let slide = if self.glide_ms > 0 { (-4.6 * 8.0 / (f64::from(self.glide_ms) * 0.001 * rate)).exp() } else { 0.0 };
+        // the LFO (pitch): its phase step a sample, its depth in octaves at a value of 1
+        let lfo_on = self.p[(LFO_BASE + L_ON) as usize] == 1;
+        let (l_type, l_retrig, l_dest) = (self.p[(LFO_BASE + L_TYPE) as usize], self.p[(LFO_BASE + L_RETRIG) as usize] == 1, self.p[(LFO_BASE + L_DEST) as usize]);
+        let l_dph = f64::from(self.p[(LFO_BASE + L_RATE) as usize]) / 100.0 / rate;
+        let l_depth = f64::from(self.p[(LFO_BASE + L_AMOUNT) as usize]) / 100.0;
+        let (mut free_ph, mut rng) = (self.lfo_ph, self.rng);
+        let steps = if l_type == 6 { 16.0 } else { 1.0 };
         let index = self.p[P_INDEX as usize] as f64 / 100.0; // the phase swing (radians) of a modulator at full level
         for (n, o) in out.iter_mut().enumerate() {
             let refresh = n & 7 == 0;
@@ -474,6 +516,41 @@ impl Engine for Fm4 {
                     v.f0 = if slide == 0.0 { v.tf0 } else { v.tf0 * (v.f0 / v.tf0).powf(slide) };
                     if (v.f0 / v.tf0 - 1.0).abs() < 1e-5 {
                         v.f0 = v.tf0;
+                    }
+                }
+                let mut lmul = 1.0;
+                if lfo_on {
+                    let prev = if l_retrig { v.lph } else { free_ph };
+                    let ph = if l_retrig { v.lph } else { free_ph };
+                    let shape = match l_type {
+                        0 => (std::f64::consts::TAU * ph).sin(),
+                        1 => {
+                            if ph < 0.5 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        }
+                        2 => {
+                            if ph < 0.5 {
+                                1.0 - 4.0 * ph
+                            } else {
+                                4.0 * ph - 3.0
+                            }
+                        }
+                        3 => 2.0 * ph - 1.0,
+                        4 => 1.0 - 2.0 * ph,
+                        _ => v.lval,
+                    };
+                    lmul = 2f64.powf(l_depth * shape);
+                    let next = ph + l_dph;
+                    let nph = next - next.floor();
+                    if l_type >= 5 && ((nph * steps).floor() != (prev * steps).floor() || nph < prev) {
+                        rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        v.lval = f64::from(rng >> 8) / f64::from(1u32 << 23) - 1.0;
+                    }
+                    if l_retrig {
+                        v.lph = nph;
                     }
                 }
                 let mut heard = 0.0;
@@ -499,7 +576,7 @@ impl Engine for Fm4 {
                     }
                     let s = &mut v.ops[op];
                     pm += fb[op] * 0.5 * (v.fb[op][0] + v.fb[op][1]);
-                    let inc = if fixed[op] > 0.0 { fixed[op] / rate } else { v.f0 * bend * ratio[op] / rate };
+                    let inc = if fixed[op] > 0.0 { fixed[op] / rate } else { v.f0 * bend * ratio[op] * if l_dest >> op & 1 == 1 { lmul } else { 1.0 } / rate };
                     s.ph += inc;
                     s.ph -= s.ph.floor();
                     // velocity: linear, from (1 - sensitivity) at velocity 0 to 1 at 127 (OPERATOR 0.7 at its default of 50%: half at 0, measured); key scaling: higher notes quieter
@@ -538,7 +615,13 @@ impl Engine for Fm4 {
                 acc += heard;
             }
             *o = (acc * poly * master * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+            if lfo_on && !l_retrig {
+                free_ph += l_dph;
+                free_ph -= free_ph.floor();
+            }
         }
+        self.lfo_ph = free_ph;
+        self.rng = rng;
     }
 
     fn sounding(&self) -> usize {
@@ -730,7 +813,7 @@ mod tests {
         assert!(!e.set(P_COUNT as u16, 1) && e.get(7).is_none() && e.get(P_COUNT as u16).is_none());
         let fresh = Fm4::new(44_100.0);
         let ps = fresh.params();
-        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize);
+        assert_eq!(ps.len(), 7 + OPS * OP_PARAMS as usize + OPS * EXT_PARAMS as usize + FILT_PARAMS as usize + LFO_PARAMS as usize);
         assert!(ps.iter().all(|p| p.min <= p.default && p.default <= p.max && fresh.get(p.id) == Some(p.default)));
         assert_eq!(ps.iter().find(|p| p.id == op_param(2, O_LEVEL)).map(|p| p.name.as_str()), Some("OP3 LEVEL"));
     }
@@ -1157,5 +1240,67 @@ mod tests {
         let mut out = vec![0i16; 2048];
         e.render(&mut out);
         assert!(out.iter().any(|&v| v != 0));
+    }
+
+    /// OPERATOR 0.7's LFO (2026-11-20, `fm4fit` and its LFO page): default Sine, 6.32 Hz, Amount 10 %, on pitch; 10 % swung the pitch +-120 cents and 69 % +-827
+    /// (12 cents a percent, an octave at 100 %); a square starts high and switches at half a cycle, a saw up starts low, a saw down starts high.
+    #[test]
+    fn fitted_to_operator_the_lfo() {
+        // cents of each cycle's frequency, from the zero crossings of a clean sine on OP1
+        let cents = |amount: i32, ty: i32, hz100: i32| {
+            let mut e = Fm4::new(44_100.0);
+            e.set(P_LEVEL, 16);
+            e.set(op_param(0, O_ATTACK), 1);
+            e.set(op_param(0, O_SUSTAIN), 99);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_AMOUNT, amount);
+            e.set(LFO_BASE + L_TYPE, ty);
+            e.set(LFO_BASE + L_RATE, hz100);
+            e.note_on(57, 127);
+            let mut x = vec![0i16; 44_100];
+            e.render(&mut x);
+            let mut ups = vec![];
+            for i in 1..x.len() {
+                if x[i - 1] < 0 && x[i] >= 0 {
+                    ups.push(i as f64 - 1.0 + f64::from(-x[i - 1]) / f64::from(x[i] - x[i - 1]));
+                }
+            }
+            ups.windows(2).map(|w| (1200.0 * (44_100.0 / (w[1] - w[0]) / 220.0).log2(), (w[0] + w[1]) / 2.0 / 44_100.0)).collect::<Vec<_>>()
+        };
+        let swing = |c: &[(f64, f64)]| (c.iter().map(|v| v.0).fold(f64::MIN, f64::max), c.iter().map(|v| v.0).fold(f64::MAX, f64::min));
+        let c = cents(10, 0, 632);
+        let (hi, lo) = swing(&c);
+        assert!((hi - 120.0).abs() < 10.0 && (lo + 120.0).abs() < 10.0, "10 percent: {hi} {lo}");
+        let c = cents(69, 0, 632);
+        let (hi, lo) = swing(&c);
+        assert!((hi - 828.0).abs() < 60.0 && (lo + 828.0).abs() < 60.0, "69 percent: {hi} {lo}");
+        // the rate: ten cycles take a second and a half at 6.32 Hz
+        let c = cents(10, 0, 632);
+        let mean = c.iter().map(|v| v.0).sum::<f64>() / c.len() as f64;
+        let ups: Vec<f64> = (1..c.len()).filter(|&k| c[k - 1].0 - mean < 0.0 && c[k].0 - mean >= 0.0).map(|k| c[k].1).collect();
+        let hz = (ups.len() - 1) as f64 / (ups[ups.len() - 1] - ups[0]);
+        assert!((hz - 6.32).abs() < 0.3, "rate {hz}");
+        // the shapes' first half cycle: square high, saw up low (rising), saw down high
+        let first = |ty: i32| cents(10, ty, 632).iter().filter(|v| v.1 < 0.05).map(|v| v.0).sum::<f64>();
+        assert!(first(1) > 100.0 && first(3) < -50.0 && first(4) > 50.0, "{} {} {}", first(1), first(3), first(4));
+        // off by default: the pitch stays put
+        let mut e = Fm4::new(44_100.0);
+        e.note_on(57, 127);
+        let mut x = vec![0i16; 8_000];
+        e.render(&mut x);
+        assert!(x.iter().any(|&v| v != 0));
+        // random types stay bounded and the free-running one renders
+        for (ty, retrig) in [(5, 1), (6, 1), (6, 0), (0, 0)] {
+            let mut e = Fm4::new(44_100.0);
+            e.set(LFO_BASE + L_ON, 1);
+            e.set(LFO_BASE + L_TYPE, ty);
+            e.set(LFO_BASE + L_RETRIG, retrig);
+            e.set(LFO_BASE + L_AMOUNT, 100);
+            e.note_on(60, 100);
+            e.note_on(64, 100);
+            let mut x = vec![0i16; 20_000];
+            e.render(&mut x);
+            assert!(x.iter().any(|&v| v != 0));
+        }
     }
 }
