@@ -12,7 +12,7 @@ use crate::{
     engine::{Engine, Fm6Engine, KitEngine, ParamDesc, SamplerEngine},
     factory,
     fx::{self, Effect, Limiter},
-    globals::{Globals, Route, G_BEND, G_FX_CHANNEL, G_GLIDE, G_MONO, G_STOCK_CC},
+    globals::{Globals, Route, G_BEND, G_FX_CHANNEL, G_GLIDE, G_LEGATO, G_MONO, G_STOCK_CC},
     package::{Package, Target},
     sampler::{parse_wav, Kit},
     Error, Result,
@@ -355,15 +355,21 @@ impl Instrument {
     pub fn note_on(&mut self, note: u8, velocity: u8) {
         let velocity = self.globals.velocity(velocity);
         if self.globals.get(G_MONO) == Some(1) && !self.arp.on() && !self.seq.on() {
-            if let Some(&(top, _)) = self.mono_stack.last() {
-                self.engine.note_off(top);
+            let top = self.mono_stack.last().map(|&(n, _)| n);
+            let legato = self.globals.get(G_LEGATO) == Some(1) && top.is_some_and(|t| t != note && self.engine.legato(t, note));
+            if !legato {
+                if let Some(top) = top {
+                    self.engine.note_off(top);
+                }
             }
             self.mono_stack.retain(|&(n, _)| n != note);
             if self.mono_stack.len() >= 16 {
                 self.mono_stack.remove(0);
             }
             self.mono_stack.push((note, velocity));
-            self.engine.note_on(note, velocity);
+            if !legato {
+                self.engine.note_on(note, velocity);
+            }
         } else if self.arp.on() {
             self.arp.note_on(note, velocity);
         } else if self.seq.on() {
@@ -382,9 +388,13 @@ impl Instrument {
             let was_top = self.mono_stack.last().map(|&(n, _)| n) == Some(note);
             self.mono_stack.retain(|&(n, _)| n != note);
             if was_top {
-                self.engine.note_off(note);
-                if let Some(&(n, v)) = self.mono_stack.last() {
-                    self.engine.note_on(n, v);
+                match self.mono_stack.last() {
+                    Some(&(n, _)) if self.globals.get(G_LEGATO) == Some(1) && self.engine.legato(note, n) => {}
+                    Some(&(n, v)) => {
+                        self.engine.note_off(note);
+                        self.engine.note_on(n, v);
+                    }
+                    None => self.engine.note_off(note),
                 }
             }
         } else {
@@ -1138,7 +1148,7 @@ mod tests {
 #[cfg(test)]
 mod tests_globals {
     use super::*;
-    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_GLIDE, G_STOCK_CC, G_VELOCITY};
+    use crate::globals::{G_CHANNEL, G_FX_CHANNEL, G_GLIDE, G_LEGATO, G_STOCK_CC, G_VELOCITY};
 
     fn none(_: &str) -> Option<Vec<u8>> {
         None
@@ -1427,5 +1437,39 @@ mod tests_globals {
         i.set_global(G_STOCK_CC, 1);
         let back = Instrument::from_package(&i.to_package("", ""), 44_100.0, &none).unwrap();
         assert_eq!(back.get_global(G_STOCK_CC), Some(1));
+    }
+
+    #[test]
+    fn legato_keeps_the_voice_and_its_envelope() {
+        let mut m = analog();
+        m.set_global(crate::globals::G_MONO, 1);
+        m.set_global(G_LEGATO, 1);
+        m.midi_bytes(&[0x90, 60, 100]);
+        run(&mut m, 44_100); // the first note settles into its sustain
+        m.midi_bytes(&[0x90, 67, 100]);
+        let moved = run(&mut m, 8192);
+        assert_eq!(m.sounding(), 1, "one voice, not a new strike");
+        let hz = freq(&moved[4096..], 44_100.0);
+        assert!((hz - 392.0).abs() < 14.0, "the G4 sounds, got {hz} Hz");
+        // letting go of the top note returns to the held one, still one voice
+        m.midi_bytes(&[0x80, 67, 0]);
+        let back = run(&mut m, 8192);
+        assert_eq!(m.sounding(), 1);
+        assert!((freq(&back[4096..], 44_100.0) - 261.6).abs() < 12.0);
+        m.midi_bytes(&[0x80, 60, 0]);
+        run(&mut m, 44_100);
+        assert_eq!(m.sounding(), 0);
+        // without legato the same moves restrike: the attack shows again
+        let peak_first = |legato: i32| {
+            let mut m = analog();
+            m.set_global(crate::globals::G_MONO, 1);
+            m.set_global(G_LEGATO, legato);
+            m.midi_bytes(&[0x90, 60, 100]);
+            run(&mut m, 44_100);
+            m.midi_bytes(&[0x90, 67, 100]);
+            let r = run(&mut m, 64);
+            r.iter().map(|&v| i32::from(v).abs()).max().unwrap_or(0)
+        };
+        assert_ne!(peak_first(0), peak_first(1), "the two paths differ");
     }
 }

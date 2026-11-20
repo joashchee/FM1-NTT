@@ -191,6 +191,15 @@ impl Engine for Analog {
         self.glide_ms = ms.clamp(0, 5000);
     }
 
+    fn legato(&mut self, from: u8, to: u8) -> bool {
+        let to = to.min(127);
+        let Some(v) = self.voices.iter_mut().find(|v| v.held && v.note == from && v.stage != Stage::Idle) else { return false };
+        v.note = to;
+        v.tf0 = 440.0 * 2f64.powf((f64::from(to) - 69.0) / 12.0);
+        self.last_f0 = v.tf0;
+        true
+    }
+
     fn bend_range(&mut self, semitones: i32) {
         self.bend_semis = f64::from(semitones.clamp(0, 24));
         self.bend = 2f64.powf(f64::from(self.bend_raw - 8192) / 8192.0 * self.bend_semis / 12.0);

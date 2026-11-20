@@ -41,6 +41,11 @@ pub trait Engine {
     fn bend_range(&mut self, _semitones: i32) {}
     /// Portamento: a new note starts at the pitch of the last one and slides to its own in about this many milliseconds (0 off). Engines that cannot slide ignore it.
     fn glide(&mut self, _ms: i32) {}
+    /// Legato: the sounding held note `from` becomes `to` without a new strike (its envelope goes on, its pitch slides when glide is on). False when the engine cannot
+    /// or no such note sounds, and the caller strikes the note afresh.
+    fn legato(&mut self, _from: u8, _to: u8) -> bool {
+        false
+    }
     /// Replaces `out` with mono samples.
     fn render(&mut self, out: &mut [i16]);
     fn sounding(&self) -> usize;

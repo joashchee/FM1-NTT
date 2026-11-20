@@ -19,7 +19,10 @@ pub const G_MONO: u16 = 4;
 pub const G_STOCK_CC: u16 = 5;
 /// Portamento in milliseconds, 0 off: a new note slides from the last one's pitch. Only engines that can slide do (`analog`); the others ignore it.
 pub const G_GLIDE: u16 = 6;
-pub const G_COUNT: usize = 7;
+/// 0 off, 1 on: in mono mode a note struck while another is held (or the return to the one before) moves the sounding voice to the new pitch and keeps its envelope,
+/// instead of striking afresh; with GLIDE the pitch slides. Only engines that can (`analog`, `fm4`); the others strike afresh.
+pub const G_LEGATO: u16 = 7;
+pub const G_COUNT: usize = 8;
 
 /// name, min, max, default, unit
 const DESC: [(&str, i32, i32, i32, &str); G_COUNT] = [
@@ -30,6 +33,7 @@ const DESC: [(&str, i32, i32, i32, &str); G_COUNT] = [
     ("MONO", 0, 1, 0, ""),
     ("STOCK EFFECT CCS", 0, 1, 0, ""),
     ("GLIDE (0 OFF)", 0, 2000, 0, "ms"),
+    ("LEGATO (MONO)", 0, 1, 0, ""),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
