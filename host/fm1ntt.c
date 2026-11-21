@@ -2161,17 +2161,31 @@ static void dispatch(App *a, const SDL_Event *e) {
 }
 
 /* ---- the splash: shown at once, before anything heavy ------------------------------------------------------------------ */
-static void draw_splash(uint32_t *c, const char *what, int percent) {
+/* `elapsed_ms` >= 0 adds the elapsed time under the bar and `err` (when set) shows a load error in red: the real start-up shows both (rule 8), while Rec demo's
+ * first frame passes neither, so it stays the same bytes every run. */
+static void draw_splash_x(uint32_t *c, const char *what, int percent, int elapsed_ms, const char *err) {
     for (int i = 0; i < PX_W * PX_H; i++) c[i] = C_BG;
-    char line[96];
+    char line[160];
     int cx = PX_W / 2;
     px_text(c, cx - px_text_w("FM1-NTT", 4) / 2, 150, "FM1-NTT", C_HEAD, 4, 0);
     px_text(c, cx - px_text_w("FM-1 FIRMWARE SANDBOX", 1) / 2, 196, "FM-1 FIRMWARE SANDBOX", C_TEXT, 1, 0);
     px_text(c, cx - px_text_w(what, 1) / 2, 250, what, C_TEXT, 1, 0);
     px_meter(c, (PxRect){cx - 150, 266, 300, 10}, percent, C_HEAD);
+    if (elapsed_ms >= 0) {
+        snprintf(line, sizeof line, "%d%%  %d.%d S", percent, elapsed_ms / 1000, (elapsed_ms % 1000) / 100);
+        px_text(c, cx - px_text_w(line, 1) / 2, 282, line, C_DIM, 1, 0);
+    }
     snprintf(line, sizeof line, "V%s %s", fm1ntt_version(), FM1NTT_BUILD);
     px_text(c, cx - px_text_w(line, 1) / 2, 296, line, C_DIM, 1, 0);
+    if (err && *err) {
+        char e[96];
+        snprintf(e, sizeof e, "%.90s", err);
+        for (char *q = e; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
+        px_text(c, cx - px_text_w("COULD NOT LOAD THE FIRMWARE", 1) / 2, 322, "COULD NOT LOAD THE FIRMWARE", C_ERR, 1, 0);
+        px_text(c, cx - px_text_w(e, 1) / 2, 336, e, C_ERR, 1, 0);
+    }
 }
+static void draw_splash(uint32_t *c, const char *what, int percent) { draw_splash_x(c, what, percent, -1, NULL); }
 
 static void present(SDL_Renderer *r, SDL_Texture *t, const uint32_t *c) {
     SDL_UpdateTexture(t, NULL, c, PX_W * 4);
@@ -4624,10 +4638,12 @@ int main(int argc, char **argv) {
     a.mevq = fm1ntt_evq_new(1024);
     a.mq_live = a.dev != 0;
 
-    draw_splash(canvas, "STARTING", 20);                 /* at once, before anything heavy */
-    present(ren, tex, canvas);
+    uint32_t t_start = SDL_GetTicks();
+#define SPLASH(what, pct) do { draw_splash_x(canvas, what, pct, (int)(SDL_GetTicks() - t_start), NULL); present(ren, tex, canvas); } while (0)
+    SPLASH("STARTING", 10);                              /* at once, before anything heavy */
     keymap_load();                                       /* the buttons the person changed in the Keymap (keymap.txt) */
     theme_load();                                        /* the colour theme the person chose last time (theme.txt in the app's folder; a tiny read) */
+    SPLASH("OPENING THE SOUND DEVICE", 25);
 
     if (a.pin) { int e, u; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(u); }       /* the window's thread: the first core (the audio thread takes the last) */
     SDL_AudioSpec want = {.freq = FM1_SAMPLE_RATE, .format = AUDIO_S16SYS, .channels = 2, .samples = AUDIO_FRAMES, .callback = audio_cb, .userdata = &a}, got;
@@ -4635,22 +4651,29 @@ int main(int argc, char **argv) {
     if (!a.dev) say(&a, 2, "No sound device: %s", SDL_GetError());
     else if (!(getenv("FM1NTT_NO_EMU_THREAD") && *getenv("FM1NTT_NO_EMU_THREAD"))) emu_start(&a);       /* the machine renders on its own thread; FM1NTT_NO_EMU_THREAD=1 puts it back in the callback */
     a.mq_live = a.dev != 0;
-    draw_splash(canvas, "READING THE FIRMWARE FOLDER", 40);
-    present(ren, tex, canvas);
+    SPLASH("READING THE FIRMWARE FOLDER", 40);
     scan_files(&a);
     pv_set(&a, NULL, 0);                        /* the built-in voices until a firmware brings its own */
     if (path) {
-        draw_splash(canvas, "LOADING THE FIRMWARE", 60);
-        present(ren, tex, canvas);
-        if (load_firmware(&a, path, raw, entry) != 0) a.panel = PANEL_FILES;
+        SPLASH("LOADING THE FIRMWARE", 60);
+        if (load_firmware(&a, path, raw, entry) != 0) {
+            a.panel = PANEL_FILES;
+            /* the error stays on the splash until a press or 4 s, never a blank or frozen window (rule 8) */
+            draw_splash_x(canvas, "LOADING THE FIRMWARE FAILED", 60, (int)(SDL_GetTicks() - t_start), a.msg);
+            present(ren, tex, canvas);
+            for (uint32_t t0 = SDL_GetTicks(); SDL_GetTicks() - t0 < 4000;) {
+                SDL_Event se;
+                if (SDL_WaitEventTimeout(&se, 50) && (se.type == SDL_KEYDOWN || se.type == SDL_JOYBUTTONDOWN || se.type == SDL_QUIT)) break;
+            }
+        } else SPLASH("STARTING THE ENGINE", 80);
     }
     if (inst_opt && inst_load(&a, inst_opt) == 0) { a.panel = PANEL_SOUND; a.pv_on = 1; a.pv_solo = !fm1ntt_loaded(a.m); }   /* an instrument: play it now, alone when no firmware is given */
     if (!getenv("FM1NTT_NO_MIDI_IN")) a.min_on = midi_in_start(&a.min, NULL) == 0;
     trace_open();
     toast_init(&a.toast, "/run/r3i6nos-hotplug/events", SDL_GetTicks());
     if (a.dev) SDL_PauseAudioDevice(a.dev, 0);
-    draw_splash(canvas, "READY", 100);                    /* the last splash frame, held for no time: the app is drawn on the next pass */
-    present(ren, tex, canvas);
+    SPLASH("READY", 100);                                 /* the last splash frame, held for no time: the app is drawn on the next pass */
+#undef SPLASH
     SDL_PumpEvents();
 
     uint32_t last_draw = 0, last_settle = 0;
