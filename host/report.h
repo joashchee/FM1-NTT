@@ -36,11 +36,14 @@ static void prog_reset(void) {
     g_prog_step = 0; g_prog_steps = 0; g_prog_doing[0] = 0; g_prog_since = g_prog_step_since = SDL_GetTicks();
     SDL_AtomicUnlock(&g_prog_lock);
 }
-static void report_progress(const char *doing, int step, int steps, const char *file) {
+static void prog_set(const char *doing, int step, int steps) {
     SDL_AtomicLock(&g_prog_lock);
     g_prog_step = step; g_prog_steps = steps; g_prog_step_since = SDL_GetTicks();
     snprintf(g_prog_doing, sizeof g_prog_doing, "%s", doing);
     SDL_AtomicUnlock(&g_prog_lock);
+}
+static void report_progress(const char *doing, int step, int steps, const char *file) {
+    prog_set(doing, step, steps);
     const char *p = getenv("R3I6NOS_REPORT_PROGRESS");
     if (!p || !*p) return;
     char body[512], tmp[400];
@@ -732,7 +735,10 @@ static int job_thread(void *p) {
     char how[64];
     int rc;
     if (a->pin) { int e, u; if (thr_choose(thr_ncpu(), &e, &u)) thr_pin_self(e); }    /* the job emulates: it would else inherit the main thread's core */
-    if (a->job_kind == JOB_REPORT) {
+    if (a->job_kind == JOB_LOAD) {
+        a->ld_rc = load_boot(a, a->ld_path, a->ld_raw, a->ld_entry, &a->ld_buf, &a->ld_n, a->job_result, sizeof a->job_result);
+        rc = a->ld_rc;
+    } else if (a->job_kind == JOB_REPORT) {
         snprintf(how, sizeof how, "TOOLS > Device report");
         char dflt[300];
         default_firmware(dflt, sizeof dflt);
@@ -748,6 +754,17 @@ static int job_thread(void *p) {
     SDL_AtomicSet(&a->job_done, 1);
     return rc;
 }
+static void job_finish(App *a) {                  /* a job ended (its thread is gone): say how it went, and for a load put the result in the app */
+    int kind = a->job_kind;
+    a->job_kind = JOB_NONE;
+    if (kind == JOB_LOAD) {
+        uint8_t *buf = a->ld_buf; a->ld_buf = NULL;
+        if (a->ld_rc == 0 && buf) load_finish(a, a->ld_path, a->ld_raw, buf, a->ld_n);
+        else { free(buf); say(a, 3, "%s", a->job_result); }
+        return;
+    }
+    say(a, a->job_style, "%s", a->job_result);
+}
 static void job_start(App *a, int kind) {
     if (a->job) { say(a, 2, "Wait for the running job to finish", NULL); return; }
     a->job_kind = kind;
@@ -755,18 +772,26 @@ static void job_start(App *a, int kind) {
     a->job_result[0] = 0;
     SDL_AtomicSet(&a->job_done, 0);
     prog_reset();
-    report_progress("starting", 0, kind == JOB_REPORT ? 11 : 15, NULL);
+    if (kind == JOB_LOAD) prog_set("starting", 0, 2); else report_progress("starting", 0, kind == JOB_REPORT ? 11 : 15, NULL);
     a->job = SDL_CreateThread(job_thread, "fm1ntt-job", a);
-    if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); a->job_kind = JOB_NONE; say(a, a->job_style, "%s", a->job_result); return; }
+    if (!a->job) { job_thread(a); SDL_AtomicSet(&a->job_done, 0); job_finish(a); return; }
+    if (kind == JOB_LOAD) return;
     say(a, 0, kind == JOB_REPORT ? "Device report running (about two minutes): the emulation is paused while it measures" : "Benchmark running (about two minutes)", NULL);
+}
+static void load_start(App *a, const char *path, int raw, uint32_t entry) {
+    if (a->job) { say(a, 2, "Wait for the running job to finish", NULL); return; }
+    if (a->load_sync) { load_firmware(a, path, raw, entry); return; }
+    persist_save(a, 1, SDL_GetTicks());                     /* the firmware being left keeps what it saved */
+    snprintf(a->ld_path, sizeof a->ld_path, "%s", path);
+    a->ld_raw = raw; a->ld_entry = entry; a->ld_buf = NULL; a->ld_n = 0; a->ld_rc = -1;
+    job_start(a, JOB_LOAD);
 }
 /* Called by the main loop each pass: reaps a finished job and says how it went. */
 static int job_poll(App *a) {                  /* 1 when a job just finished: the caller must redraw (the box goes away) */
     if (a->job && SDL_AtomicGet(&a->job_done)) {
         SDL_WaitThread(a->job, NULL);
         a->job = NULL;
-        a->job_kind = JOB_NONE;
-        say(a, a->job_style, "%s", a->job_result);
+        job_finish(a);
         return 1;
     }
     return 0;

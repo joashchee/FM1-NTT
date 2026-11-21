@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-21 (host): loading a firmware from FILES runs on a job thread with the progress box; Rec demo and the self-test keep the same-thread load.
 - 2026-11-21 (host): Device report gained a `== mapping ==` section (remapped panels, colour theme, pads seen).
 - Start-up splash: more steps with percent and elapsed time, and a firmware load error shown on it (held until a press or 4 s).
 - 2026-11-20 (docs): **`docs/HARDWARE.md` gained a section from the FM-1-RE notes** (`AL-255/FM-1-RE`, WTFPL, stock V13 firmware analysis; our own wording, no disassembly or function addresses): CPU clock, the 44118 Hz and 64-sample engine, the 1 MB flash layout, the boot chain, USB identity, DX7 SysEx and the vendor SysEx magic, the update path and its stated lack of a recovery path, and what is open (one or two cores). Nothing run or checked on a unit.

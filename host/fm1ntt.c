@@ -144,6 +144,8 @@ typedef struct {
     SDL_atomic_t job_done;
     int job_kind, job_style, want_demo;
     double job_seconds;
+    int load_sync;                      /* a stepped clock (Rec demo) loads on the calling thread: no progress box, the same frames every run */
+    char ld_path[300]; int ld_raw; uint32_t ld_entry; uint8_t *ld_buf; size_t ld_n; int ld_rc;   /* JOB_LOAD: what to load, and what the thread made */
     char job_result[200];
     int pin, pinned;                    /* --pin: the audio (emulating) thread on the last core, the main thread on the first; pinned: the audio thread has done it */
     /* the SOUND panel's preview: the fm6 engine plays the voices found in the loaded firmware's banks from the keys (docs/FM6.md); the machine's own keys are not touched */
@@ -188,7 +190,7 @@ typedef struct {
     volatile int emu_quit, emu_loaded, emu_primed;   /* emu_loaded: the machine has a firmware; emu_primed: the ring has filled once since the machine last ran (an empty ring before that is not a gap) */
 } App;
 
-enum { JOB_NONE, JOB_REPORT, JOB_BENCH };
+enum { JOB_NONE, JOB_REPORT, JOB_BENCH, JOB_LOAD };
 static void job_start(App *a, int kind);
 static void scale_next(App *a);
 static int job_pct(const App *a);
@@ -515,6 +517,7 @@ static void persist_path(App *a, char *out, size_t n) { char nm[96]; snprintf(nm
 /* Writes the flash of the loaded package when it changed since the last write (and, with `force`, at once rather than after it has been still for 2 s). */
 static void persist_save(App *a, int force, uint32_t now) {
     if (!a->remember || !a->fl_sha[0] || a->fw_raw || !fm1ntt_loaded(a->m)) return;
+    if (a->job && a->job_kind == JOB_LOAD) return;          /* the machine is being replaced: its flash is not the old firmware's */
     uint32_t rev = fm1ntt_flash_revision(a->m);
     if (rev != a->fl_rev) { a->fl_rev = rev; a->fl_dirty = 1; a->fl_t = now; }
     if (!a->fl_dirty || (!force && now - a->fl_t < 2000)) return;
@@ -557,16 +560,24 @@ static void persist_forget(App *a) {
     a->fl_dirty = 0;
 }
 
-static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
-    char why[128] = "";
+/* Loading is two phases so the slow one can run on a job thread (FILES): load_boot reads the file and boots the machine (disk and emulator, touches no UI state: its
+ * error goes in `why`), load_finish puts the result into the app (the voices, the name, the saved flash) and runs on the main thread. load_firmware is both, in a row,
+ * for the start-up splash, the command line and the self-test. */
+static void prog_set(const char *doing, int step, int steps);        /* report.h: the progress box's step */
+static int load_boot(App *a, const char *path, int raw, uint32_t entry, uint8_t **bufp, size_t *np, char *why, size_t wn) {
     size_t n = 0;
-    uint8_t *buf = read_file(path, &n, why, sizeof why);
-    if (!buf) { say(a, 3, "%s", why); return -1; }
-    persist_save(a, 1, SDL_GetTicks());                     /* the firmware being left keeps what it saved */
+    prog_set("reading the file", 0, 2);
+    uint8_t *buf = read_file(path, &n, why, wn);
+    if (!buf) return -1;
+    prog_set("booting the firmware", 1, 2);
     lock(a);
     int rc = raw ? fm1ntt_load_raw(a->m, buf, n, entry) : fm1ntt_load_package(a->m, buf, n);
     unlock(a);
-    if (rc != 0) { free(buf); say(a, 3, "%s", fm1ntt_error()); return -1; }
+    if (rc != 0) { snprintf(why, wn, "%s", fm1ntt_error()); free(buf); return -1; }
+    *bufp = buf; *np = n;
+    return 0;
+}
+static void load_finish(App *a, const char *path, int raw, uint8_t *buf, size_t n) {   /* frees buf */
     {   /* the voices in its banks, for the SOUND preview (a raw image has no package to look in) */
         static uint8_t found[PV_MAX * 128];
         pv_set(a, found, raw ? 0 : (int)fm1ntt_package_voices(buf, n, found, PV_MAX));
@@ -585,8 +596,17 @@ static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
     speed_reset(a);
     say(a, 1, "Booted %s", a->file);
     persist_restore(a);
+}
+static int load_firmware(App *a, const char *path, int raw, uint32_t entry) {
+    char why[128] = "";
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    persist_save(a, 1, SDL_GetTicks());                     /* the firmware being left keeps what it saved */
+    if (load_boot(a, path, raw, entry, &buf, &n, why, sizeof why) != 0) { say(a, 3, "%s", why); return -1; }
+    load_finish(a, path, raw, buf, n);
     return 0;
 }
+static void load_start(App *a, const char *path, int raw, uint32_t entry);   /* the same on a job thread, with the progress box (below, with the jobs) */
 
 /* ---- the firmware folder ------------------------------------------------------------------------------------------------ */
 static int has_ext(const char *name, const char *ext) {
@@ -1263,7 +1283,7 @@ static void act(App *a, int act) {
             if (a->file_sel < a->nfiles) {
                 const char *p = a->fpaths[a->file_sel];
                 if (has_ext(p, ".fm1i")) open_instrument(a, p);
-                else load_firmware(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA);
+                else load_start(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA);
             }
         }
         break;
@@ -1818,7 +1838,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
         p->cb_per_s = a->cb_rate;
         p->late_cb = SDL_AtomicGet(&a->late_cb);
         p->frame_ms = (int)a->frame_ms; p->frame_max_ms = (int)a->frame_max_ms;
-        if (a->job) { snprintf(p->job, sizeof p->job, "%s", a->job_kind == JOB_REPORT ? "REPORT" : "BENCHMARK"); p->job_pct = job_pct(a); } else p->job_pct = MON_NA;
+        if (a->job) { snprintf(p->job, sizeof p->job, "%s", a->job_kind == JOB_REPORT ? "REPORT" : a->job_kind == JOB_LOAD ? "LOAD" : "BENCHMARK"); p->job_pct = job_pct(a); } else p->job_pct = MON_NA;
         snprintf(p->fw, sizeof p->fw, "%s", a->file);
         p->njoy = a->njoy;
         { char rr[300], rw[64]; root_describe(rr, sizeof rr, rw, sizeof rw); snprintf(p->root, sizeof p->root, "%s", rr); snprintf(p->root_why, sizeof p->root_why, "%s", rw); }
@@ -2406,7 +2426,7 @@ static int files_press(App *a, int act) {
     if (a->info_on) {
         int i = a->info_i;
         if (i < 0 || i >= a->nfiles) { a->info_on = 0; return 1; }
-        if (act == A_OK) { a->info_on = 0; const char *p = a->fpaths[i]; load_firmware(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA); }
+        if (act == A_OK) { a->info_on = 0; const char *p = a->fpaths[i]; load_start(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA); }
         else if (act == A_X) player_start(a, i);
         else if (act == A_Y) {
             if (a->sw_pid && !strcmp(a->sw_name, a->files[i])) { show_cancel(a); say(a, 0, "Stopping the demo", NULL); }
@@ -2519,14 +2539,15 @@ static void draw_job_progress(uint32_t *c, const App *a) {
     int pct = job_pct(a);
     PxRect box = {PX_W / 2 - 220, PX_H / 2 - 56, 440, 112};
     px_rect(c, (PxRect){box.x - 2, box.y - 2, box.w + 4, box.h + 4}, C_BG);
-    px_box(c, box, a->job_kind == JOB_REPORT ? "DEVICE REPORT" : "BENCHMARK");
+    px_box(c, box, a->job_kind == JOB_REPORT ? "DEVICE REPORT" : a->job_kind == JOB_LOAD ? "LOADING THE FIRMWARE" : "BENCHMARK");
     char line[160];
     snprintf(line, sizeof line, "STEP %d OF %d: %s", step < steps ? step + 1 : steps, steps, doing[0] ? doing : "starting");
     px_text(c, box.x + 14, box.y + 20, line, C_TEXT, 1, 0);
     px_meter(c, (PxRect){box.x + 14, box.y + 44, box.w - 28, 14}, pct, C_HEAD);
-    snprintf(line, sizeof line, "%d%%   %us elapsed   the emulation is paused while it measures", pct, (now - since) / 1000);
+    if (a->job_kind == JOB_LOAD) snprintf(line, sizeof line, "%d%%   %u.%u s elapsed", pct, (unsigned)((now - since) / 1000), (unsigned)((now - since) % 1000 / 100));
+    else snprintf(line, sizeof line, "%d%%   %us elapsed   the emulation is paused while it measures", pct, (now - since) / 1000);
     px_text(c, box.x + 14, box.y + 68, line, C_DIM, 1, 0);
-    px_text(c, box.x + 14, box.y + 86, "Nothing is wrong: wait for the result", C_DIM, 1, 0);
+    px_text(c, box.x + 14, box.y + 86, a->job_kind == JOB_LOAD ? "The firmware is being read and started" : "Nothing is wrong: wait for the result", C_DIM, 1, 0);
 }
 
 /* ---- the self-test ----------------------------------------------------------------------------------------------------- */
@@ -3737,6 +3758,7 @@ static int selftest(void) {
     setenv("FM1NTT_DIR", root, 1);
     static App a;
     memset(&a, 0, sizeof a);
+    a.load_sync = 1;                                         /* the tests below press A and look at once; the job-thread load has its own block */
     g_quiet_logs = 1;
     a.m = fm1ntt_new();
     mon_init(&a.mon, NULL);
@@ -3836,6 +3858,21 @@ static int selftest(void) {
     while (d && (e = readdir(d))) shots += has_ext(e->d_name, ".bmp");
     if (d) closedir(d);
     CHECK(shots == 1);
+    {   /* a load on a job thread: the progress box shows while it runs, the result lands on the main thread, a bad file says why and changes nothing */
+        char fwp[300]; default_firmware(fwp, sizeof fwp);
+        if (fwp[0]) {
+            a.file[0] = 0; a.load_sync = 0;
+            load_start(&a, fwp, 0, 0);
+            CHECK(a.job != NULL && a.job_kind == JOB_LOAD || a.file[0]);                       /* (a very fast thread may be done already) */
+            for (int i = 0; i < 4000 && (a.job || !a.file[0]); i++) { if (!job_poll(&a)) SDL_Delay(5); }
+            CHECK(!a.job && a.job_kind == JOB_NONE && a.file[0] && strlen(a.fl_sha) == 64 && fm1ntt_loaded(a.m) && a.msg_style == 1);
+            char keep[sizeof a.file]; snprintf(keep, sizeof keep, "%s", a.file);
+            load_start(&a, "/nonexistent/x.fwsc", 0, 0);
+            for (int i = 0; i < 4000 && a.job; i++) { if (!job_poll(&a)) SDL_Delay(5); }
+            CHECK(!a.job && a.msg_style == 3 && !strcmp(a.file, keep) && fm1ntt_loaded(a.m));
+            a.load_sync = 1;
+        }
+    }
     {   /* remembered settings: what a firmware saved into its flash comes back, per firmware, until a reset */
         char fwp[300]; default_firmware(fwp, sizeof fwp);
         if (fwp[0]) {
