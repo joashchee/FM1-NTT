@@ -101,6 +101,11 @@ typedef struct {
     char fbundled[PX_MAX_FILES];        /* 1 when it ships with the app (bundled-firmware/) */
     char fkind[PX_MAX_FILES];           /* 0 a firmware or instrument, 1 a recording (.wav in recordings), 2 a flash slot (slotN.flash in slots): the person's own, last in the list */
     char del_name[PX_NAME], del_path[300];   /* the file a delete question is about */
+    /* compare mode: two firmwares' demos (the same tour, so the same notes), one sound at a time on one clock; pl.pcm is the side being heard */
+    int cmp_on, cmp_side, cmp_n, cmp_start[40], cmp_peak[2][40], cmp_diff[40], cmp_nf[2], cmp_ms[2][400];
+    long cmp_first;
+    int16_t *cmp_pcm[2];
+    char cmp_pa[300], cmp_pb[300], cmp_name[2][PX_NAME], cmp_dir[2][420];   /* the marks (paths) and the open pair */
     int nfiles, file_sel;
     uint32_t fbc[240 * 240];            /* the firmware's screen as last converted, with the LCD revision and emulated time it was taken at */
     uint32_t fb_rev;
@@ -209,6 +214,7 @@ static int files_press(App *a, int act);
 static int files_user_press(App *a, int act);
 static void ui_showcase(App *a, UiState *u);
 static void player_stop(App *a);
+static void cmp_close(App *a);
 
 /* ---- small helpers ------------------------------------------------------------------------------------------------------ */
 static void say(App *a, int style, const char *fmt, const char *arg) {
@@ -1408,7 +1414,7 @@ static const char *btn_name(int b) {
 static const char *const SLOT_LABEL[PANEL_COUNT][NSLOT] = {
     /*        UP             LEFT            DOWN            RIGHT          Y                  B                 A                X                  SELECT           START */
     /*MACHINE*/ {"NOTE 1 (C)", "NOTE 2 (D)", "NOTE 3 (E)", "NOTE 4 (F)", "NOTE 5 (G)", "NOTE 6 (A)", "NOTE 7 (B)", "NOTE 8 (C)", "OCTAVE -", "OCTAVE +"},
-    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "", "MAKE OR STOP A DEMO, DELETE", "BACK FROM A PAGE", "OPEN, LOAD, PLAY", "RESCAN, PLAY DEMO", "", "PAUSE"},
+    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "", "MAKE A DEMO, COMPARE, DELETE", "BACK FROM A PAGE", "OPEN, LOAD, PLAY", "RESCAN, PLAY DEMO", "", "PAUSE"},
     /*CPU*/     {"OTHER CORE", "OTHER CORE", "OTHER CORE", "OTHER CORE", "", "", "", "", "", "PAUSE"},
     /*MEMORY*/  {"ONE ROW UP", "PREVIOUS REGION", "ONE ROW DOWN", "NEXT REGION", "64 KIB FORTH", "", "", "64 KIB BACK", "", "PAUSE"},
     /*CONSOLE*/ {"", "", "", "", "", "", "", "", "", "PAUSE"},
@@ -1551,7 +1557,7 @@ enum { CX_PANIC = 1, CX_PAUSE, CX_SCALE, CX_SHOT, CX_ACT = 0x100 };
 typedef struct { int panel; const char *label; int code; } CtxItem;
 static const CtxItem CTX[] = {
     {PANEL_MACHINE, "PANIC: ALL NOTES OFF", CX_PANIC}, {PANEL_MACHINE, "PAUSE / RESUME", CX_PAUSE}, {PANEL_MACHINE, "NEXT SCALE", CX_SCALE},
-    {PANEL_FILES, "LOAD THE SELECTED FILE", CX_ACT | A_OK}, {PANEL_FILES, "RESCAN THE FOLDER", CX_ACT | A_X}, {PANEL_FILES, "DELETE A RECORDING OR SLOT", CX_ACT | A_Y},
+    {PANEL_FILES, "LOAD THE SELECTED FILE", CX_ACT | A_OK}, {PANEL_FILES, "RESCAN THE FOLDER", CX_ACT | A_X}, {PANEL_FILES, "MARK FOR COMPARE, OR DELETE", CX_ACT | A_Y},
     {PANEL_CPU, "SWITCH CPU", CX_ACT | A_UP},
     {PANEL_MEMORY, "NEXT REGION", CX_ACT | A_RIGHT}, {PANEL_MEMORY, "BACK TO THE TOP", CX_ACT | A_HOME}, {PANEL_MEMORY, "NEXT PAGE", CX_ACT | A_PGDN},
     {PANEL_MIDI, "PANIC: ALL NOTES OFF", CX_ACT | A_BACK},
@@ -1847,7 +1853,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->file_dir, sizeof u->file_dir, "%s", dir);
     snprintf(u->bundled_dir, sizeof u->bundled_dir, "%s", a->bdir);
     snprintf(u->pack_dir, sizeof u->pack_dir, "%s", a->pdir);
-    for (int i = 0; i < a->nfiles; i++) snprintf(u->files[i], PX_NAME, "%c%c %s", !strcmp(a->fpaths[i], a->fw_path) && a->fw_path[0] ? '*' : ' ', a->fbundled[i] == 2 ? 'G' : a->fbundled[i] ? 'B' : a->fkind[i] == 1 ? 'R' : a->fkind[i] == 2 ? 'S' : ' ', a->files[i]);
+    for (int i = 0; i < a->nfiles; i++) snprintf(u->files[i], PX_NAME, "%c%c %s", !strcmp(a->fpaths[i], a->cmp_pa) && a->cmp_pa[0] ? '1' : !strcmp(a->fpaths[i], a->cmp_pb) && a->cmp_pb[0] ? '2' : !strcmp(a->fpaths[i], a->fw_path) && a->fw_path[0] ? '*' : ' ', a->fbundled[i] == 2 ? 'G' : a->fbundled[i] ? 'B' : a->fkind[i] == 1 ? 'R' : a->fkind[i] == 2 ? 'S' : ' ', a->files[i]);
     u->nfiles = a->nfiles;
     u->file_sel = a->file_sel;
     u->cpu_sel = a->cpu_sel;
@@ -2185,7 +2191,13 @@ static void menu_input(App *a, const SDL_Event *e) {
         menu_press(a, k == SDLK_ESCAPE ? A_BACK : k == SDLK_HOME ? A_HOME : k == SDLK_END ? A_END : k == SDLK_PAGEUP ? A_PGUP : k == SDLK_PAGEDOWN ? A_PGDN : act_of_key(k));
     } else if (e->type == SDL_JOYBUTTONDOWN) menu_press(a, act_of_pad_r1(e->jbutton.button, a->pad_mask >> PAD_R1 & 1));
 }
+static void cmp_press(App *a, int act);
 static void dispatch(App *a, const SDL_Event *e) {
+    if (a->cmp_on && (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && !(e->type == SDL_KEYDOWN && e->key.repeat)) {   /* compare mode is modal: its own few keys, the rest used up */
+        int ac = e->type == SDL_JOYBUTTONDOWN ? act_of_pad_r1(e->jbutton.button, 0) : e->key.keysym.sym == SDLK_ESCAPE ? A_BACK : e->key.keysym.sym == SDLK_SPACE || e->key.keysym.sym == SDLK_p ? A_START : act_of_key(e->key.keysym.sym);
+        cmp_press(a, ac);
+        return;
+    }
     if (a->pl.on && (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && !(e->type == SDL_KEYDOWN && e->key.repeat)) { player_stop(a); return; }   /* a press ends the demo and is used up */
     if (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYAXISMOTION || e->type == SDL_JOYHATMOTION) a->last_input_ms = SDL_GetTicks();   /* the data rain's whole-panel mode ends on any of them */
     if ((e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && toast_key(&a->toast, SDL_GetTicks())) return;   /* a failure's key is used up */
@@ -2327,7 +2339,7 @@ static int worker_dir(App *a, char *dir, size_t n) {
 }
 /* Once a loop pass. Reaps a finished worker, stops and continues it by the policy. 1 when something to draw changed. */
 static int show_poll(App *a, double now) {
-    if (!a->pl.on && a->pl.pcm) player_stop(a);                          /* a demo played to its end: free its sound */
+    if (!a->pl.on && a->pl.pcm && !a->cmp_on) player_stop(a);                          /* a demo played to its end: free its sound */
     if (!a->sw_pid) return 0;
     int st = 0;
     pid_t r = waitpid(a->sw_pid, &st, WNOHANG);
@@ -2423,6 +2435,7 @@ static void info_open(App *a, int i) {
     a->info_i = i;
 }
 static void player_stop(App *a) {
+    if (a->cmp_on) { cmp_close(a); return; }
     if (!a->pl.pcm && !a->pl.on) return;
     lock(a);
     a->pl.on = 0;
@@ -2455,12 +2468,119 @@ static int player_start(App *a, int i) {
     say(a, 0, "Playing the demo: any key stops it", NULL);
     return 0;
 }
+/* ---- compare mode: two demos of the same tour, heard one at a time on one clock ---------------------------------------------------------- */
+static void cmp_close(App *a) {
+    lock(a); a->pl.on = 0; a->pl.pcm = NULL; unlock(a);
+    for (int k = 0; k < 2; k++) { free(a->cmp_pcm[k]); a->cmp_pcm[k] = NULL; }
+    a->cmp_on = 0; a->pl.cur = -1; a->pl.nf = 0;
+}
+static void cmp_side_set(App *a, int side) {
+    lock(a); a->pl.pcm = a->cmp_pcm[side]; unlock(a);
+    memcpy(a->pl.ms, a->cmp_ms[side], sizeof a->pl.ms);
+    snprintf(a->pl.dir, sizeof a->pl.dir, "%s", a->cmp_dir[side]);
+    snprintf(a->pl.name, sizeof a->pl.name, "%s", a->cmp_name[side]);
+    a->pl.nf = a->cmp_nf[side]; a->pl.cur = -1; a->cmp_side = side;
+}
+static int cmp_step_at(const App *a, int tick) {
+    int s = 0;
+    for (int k = 0; k < a->cmp_n; k++) if (a->cmp_start[k] <= tick) s = k;
+    return s;
+}
+/* The steps are the runs of the tour's labels (BOOTING, NOTE 1, A CHORD...); per step the peak of each sound and how far apart they are. */
+static void cmp_stats(App *a) {
+    a->cmp_n = 0;
+    for (int t = 0; t < SHOW_TICKS && a->cmp_n < 40; t++) if (t == 0 || strcmp(show_step(t), show_step(t - 1))) a->cmp_start[a->cmp_n++] = t;
+    const int16_t *x = a->cmp_pcm[0], *y = a->cmp_pcm[1];
+    for (int k = 0; k < a->cmp_n; k++) {
+        size_t from = (size_t)a->cmp_start[k] * SHOW_AUDIO * 2, to = (size_t)(k + 1 < a->cmp_n ? a->cmp_start[k + 1] : SHOW_TICKS) * SHOW_AUDIO * 2;
+        int pa = 0, pb = 0; double ea = 0, eb = 0, ed = 0;
+        for (size_t i = from; i < to; i++) {
+            int va = x[i], vb = y[i];
+            if (abs(va) > pa) pa = abs(va);
+            if (abs(vb) > pb) pb = abs(vb);
+            ea += (double)va * va; eb += (double)vb * vb; ed += (double)(va - vb) * (va - vb);
+        }
+        double top = ea > eb ? ea : eb;
+        a->cmp_peak[0][k] = pa * 100 / 32768; a->cmp_peak[1][k] = pb * 100 / 32768;
+        a->cmp_diff[k] = top > 0 ? (int)(100.0 * sqrt(ed / top) + 0.5) : 0;
+        if (a->cmp_diff[k] > 100) a->cmp_diff[k] = 100;
+    }
+    a->cmp_first = -1;
+    for (size_t i = 0; i < (size_t)SHOW_TICKS * SHOW_AUDIO * 2; i++) if (x[i] != y[i]) { a->cmp_first = (long)(i / 2 * 1000 / FM1_SAMPLE_RATE); break; }
+}
+/* Opens the pair if both demos are ready; otherwise starts the worker on the first that is not and says so. 0 opened. */
+static int cmp_open(App *a, int ia, int ib) {
+    int idx[2] = {ia, ib}, miss = -1;
+    char dir[2][420];
+    for (int k = 0; k < 2; k++) {
+        ShowState s;
+        if (demo_dir_of(a, idx[k], dir[k], sizeof dir[k]) != 0) { miss = miss < 0 ? k : miss; continue; }
+        show_state_read(dir[k], &s);
+        if (!s.have || strcmp(s.state, "ready")) miss = miss < 0 ? k : miss;
+    }
+    if (miss >= 0) {
+        if (!a->sw_pid && show_spawn(a, idx[miss]) == 0) say(a, 0, "A demo is being made for one of them: Y on the pair again when it is ready", NULL);
+        else say(a, 2, "One of them has no demo yet: open its page (A) and press Y to make it", NULL);
+        return -1;
+    }
+    int16_t *pcm[2] = {NULL, NULL};
+    size_t fr[2] = {0, 0};
+    int nf[2], total, ok = 1;
+    static int ms[2][400];
+    for (int k = 0; k < 2 && ok; k++) {
+        char wp[460];
+        nf[k] = show_frames_read(dir[k], ms[k], 400, &total);
+        snprintf(wp, sizeof wp, "%s/audio.wav", dir[k]);
+        ok = nf[k] >= 1 && show_wav_read(wp, &pcm[k], &fr[k]) == 0 && fr[k] == (size_t)SHOW_TICKS * SHOW_AUDIO;
+    }
+    if (!ok) { free(pcm[0]); free(pcm[1]); say(a, 3, "The demos' files cannot be read (made by another tour: make them again)", NULL); return -1; }
+    player_stop(a);
+    for (int k = 0; k < 2; k++) {
+        a->cmp_pcm[k] = pcm[k]; a->cmp_nf[k] = nf[k];
+        memcpy(a->cmp_ms[k], ms[k], sizeof a->cmp_ms[k]);
+        snprintf(a->cmp_dir[k], sizeof a->cmp_dir[k], "%s", dir[k]);
+        snprintf(a->cmp_name[k], PX_NAME, "%s", a->files[idx[k]]);
+    }
+    cmp_stats(a);
+    snprintf(a->pl.tier, sizeof a->pl.tier, "%s", "COMPARE"); a->pl.licence[0] = 0; a->pl.total_ms = 1000 * SHOW_TICKS / SHOW_FPS;
+    a->cmp_on = 1;
+    cmp_side_set(a, 0);
+    lock(a); a->pl.frames = fr[0]; a->pl.pos = 0; a->pl.on = 1; unlock(a);
+    say(a, 0, "Comparing: left and right switch, B closes", NULL);
+    return 0;
+}
+static void cmp_press(App *a, int act) {
+    int tick = (int)((unsigned long long)a->pl.pos * SHOW_FPS / FM1_SAMPLE_RATE), s = cmp_step_at(a, tick), to = -1;
+    if (act == A_LEFT) cmp_side_set(a, 0);
+    else if (act == A_RIGHT) cmp_side_set(a, 1);
+    else if (act == A_UP) to = tick > a->cmp_start[s] + 3 || s == 0 ? a->cmp_start[s] : a->cmp_start[s - 1];
+    else if (act == A_DOWN) to = s + 1 < a->cmp_n ? a->cmp_start[s + 1] : -1;
+    else if (act == A_OK) to = 0;
+    else if (act == A_START) { lock(a); if (!a->pl.on && a->pl.pos >= a->pl.frames) a->pl.pos = 0; a->pl.on = !a->pl.on; unlock(a); }
+    else if (act == A_BACK) { cmp_close(a); say(a, 0, "Compare closed", NULL); return; }
+    if (to >= 0) { lock(a); a->pl.pos = (size_t)to * SHOW_AUDIO; a->pl.on = 1; unlock(a); }
+}
+/* Y on a firmware: mark it for compare. The first mark is A; Y on another firmware marks B and opens the pair; Y on the marked A clears the marks. */
+static int cmp_find(App *a, const char *path) { for (int i = 0; i < a->nfiles; i++) if (!strcmp(a->fpaths[i], path)) return i; return -1; }
+static void cmp_mark(App *a, int i) {
+    const char *p = a->fpaths[i];
+    if (!fw_is_firmware(p)) { say(a, 2, "Only a firmware can be compared (an instrument has no demo)", NULL); return; }
+    if (!a->cmp_pa[0] || !strcmp(a->cmp_pa, p)) {
+        if (a->cmp_pa[0]) { a->cmp_pa[0] = a->cmp_pb[0] = 0; say(a, 0, "Compare marks cleared", NULL); }
+        else { snprintf(a->cmp_pa, sizeof a->cmp_pa, "%s", p); say(a, 0, "Marked 1: Y on another firmware to compare with it", NULL); }
+        return;
+    }
+    if (strcmp(a->cmp_pb, p)) snprintf(a->cmp_pb, sizeof a->cmp_pb, "%s", p);
+    int ia = cmp_find(a, a->cmp_pa), ib = cmp_find(a, a->cmp_pb);
+    if (ia < 0 || ib < 0) { a->cmp_pa[0] = a->cmp_pb[0] = 0; say(a, 2, "A marked file is gone: marks cleared", NULL); return; }
+    cmp_open(a, ia, ib);
+}
 /* A recording plays through the demo player's sound path (no picture); a slot is restored after a question; Y deletes either after a question. 1 when handled. */
 static int files_user_press(App *a, int act) {
     int i = a->file_sel;
     if (a->info_on || i < 0 || i >= a->nfiles) return 0;
     int kind = a->fkind[i];
-    if (act == A_Y && !a->fbundled[i] && !kind && !a->info_on) { say(a, 2, "Only your recordings and slots are deleted here", NULL); return 1; }
+    if (act == A_Y && !kind) { cmp_mark(a, i); return 1; }
     if (!kind) return 0;
     if (act == A_Y) { snprintf(a->del_name, sizeof a->del_name, "%s", a->files[i]); snprintf(a->del_path, sizeof a->del_path, "%s", a->fpaths[i]); a->confirm = CF_DELETE; return 1; }
     if (act != A_OK) return 0;
@@ -2527,7 +2647,7 @@ static void ui_showcase(App *a, UiState *u) {
         else if (s.have) snprintf(u->info_demo, sizeof u->info_demo, "NOT FINISHED: Y MAKES IT");
         else snprintf(u->info_demo, sizeof u->info_demo, "NONE YET: Y MAKES IT%s", a->bg_demos ? " (OR IT IS QUEUED)" : "");
     }
-    if (a->pl.on && a->pl.nf > 0) {                                      /* the demo's own picture, by the sound's position */
+    if ((a->pl.on || a->cmp_on) && a->pl.nf > 0) {                       /* the demo's own picture, by the sound's position */
         int t = (int)((unsigned long long)a->pl.pos * 1000 / FM1_SAMPLE_RATE), idx = 0;
         for (int k = 0; k < a->pl.nf; k++) if (a->pl.ms[k] <= t) idx = k;
         if (idx != a->pl.cur) {
@@ -2548,6 +2668,12 @@ static void ui_showcase(App *a, UiState *u) {
         int pl_ = 0, pr_ = 0;
         for (size_t f = pos > 1470 ? pos - 1470 : 0; f < pos; f++) { int l = abs(a->pl.pcm[f * 2]), r = abs(a->pl.pcm[f * 2 + 1]); if (l > pl_) pl_ = l; if (r > pr_) pr_ = r; }
         u->level_l = pl_ * 100 / 32768; u->level_r = pr_ * 100 / 32768;
+        if (a->cmp_on) {
+            int st = cmp_step_at(a, u->pl_tick);
+            u->cmp_on = 1; u->cmp_side = a->cmp_side; u->cmp_step = st; u->cmp_nsteps = a->cmp_n;
+            u->cmp_peak_a = a->cmp_peak[0][st]; u->cmp_peak_b = a->cmp_peak[1][st]; u->cmp_diff = a->cmp_diff[st]; u->cmp_first_ms = a->cmp_first;
+            snprintf(u->cmp_name_a, sizeof u->cmp_name_a, "%s", a->cmp_name[0]); snprintf(u->cmp_name_b, sizeof u->cmp_name_b, "%s", a->cmp_name[1]);
+        }
     }
 }
 
@@ -3261,6 +3387,38 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     ACHECK(!a->pl.on && a->pl.pos == a->pl.frames);                                                 /* played to its end */
     show_poll(a, 800100.0); ACHECK(!a->pl.pcm);
     fill_ui(a, ui, 0); ACHECK(!ui->playing && strcmp(ui->run_state, "DEMO") != 0);
+    {   /* compare mode: the same firmware under two names (a "./" in the path) marked with Y; the demos are the same, so the sound is identical, then one sample is changed */
+        char keep_p[300], keep_n[PX_NAME], alt[320]; int keep_b = a->fbundled[1], keep_k = a->fkind[1];
+        snprintf(keep_p, sizeof keep_p, "%s", a->fpaths[1]); snprintf(keep_n, sizeof keep_n, "%s", a->files[1]);
+        const char *sl = strrchr(a->fpaths[0], '/');
+        snprintf(alt, sizeof alt, "%.*s/./%s", (int)(sl - a->fpaths[0]), a->fpaths[0], sl + 1);
+        snprintf(a->fpaths[1], sizeof a->fpaths[1], "%s", alt); snprintf(a->files[1], PX_NAME, "%s", a->files[0]); memset(a->fsha[1], 0, 65); a->fkind[1] = 0;
+        a->info_on = 0; a->panel = PANEL_FILES;
+        a->file_sel = 0; act(a, A_Y); ACHECK(!strcmp(a->cmp_pa, a->fpaths[0]) && !a->cmp_on);                 /* Y marks 1 */
+        fill_ui(a, ui, 0); ACHECK(ui->files[0][0] == '1');
+        act(a, A_Y); ACHECK(a->cmp_pa[0] == 0);                                                               /* Y on the mark clears it */
+        a->file_sel = 0; act(a, A_Y); a->file_sel = 1; act(a, A_Y);
+        ACHECK(a->cmp_on && a->pl.on && a->pl.frames == (size_t)SHOW_TICKS * SHOW_AUDIO && a->cmp_first == -1 && a->cmp_n > 5 && a->cmp_side == 0);
+        for (int k = 0; k < a->cmp_n; k++) ACHECK(a->cmp_diff[k] == 0 && a->cmp_peak[0][k] == a->cmp_peak[1][k]);
+        for (int k = 0; k < 100; k++) audio_step(a, buf, 1470);
+        size_t pos0 = a->pl.pos;
+        cmp_press(a, A_RIGHT); ACHECK(a->cmp_side == 1 && a->pl.pcm == a->cmp_pcm[1] && a->pl.pos == pos0);   /* the other sound, the same place */
+        cmp_press(a, A_LEFT); ACHECK(a->cmp_side == 0 && a->pl.pcm == a->cmp_pcm[0]);
+        { int s = cmp_step_at(a, (int)(a->pl.pos * SHOW_FPS / FM1_SAMPLE_RATE)); cmp_press(a, A_DOWN); ACHECK(a->pl.pos == (size_t)a->cmp_start[s + 1] * SHOW_AUDIO); cmp_press(a, A_UP); ACHECK(a->pl.pos == (size_t)a->cmp_start[s + 1] * SHOW_AUDIO || a->pl.pos == (size_t)a->cmp_start[s] * SHOW_AUDIO); }
+        cmp_press(a, A_START); ACHECK(!a->pl.on && a->cmp_on); fill_ui(a, ui, 0); ACHECK(ui->playing && ui->cmp_on && ui->cmp_nsteps == a->cmp_n && ui->cmp_first_ms == -1);   /* paused: the page stays */
+        { static uint32_t c1[PX_W * PX_H], c2[PX_W * PX_H];
+          for (int md = 0; md < 2; md++) { px_draw(c1, md, ui); px_draw(c2, md, ui); long lit = 0, below = 0; for (int y = 0; y < PX_H; y++) for (int x = 480; x < PX_W; x++) { lit += c1[y * PX_W + x] != C_BG; if (y >= 472) below += c1[y * PX_W + x] != C_BG; }
+              ACHECK(!memcmp(c1, c2, sizeof c1) && lit > 3000 && below < 400); }
+          if (getenv("FM1NTT_MON_SHOTS")) { char fn[420]; snprintf(fn, sizeof fn, "%s/compare.bmp", getenv("FM1NTT_MON_SHOTS")); mon_dump_bmp(fn, c1); } }
+        cmp_press(a, A_START); ACHECK(a->pl.on);
+        a->cmp_pcm[1][(size_t)SHOW_AUDIO * 2 * 100] ^= 0x2000; cmp_stats(a);                                   /* one sample changed in step 4: it is the first difference */
+        ACHECK(a->cmp_first == (long)(SHOW_AUDIO * 100 * 1000 / FM1_SAMPLE_RATE) && a->cmp_diff[cmp_step_at(a, 100)] > 0);
+        memset(&ev, 0, sizeof ev); ev.type = SDL_KEYDOWN; ev.key.keysym.sym = SDLK_z; keys_before = fm1ntt_keys_down(a->m);
+        dispatch(a, &ev); ACHECK(a->cmp_on && fm1ntt_keys_down(a->m) == keys_before);                          /* modal: a note key is used up */
+        ev.key.keysym.sym = SDLK_ESCAPE; dispatch(a, &ev); ACHECK(!a->cmp_on && !a->pl.on && !a->pl.pcm && !a->cmp_pcm[0] && !a->cmp_pcm[1]);
+        a->cmp_pa[0] = a->cmp_pb[0] = 0;
+        snprintf(a->fpaths[1], sizeof a->fpaths[1], "%s", keep_p); snprintf(a->files[1], PX_NAME, "%s", keep_n); memset(a->fsha[1], 0, 65); a->fbundled[1] = (char)keep_b; a->fkind[1] = (char)keep_k;
+    }
 draw_tests:;
     /* the page and the progress box drawn, both layouts: the FM-1's screen intact, the same pixels every time, above the foot */
     static uint32_t cv[PX_W * PX_H], cv2[PX_W * PX_H];
@@ -3862,7 +4020,7 @@ static int selftest(void) {
         a.file_sel = 5; act(&a, A_OK);
         CHECK(a.confirm == CF_RESTORE && a.slot == 2); act(&a, A_BACK); CHECK(a.confirm == CF_NONE);   /* a slot asks before restoring */
         a.file_sel = 0; act(&a, A_Y);
-        CHECK(a.confirm == CF_NONE && a.msg_style == 2 && is_file(wp));                                /* a firmware is not deleted from here */
+        CHECK(a.confirm == CF_NONE && is_file(wp) && a.cmp_pa[0]); a.cmp_pa[0] = 0;                    /* Y on a firmware marks it for compare: it is never deleted from here */
         a.file_sel = 4; act(&a, A_Y);
         CHECK(a.confirm == CF_DELETE && is_file(wp)); act(&a, A_BACK); CHECK(a.confirm == CF_NONE && is_file(wp));   /* B keeps it */
         act(&a, A_Y); CHECK(a.confirm == CF_DELETE); act(&a, A_OK);

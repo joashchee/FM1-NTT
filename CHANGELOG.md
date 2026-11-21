@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-21 (host): **compare mode**: Y on a firmware in FILES marks it for compare (1, then 2); the pair's showcase demos play on one clock with a switch between the two sounds, tour steps, per-step peaks and difference, and the first sample where they differ. Y on a firmware used to do nothing.
 - 2026-11-21 (host): the window opens at the largest whole multiple of 640 x 480 that fits the screen (`--scale N|auto`, `FM1NTT_SCALE`); a 640 x 480 screen stays 1x.
 - 2026-11-21 (host): **FILES lists your recordings (R) and flash slots (S)**: A plays a recording or asks to restore a slot, Y deletes either after a question; in the context menu too. Self-tested.
 - 2026-11-21 (host): **pad mapping: L2 + d-pad up presses SCL** (the FM-1's matrix button 3, per `fm1-emu`'s panel table); it was labelled "SEL (no button)" and pressed nothing. README, the Keymap page and the self-test follow; the README and code no longer call the OP1 to POLY order assumed (it was settled in the emulator 2026-11-18).

@@ -83,3 +83,16 @@ makes (stored blocks, RGB or paletted, filter 0): anything else is refused, neve
   `scripts/check-bundled.py` has no check for a `demos/` folder yet.
 - **Tried only headless:** the windowed app has not been run with a display here; the page, the progress box and the player are checked by the self-test through `act`,
   `fill_ui`, `audio_step` and `dispatch`, and by pictures drawn from the same code.
+
+## Compare mode (ROADMAP section 3)
+
+Two firmwares on the same notes: every demo plays the same tour (`SHOW_TOUR`), so the pair's demos are already the same notes in two firmwares. **Y on a firmware in FILES marks it**
+(`1`, then `2`; Y on mark 1 clears); the second mark opens the pair. A demo that is not ready starts the worker (when it is free) and says so; Y on the pair again opens it when it is.
+Both demos must be of the current tour (450 ticks of 1470 frames), else it asks for them to be made again.
+
+The window is the player's (the picture at 2x, flush top left) with the compare column. One clock (`pl.pos`), one sound at a time: **left** hears A, **right** hears B at the same
+position (the picture follows the side heard), **up** and **down** jump to the start of the step before or after (the steps are the runs of `show_step` labels), **A** restarts, **Start**
+pauses, **B** closes; every other key is used up while it is open. The column shows, for the current step, each sound's peak and the **difference** (the RMS of the two sounds' difference
+over the louder one's RMS, 0 to 100%), and for the whole tour **where the two first differ** in milliseconds, or IDENTICAL (sample for sample). Code: the "compare mode" block of
+`host/fm1ntt.c` (`cmp_*`) and `px_panel_compare` in `host/pix.h`. Not built: your own notes (a per-pair demo from `fm1_soc::script`), the picture of both at once.
+Untested by eye and ear, and on a unit.

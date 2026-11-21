@@ -262,6 +262,9 @@ typedef struct {
     int pl_tick, pl_ticks, pl_idx, pl_nf;
     char pl_step[32], pl_name[PX_NAME], pl_tier[40], pl_licence[104];
     uint64_t pl_keys;                   /* the matrix bits the tour holds now */
+    int cmp_on, cmp_side, cmp_step, cmp_nsteps, cmp_peak_a, cmp_peak_b, cmp_diff;   /* compare mode: the two demos on the same notes (the player's window, another column) */
+    long cmp_first_ms;                  /* where the two sounds first differ, -1 when they never do */
+    char cmp_name_a[PX_NAME], cmp_name_b[PX_NAME];
     char app_root[128], app_root_why[64];   /* the app's folder (where everything is written) and which rule chose it */
 } UiState;
 
@@ -1049,6 +1052,46 @@ static inline void px_panel_player(uint32_t *c, PxRect r, const UiState *u) {
     px_text(c, x, r.y + 460, "ANY KEY STOPS", C_HEAD, 1, w);
 }
 
+/* Compare mode's column: the same 160 x 480 as the player's, for two firmwares on the same notes. */
+static inline void px_panel_compare(uint32_t *c, PxRect r, const UiState *u) {
+    int x = r.x + 8, w = r.w - 16;
+    char line[64];
+    px_box(c, (PxRect){r.x + 2, r.y + 8, r.w - 4, 64}, "COMPARE");
+    snprintf(line, sizeof line, "%c A %s", u->cmp_side == 0 ? '>' : ' ', u->cmp_name_a);
+    px_text(c, x, r.y + 22, line, u->cmp_side == 0 ? C_TEXT : C_DIM, 1, w);
+    snprintf(line, sizeof line, "%c B %s", u->cmp_side == 1 ? '>' : ' ', u->cmp_name_b);
+    px_text(c, x, r.y + 36, line, u->cmp_side == 1 ? C_TEXT : C_DIM, 1, w);
+    px_text(c, x, r.y + 52, "THE SAME NOTES IN BOTH", C_DIM, 1, w);
+    px_box(c, (PxRect){r.x + 2, r.y + 82, r.w - 4, 70}, "NOW");
+    px_wrap(c, x, r.y + 94, u->pl_step, C_OK, w, 2);
+    int total = u->pl_ticks > 0 ? u->pl_ticks : 1, pct = u->pl_tick * 100 / total;
+    px_meter(c, (PxRect){x, r.y + 116, w, 8}, pct > 100 ? 100 : pct, C_HEAD);
+    snprintf(line, sizeof line, "%d:%02d / %d:%02d   STEP %d/%d", u->pl_tick / 30 / 60, u->pl_tick / 30 % 60, u->pl_ticks / 30 / 60, u->pl_ticks / 30 % 60, u->cmp_step + 1, u->cmp_nsteps);
+    px_text(c, x, r.y + 130, line, C_TEXT, 1, w);
+    px_box(c, (PxRect){r.x + 2, r.y + 162, r.w - 4, 82}, "THIS STEP");
+    snprintf(line, sizeof line, "PEAK A %d%%", u->cmp_peak_a); px_text(c, x, r.y + 174, line, C_TEXT, 1, w);
+    snprintf(line, sizeof line, "PEAK B %d%%", u->cmp_peak_b); px_text(c, x, r.y + 186, line, C_TEXT, 1, w);
+    snprintf(line, sizeof line, "DIFFERENCE %d%%", u->cmp_diff); px_text(c, x, r.y + 200, line, C_TEXT, 1, w);
+    px_meter(c, (PxRect){x, r.y + 214, w, 8}, u->cmp_diff, u->cmp_diff > 50 ? C_WARN : C_OK);
+    px_text(c, x, r.y + 228, "0 = THE SAME SOUND", C_DIM, 1, w);
+    px_box(c, (PxRect){r.x + 2, r.y + 254, r.w - 4, 46}, "WHOLE TOUR");
+    if (u->cmp_first_ms < 0) px_text(c, x, r.y + 268, "IDENTICAL", C_OK, 1, w);
+    else { snprintf(line, sizeof line, "DIFFERS FROM %ld.%ld S", u->cmp_first_ms / 1000, u->cmp_first_ms % 1000 / 100); px_text(c, x, r.y + 268, line, C_TEXT, 1, w); }
+    px_box(c, (PxRect){r.x + 2, r.y + 310, r.w - 4, 40}, "SOUND");
+    px_text(c, x, r.y + 322, "L", C_DIM, 1, 0);
+    px_meter(c, (PxRect){x + 10, r.y + 321, w - 10, 7}, u->level_l, C_OK);
+    px_text(c, x, r.y + 334, "R", C_DIM, 1, 0);
+    px_meter(c, (PxRect){x + 10, r.y + 333, w - 10, 7}, u->level_r, C_OK);
+    px_box(c, (PxRect){r.x + 2, r.y + 360, r.w - 4, 112}, "KEYS");
+    px_text(c, x, r.y + 374, "LEFT  HEAR A", C_TEXT, 1, w);
+    px_text(c, x, r.y + 386, "RIGHT HEAR B", C_TEXT, 1, w);
+    px_text(c, x, r.y + 398, "UP DOWN  STEP", C_TEXT, 1, w);
+    px_text(c, x, r.y + 410, "A  FROM THE START", C_TEXT, 1, w);
+    px_text(c, x, r.y + 422, "START  PAUSE", C_TEXT, 1, w);
+    px_text(c, x, r.y + 434, "B  CLOSE", C_TEXT, 1, w);
+    px_text(c, x, r.y + 450, "ITS SCREEN AT 2X", C_DIM, 1, w);
+}
+
 /* Draws the whole window into c (PX_W x PX_H ARGB): the FM-1's screen first, then the carousel and the current panel around it. */
 static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
     if (u->playing) mode = MODE_ZOOMED;                          /* a demo plays at 2x whatever the layout was */
@@ -1062,7 +1105,7 @@ static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
                 for (int dx = 0; dx < s; dx++) c[(y * s + dy) * PX_W + x * s + dx] = v;
         }
     if (!u->fb_valid) px_text(c, 8, 8, "NO SIGNAL", C_DIM, 1, 0);
-    if (u->playing) { PxRect pp[2]; px_panel_rects(MODE_ZOOMED, pp); px_rect(c, pp[0], C_BG); px_panel_player(c, pp[0], u); return; }
+    if (u->playing) { PxRect pp[2]; px_panel_rects(MODE_ZOOMED, pp); px_rect(c, pp[0], C_BG); if (u->cmp_on) px_panel_compare(c, pp[0], u); else px_panel_player(c, pp[0], u); return; }
     int narrow = mode == MODE_ZOOMED, p = u->panel >= 0 && u->panel < PANEL_COUNT ? u->panel : 0;
     PxRect pr[2], cr = px_content_rect(mode);
     px_panel_rects(mode, pr);
