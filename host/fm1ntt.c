@@ -3310,7 +3310,8 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     ACHECK(ui->info_busy && ui->info_demo_kind == 1 && strstr(ui->info_demo, "BEING MADE"));
     a->job = (SDL_Thread *)(uintptr_t)1;                                                           /* a report starts: the worker is stopped */
     ACHECK(show_poll(a, 100500.0) == 1 && a->sw_stopped == 1);
-    { int st = 0; usleep(200000); pid_t w = waitpid(a->sw_pid, &st, WUNTRACED | WNOHANG); ACHECK(w == a->sw_pid && WIFSTOPPED(st)); }
+    { int st = 0; pid_t w = 0; for (int k = 0; k < 40 && w != a->sw_pid; k++) { usleep(50000); w = waitpid(a->sw_pid, &st, WUNTRACED | WNOHANG); }   /* the stop signal lands in a moment: wait for it, up to 2 s */
+      ACHECK(w == a->sw_pid && WIFSTOPPED(st)); }
     fill_ui(a, ui, 0); ACHECK(ui->demo_paused && strstr(ui->info_demo, "PAUSED"));
     a->job = NULL;                                                                                 /* ... and goes on when it ends */
     ACHECK(show_poll(a, 101000.0) == 1 && a->sw_stopped == 0);

@@ -38,7 +38,7 @@ echo "== scripts"
 for f in "$REPO"/scripts/check.sh "$REPO"/host/build.sh "$REPO"/web/build.sh "$REPO"/r36s/build-deb.sh "$REPO"/r36s/package/*.sh; do bash -n "$f"; done
 # CI's shellcheck is 0.9 (Ubuntu apt); the Mac's Homebrew 0.11 misses what it flags (SC2015, 2026-11-18). So where Docker runs, lint with the pinned
 # 0.9.0 image, the CI's version; else the local shellcheck, with a note that it may not be CI's. On CI (Linux) the local one already is.
-SH_FILES=(scripts/check.sh host/build.sh web/build.sh r36s/build-deb.sh r36s/package/*.sh)
+SH_FILES=(scripts/check.sh scripts/build-release.sh host/build.sh web/build.sh r36s/build-deb.sh r36s/package/*.sh)
 SH_TOOL=""
 if [ -z "${CI:-}" ] && command -v docker >/dev/null; then
     # Docker Desktop's leftover config names a credential helper that is not installed without it: pulls then fail. Use an empty config.
