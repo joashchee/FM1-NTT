@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-21 (scripts, CI): **`scripts/build-linux.sh`** builds the desktop Linux archive in Debian 12 (needs only SDL2; the permissive firmware and licences inside; self-test from the unpacked archive) and a `linux` CI job keeps it. Tried on aarch64 only. A parenthesis added to one self-test condition (GCC's `-Wparentheses`).
 - 2026-11-21 (scripts): **`scripts/build-release.sh`**: the signed, notarized, universal macOS release (`FM1-NTT.app`, zip) on the maintainer's Mac; `FM1NTT_UNSIGNED=1` builds ad hoc for trying. Tried unsigned only. Also in `check.sh`'s shellcheck list. The showcase self-test waits up to 2 s for the worker's stop instead of a fixed 0.2 s (it failed once from inside the bundle).
 - 2026-11-21 (host): **compare mode**: Y on a firmware in FILES marks it for compare (1, then 2); the pair's showcase demos play on one clock with a switch between the two sounds, tour steps, per-step peaks and difference, and the first sample where they differ. Y on a firmware used to do nothing.
 - 2026-11-21 (host): the window opens at the largest whole multiple of 640 x 480 that fits the screen (`--scale N|auto`, `FM1NTT_SCALE`); a 640 x 480 screen stays 1x.

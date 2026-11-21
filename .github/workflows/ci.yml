@@ -51,5 +51,18 @@ jobs:
           platforms: arm64
       - name: Build the package
         run: r36s/build-deb.sh
+  linux:
+    # The desktop Linux archive (scripts/build-linux.sh): Debian 12's glibc, SDL2 from the system, the permissive firmware, self-tested from the unpacked archive.
+    # Kept as a run artifact; a release attaches it by hand, with the macOS zip.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the archive
+        run: scripts/build-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FM1-NTT-linux-x86_64
+          path: build/linux/*.tar.gz
+          if-no-files-found: error
   # CI builds Linux and the web; it never ships a Mac app (an unsigned one is "damaged" on any other Mac): releases are
   # signed and notarized on the maintainer's Mac.

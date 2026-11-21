@@ -4106,7 +4106,7 @@ static int selftest(void) {
         if (fwp[0]) {
             a.file[0] = 0; a.load_sync = 0;
             load_start(&a, fwp, 0, 0);
-            CHECK(a.job != NULL && a.job_kind == JOB_LOAD || a.file[0]);                       /* (a very fast thread may be done already) */
+            CHECK((a.job != NULL && a.job_kind == JOB_LOAD) || a.file[0]);                       /* (a very fast thread may be done already) */
             for (int i = 0; i < 4000 && (a.job || !a.file[0]); i++) { if (!job_poll(&a)) SDL_Delay(5); }
             CHECK(!a.job && a.job_kind == JOB_NONE && a.file[0] && strlen(a.fl_sha) == 64 && fm1ntt_loaded(a.m) && a.msg_style == 1);
             char keep[sizeof a.file]; snprintf(keep, sizeof keep, "%s", a.file);
