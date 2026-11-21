@@ -1386,7 +1386,7 @@ static const char *const SLOT_LABEL[PANEL_COUNT][NSLOT] = {
 /* MACHINE under a held button: the same slots, other jobs (L1 the ten black-key functions, L2 the FM-1's second row, R2 the transport, R1 the key and the octave). */
 static const char *const MOD_LABEL[4][NSLOT] = {
     {"OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "PIT", "GLO", "MONO", "POLY"},
-    {"SEL (NO BUTTON)", "FX", "HOME", "SAVE", "ENV", "LFO", "ARP", "SEQ", "KEY DOWN", "KEY UP"},
+    {"SCL", "FX", "HOME", "SAVE", "ENV", "LFO", "ARP", "SEQ", "KEY DOWN", "KEY UP"},
     {"GLO", "EDIT", "PLAY / STOP", "REC", "", "", "", "", "", ""},
     {"KEY UP", "OCTAVE -", "KEY DOWN", "OCTAVE +", "", "", "", "", "", ""},
 };
@@ -1951,7 +1951,7 @@ static int button_of_key(SDL_Keycode k) {
 /* On MACHINE the pad plays. Without a modifier: the d-pad and face buttons are eight notes of the chosen scale (up C, left D, down E,
  * right F, Y G, B A, A B, X the next C), Select OCT-, Start OCT+, the sticks the four knobs. L1 held: the sticks are master, presets,
  * select and algorithm; the d-pad, faces, Select and Start the ten black-key functions (OP1-OP6, PIT, GLO, MONO, POLY); Fn changes the
- * scale. L2 held: SEL FX HOME SAVE ENV LFO ARP SEQ; Select and Start transpose (my addition: L1's Select and Start are MONO and POLY). R2 held: GLO EDIT PLAY REC. */
+ * scale. L2 held: SCL FX HOME SAVE ENV LFO ARP SEQ; Select and Start transpose (my addition: L1's Select and Start are MONO and POLY). R2 held: GLO EDIT PLAY REC. */
 enum { MOD_NONE, MOD_L1, MOD_L2, MOD_R2 };
 static const struct { const char *name; int n; int semi[8]; } SCALES[] = {
     {"MAJOR", 7, {0, 2, 4, 5, 7, 9, 11}}, {"MINOR", 7, {0, 2, 3, 5, 7, 8, 10}}, {"DORIAN", 7, {0, 2, 3, 5, 7, 9, 10}},
@@ -1974,9 +1974,9 @@ static int note_id_of_degree(int scale, int shift, int deg) {
 static int pad_mod(unsigned mask) {
     return mask >> PAD_L1 & 1 ? MOD_L1 : mask >> PAD_L2 & 1 ? MOD_L2 : mask >> PAD_R2 & 1 ? MOD_R2 : MOD_NONE;
 }
-/* Under a modifier, the FM-1 button a pad button presses (matrix id 0..13), -1 none, -2 a name the FM-1 has no button for. By slot, so the Keymap's swaps carry through. */
+/* Under a modifier, the FM-1 button a pad button presses (matrix id 0..13), -1 none. By slot, so the Keymap's swaps carry through. */
 static int button_of_pad_mod(int mod, int b) {
-    static const int l2[NSLOT] = {-2, 2, 8, 9, 4, 5, 10, 11, -1, -1}, r2[NSLOT] = {7, 6, 12, 13, -1, -1, -1, -1, -1, -1};
+    static const int l2[NSLOT] = {3, 2, 8, 9, 4, 5, 10, 11, -1, -1}, r2[NSLOT] = {7, 6, 12, 13, -1, -1, -1, -1, -1, -1};
     int sl = slot_of(PANEL_MACHINE, b);
     if (sl < 0) return -1;
     return mod == MOD_L2 ? l2[sl] : mod == MOD_R2 ? r2[sl] : -1;
@@ -2055,7 +2055,6 @@ static void pad_machine_press(App *a, int b) {
         if (f >= 0) { id = FM1_KEY_BASE + FUNCTION_KEYS[f]; snprintf(a->msg, sizeof a->msg, "%s", FUNCTION_NAMES[f]); a->msg_style = 0; }
     } else {
         id = button_of_pad_mod(mod, b);
-        if (id == -2) { say(a, 0, "SEL: the FM-1 has no matrix button for it", NULL); id = -1; }
     }
     if (id >= 0 && b < 32) { key_id(a, id, 1); a->pad_sent[b] = id + 1; }
 }
@@ -3699,9 +3698,9 @@ static int selftest(void) {
         for (int sc = 0; sc < NSCALES; sc++) for (int d = 0; d < 8; d++) for (int k = KEY_MIN; k <= KEY_MAX; k++) { int id = note_id_of_degree(sc, k, d); CHECK(id == -1 || (id >= FM1_KEY_BASE && id < 41)); }
         CHECK(!strcmp(key_name(0), "C") && !strcmp(key_name(-1), "B") && !strcmp(key_name(5), "F"));
         CHECK(pad_mod(0) == MOD_NONE && pad_mod(1u << PAD_L1) == MOD_L1 && pad_mod(1u << PAD_L2) == MOD_L2 && pad_mod(1u << PAD_R2) == MOD_R2 && pad_mod(1u << PAD_R1) == MOD_NONE);
-        /* L2: SEL FX HOME SAVE ENV LFO ARP SEQ; R2: GLO EDIT PLAY REC; L1: GLO on X, OP1-OP6 and PIT have no button */
+        /* L2: SCL FX HOME SAVE ENV LFO ARP SEQ; R2: GLO EDIT PLAY REC; L1: GLO on X, OP1-OP6 and PIT have no button */
         CHECK(button_of_pad_mod(MOD_L2, 10) == 2 && button_of_pad_mod(MOD_L2, 9) == 8 && button_of_pad_mod(MOD_L2, 11) == 9 && button_of_pad_mod(MOD_L2, 3) == 4 &&
-              button_of_pad_mod(MOD_L2, 0) == 5 && button_of_pad_mod(MOD_L2, 1) == 10 && button_of_pad_mod(MOD_L2, 2) == 11 && button_of_pad_mod(MOD_L2, 8) == -2);
+              button_of_pad_mod(MOD_L2, 0) == 5 && button_of_pad_mod(MOD_L2, 1) == 10 && button_of_pad_mod(MOD_L2, 2) == 11 && button_of_pad_mod(MOD_L2, 8) == 3);
         CHECK(button_of_pad_mod(MOD_R2, 8) == 7 && button_of_pad_mod(MOD_R2, 10) == 6 && button_of_pad_mod(MOD_R2, 9) == 12 && button_of_pad_mod(MOD_R2, 11) == 13 && button_of_pad_mod(MOD_R2, 2) == -1);
         for (int f = 0; f < 10; f++) CHECK(function_of_pad(f < 8 ? pad_btn[f] : f == 8 ? PAD_SELECT : PAD_START) == f && FUNCTION_KEYS[f] >= 0 && FUNCTION_KEYS[f] < 27);
         CHECK(function_of_pad(4) == -1 && function_of_pad(PAD_FN) == -1);

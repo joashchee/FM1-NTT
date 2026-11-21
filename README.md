@@ -67,12 +67,12 @@ When the firmware has no banks of its own (the bundled ones have none), the prev
 |---|---|---|---|---|
 | left stick x / y | knob 1 / knob 2 | master level / presets | knob 1 / 2 | knob 1 / 2 |
 | right stick x / y | knob 3 / knob 4 | select / algorithm | knob 3 / 4 | knob 3 / 4 |
-| d-pad up left down right | notes 1 to 4 of the scale (C D E F) | OP1 OP2 OP3 OP4 | SEL FX HOME SAVE | GLO EDIT PLAY/STOP REC |
+| d-pad up left down right | notes 1 to 4 of the scale (C D E F) | OP1 OP2 OP3 OP4 | SCL FX HOME SAVE | GLO EDIT PLAY/STOP REC |
 | Y B A X | notes 5 to 8 (G A B C) | OP5 OP6 PIT GLO | ENV LFO ARP SEQ | |
 | Select / Start | OCT- / OCT+ | MONO / POLY | key down / up (the app's own key) | |
 | Fn | next panel | next panel | next panel | next panel |
 
-OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys (they are functions only in EDIT mode, as on the unit: R2+d-pad left is EDIT; otherwise they sound as notes): F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is assumed from the manual's list, not measured). SEL has no matrix button, so it says so and presses nothing. Scales: major, minor,
+OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys (they are functions only in EDIT mode, as on the unit: R2+d-pad left is EDIT; otherwise they sound as notes): F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is assumed from the manual's list, not measured). L2 + up presses SCL (the FM-1's scale button, matrix id 3, from `fm1-emu`'s panel table). Scales: major, minor,
 dorian, mixolydian, both pentatonics, chromatic; the key moves them from C (shown as the key's name). On a keyboard: Z S X D C V ... and Q 2 W 3 E R ... play the 27 keys, F2-F12 and [ ] are the buttons, arrows
 and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return is A, Backspace is B, Insert and Delete are X and Y, Esc closes a menu or a question. The next scale is in the context menu (L2 + R2).
 `docs/ARCHITECTURE.md` section 4 says what each panel does.
