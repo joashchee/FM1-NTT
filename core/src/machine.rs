@@ -572,15 +572,26 @@ mod tests {
 
     /// Whatever the bytes, loading a package is an `Ok` or an `Err`, never a panic, and a booted machine renders without one.
     fn load_and_run(bytes: &[u8]) {
-        let r = std::panic::catch_unwind(|| {
-            if let Ok(mut m) = Machine::from_package(bytes) {
+        // on its own thread with a watchdog: a damaged package must come back (an Error or a boot) within a generous bound, never hang (rule 5);
+        // a panic in the thread arrives as a closed channel
+        let owned = bytes.to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = std::thread::spawn(move || {
+            if let Ok(mut m) = Machine::from_package(&owned) {
                 let mut out = vec![0i16; 256];
                 m.render(&mut out, 20_000);
                 m.key(20, true);
                 m.render(&mut out, 20_000);
             }
+            let _ = tx.send(());
         });
-        assert!(r.is_ok(), "the loader or the machine panicked ({} bytes)", bytes.len());
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(()) => {
+                h.join().unwrap();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("a damaged package hung the loader or the machine ({} bytes)", bytes.len()),
+            Err(_) => panic!("the loader or the machine panicked ({} bytes)", bytes.len()),
+        }
     }
 
     /// Pacing is a legal slower main loop: deterministic, and the sound is the sound (level within 10%), with far fewer

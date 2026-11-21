@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-21 (core): the damaged-package fuzz test runs each case under a 60 s watchdog thread, so a hang fails instead of stalling.
 - 2026-11-21 (host): loading a firmware from FILES runs on a job thread with the progress box; Rec demo and the self-test keep the same-thread load.
 - 2026-11-21 (host): Device report gained a `== mapping ==` section (remapped panels, colour theme, pads seen).
 - Start-up splash: more steps with percent and elapsed time, and a firmware load error shown on it (held until a press or 4 s).
