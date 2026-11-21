@@ -4,7 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
-- 2026-11-21 (host): **pad mapping: L2 + d-pad up presses SCL** (the FM-1's matrix button 3, per `fm1-emu`'s panel table); it was labelled "SEL (no button)" and pressed nothing. README, the Keymap page and the self-test follow.
+- 2026-11-21 (host): **pad mapping: L2 + d-pad up presses SCL** (the FM-1's matrix button 3, per `fm1-emu`'s panel table); it was labelled "SEL (no button)" and pressed nothing. README, the Keymap page and the self-test follow; the README and code no longer call the OP1 to POLY order assumed (it was settled in the emulator 2026-11-18).
 - 2026-11-21 (host): the start-up firmware load (command line) runs on the job thread behind the splash, which keeps drawing with the job's percent and answers the window; a failure still shows on the splash.
 - 2026-11-21 (core): the damaged-package fuzz test runs each case under a 60 s watchdog thread, so a hang fails instead of stalling.
 - 2026-11-21 (host): loading a firmware from FILES runs on a job thread with the progress box; Rec demo and the self-test keep the same-thread load.

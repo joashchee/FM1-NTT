@@ -61,7 +61,7 @@ When the firmware has no banks of its own (the bundled ones have none), the prev
 
 **Ports and instruments** (`docs/PORTING.md`): a firmware is not run on the R36S, it is *ported* to an instrument package (`.fm1i`, data) that native engines play and you can edit. `core/examples/port.rs` makes a level-A port from a firmware with a DX7-style bank (`port FW.fwsc --licence EXPR --model felucca --verify`), `fm1ntt --instrument FILE.fm1i` plays a package (Solo when no firmware is given), and the package keeps its source, SHA-256, licence and verification result. A port of a GPL firmware is that firmware's data: it belongs in the Firmware Pack, never in the MIT app. Untested on an R36S and by ear.
 
-**The pad on MACHINE** (the stick axes and the black-key order are untested on a unit):
+**The pad on MACHINE** (the stick axes and the whole mapping are untested on a unit):
 
 | | none held | **L1** held | **L2** held | **R2** held |
 |---|---|---|---|---|
@@ -72,7 +72,7 @@ When the firmware has no banks of its own (the bundled ones have none), the prev
 | Select / Start | OCT- / OCT+ | MONO / POLY | key down / up (the app's own key) | |
 | Fn | next panel | next panel | next panel | next panel |
 
-OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys (they are functions only in EDIT mode, as on the unit: R2+d-pad left is EDIT; otherwise they sound as notes): F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is assumed from the manual's list, not measured). L2 + up presses SCL (the FM-1's scale button, matrix id 3, from `fm1-emu`'s panel table). Scales: major, minor,
+OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys (they are functions only in EDIT mode, as on the unit: R2+d-pad left is EDIT; otherwise they sound as notes): F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is settled in the emulator with the stock firmware in EDIT: OP1 to OP6, PIT and GLO select as listed; MONO and POLY are by position, as they change no screen; not tried on a unit). L2 + up presses SCL (the FM-1's scale button, matrix id 3, from `fm1-emu`'s panel table). Scales: major, minor,
 dorian, mixolydian, both pentatonics, chromatic; the key moves them from C (shown as the key's name). On a keyboard: Z S X D C V ... and Q 2 W 3 E R ... play the 27 keys, F2-F12 and [ ] are the buttons, arrows
 and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return is A, Backspace is B, Insert and Delete are X and Y, Esc closes a menu or a question. The next scale is in the context menu (L2 + R2).
 `docs/ARCHITECTURE.md` section 4 says what each panel does.

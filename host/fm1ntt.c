@@ -1982,8 +1982,8 @@ static int button_of_pad_mod(int mod, int b) {
     return mod == MOD_L2 ? l2[sl] : mod == MOD_R2 ? r2[sl] : -1;
 }
 /* The manual puts ten functions on the piano's black keys: OP1 to OP6, PIT, GLO, MONO, POLY. They are note keys (F#3, G#3, A#3, C#4, D#4,
- * F#4, G#4, A#4, C#5, D#5: note key indexes 1 3 5 8 10 13 15 17 20 22), in that order; the ORDER is assumed from the manual's list, not
- * measured. The pad under L1 presses them in the d-pad and face order: up left down right Y B A X, then Select and Start. */
+ * F#4, G#4, A#4, C#5, D#5: note key indexes 1 3 5 8 10 13 15 17 20 22), in that order; the order is settled in the emulator (docs/HARDWARE.md, 2026-11-18: OP1-OP6, PIT and GLO
+ * by the stock firmware in EDIT; MONO and POLY by position). The pad under L1 presses them in the d-pad and face order: up left down right Y B A X, then Select and Start. */
 static const int FUNCTION_KEYS[10] = {1, 3, 5, 8, 10, 13, 15, 17, 20, 22};
 static const char *const FUNCTION_NAMES[10] = {"OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "PIT", "GLO", "MONO", "POLY"};
 static int function_of_pad(int b) { return slot_of(PANEL_MACHINE, b); }
