@@ -194,6 +194,14 @@ typedef struct {
 
 enum { JOB_NONE, JOB_REPORT, JOB_BENCH, JOB_LOAD };
 static void job_start(App *a, int kind);
+/* The window's first size on a desktop: a whole multiple of the 640 x 480 canvas. req 1..8 is the person's (--scale N or FM1NTT_SCALE), 0 is automatic: the largest that
+ * fits the usable screen with room for the title bar. A small screen (the R36S's 640 x 480) always gives 1. */
+static int win_scale(int usable_w, int usable_h, int req) {
+    if (req >= 1) return req > 8 ? 8 : req;
+    int n = 1;
+    while (n < 8 && (n + 1) * PX_W <= usable_w && (n + 1) * PX_H + 48 <= usable_h) n++;
+    return n;
+}
 static void scale_next(App *a);
 static int job_pct(const App *a);
 static void rain_still(App *a);
@@ -3833,6 +3841,7 @@ static int selftest(void) {
     setenv("FM1NTT_BUNDLED", nob, 1);                                         /* none, for the user-folder tests */
     setenv("FM1NTT_PACK", nob, 1);
     scan_files(&a);
+    CHECK(win_scale(640, 480, 0) == 1 && win_scale(1280, 800, 0) == 1 && win_scale(1440, 900, 0) == 1 && win_scale(1920, 1080, 0) == 2 && win_scale(3840, 2160, 0) == 4 && win_scale(100, 100, 0) == 1 && win_scale(9999, 9999, 0) == 8 && win_scale(640, 480, 3) == 3 && win_scale(640, 480, 99) == 8);   /* the desktop window's first size: a whole multiple, never past the screen */
     CHECK(a.nfiles == 3 && !strcasecmp(a.files[0], "A.FWSC") && !strcasecmp(a.files[1], "b.bin") && !strcasecmp(a.files[2], "empty.fwsc"));
     {   /* the person's own recordings and slots: listed last, A plays or restores, Y deletes after a question */
         char rd[300], sd[300], wp[340], sp[340], f2[340];
@@ -4622,7 +4631,7 @@ int main(int argc, char **argv) {
     self_exe_init(argv[0]);
     int do_show = 0, show_jit = 0;
     const char *show_out = NULL;
-    int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, pace_opt = PACE_AUTO;
+    int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, scale_opt = getenv("FM1NTT_SCALE") ? atoi(getenv("FM1NTT_SCALE")) : 0, pace_opt = PACE_AUTO;
     const char *inst_opt = NULL;
     double seconds = 1.0;
     uint32_t entry = FM1_ENTRY_FELUCCA;
@@ -4642,6 +4651,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--pace") && i + 1 < argc) { const char *v = argv[++i]; pace_opt = !strcmp(v, "auto") ? PACE_AUTO : atoi(v) % 4; }
         else if (!strcmp(argv[i], "--no-jit")) no_jit = 1;
         else if (!strcmp(argv[i], "--pin")) pin_opt = 1;
+        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) { const char *v = argv[++i]; scale_opt = !strcmp(v, "auto") ? 0 : atoi(v); }
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
         else if (!strcmp(argv[i], "--showcase")) do_show = 1;
         else if (!strcmp(argv[i], "--jit")) show_jit = 1;
@@ -4737,7 +4747,10 @@ int main(int argc, char **argv) {
     }
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK) != 0) { fprintf(stderr, "fm1ntt: SDL_Init: %s\n", SDL_GetError()); return 1; }
-    SDL_Window *win = SDL_CreateWindow("FM1-NTT", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, PX_W, PX_H, SDL_WINDOW_RESIZABLE);
+    SDL_Rect usable = {0, 0, PX_W, PX_H};
+    if (SDL_GetDisplayUsableBounds(0, &usable) != 0) { usable.w = PX_W; usable.h = PX_H; }
+    int wsc = win_scale(usable.w, usable.h, scale_opt);
+    SDL_Window *win = SDL_CreateWindow("FM1-NTT", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, PX_W * wsc, PX_H * wsc, SDL_WINDOW_RESIZABLE);
     SDL_Renderer *ren = win ? SDL_CreateRenderer(win, -1, 0) : NULL;
     if (!ren) { fprintf(stderr, "fm1ntt: video: %s\n", SDL_GetError()); return 1; }
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");

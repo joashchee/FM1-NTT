@@ -74,7 +74,7 @@ When the firmware has no banks of its own (the bundled ones have none), the prev
 
 OP1 to OP6, PIT, GLO, MONO and POLY are **black piano keys** on the FM-1 (the manual), so L1 presses those note keys (they are functions only in EDIT mode, as on the unit: R2+d-pad left is EDIT; otherwise they sound as notes): F#3 G#3 A#3 C#4 D#4 F#4 G#4 A#4 C#5 D#5 in that order (the order is settled in the emulator with the stock firmware in EDIT: OP1 to OP6, PIT and GLO select as listed; MONO and POLY are by position, as they change no screen; not tried on a unit). L2 + up presses SCL (the FM-1's scale button, matrix id 3, from `fm1-emu`'s panel table). Scales: major, minor,
 dorian, mixolydian, both pentatonics, chromatic; the key moves them from C (shown as the key's name). On a keyboard: Z S X D C V ... and Q 2 W 3 E R ... play the 27 keys, F2-F12 and [ ] are the buttons, arrows
-and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return is A, Backspace is B, Insert and Delete are X and Y, Esc closes a menu or a question. The next scale is in the context menu (L2 + R2).
+and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return is A, Backspace is B, Insert and Delete are X and Y, Esc closes a menu or a question. The next scale is in the context menu (L2 + R2). **Window size on a desktop:** the window opens at the largest whole multiple of 640 x 480 that fits the screen (an R36S gets 1x); `--scale N` (1 to 8) or `FM1NTT_SCALE=N` sets it, `--scale auto` goes back; the window can still be resized (whole multiples only).
 `docs/ARCHITECTURE.md` section 4 says what each panel does.
 
 ## Hero features (the Rec demo's checklist)
