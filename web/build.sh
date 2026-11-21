@@ -21,9 +21,17 @@ sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -
 
 echo "== building the core for wasm32"
 # cd into the crate: its .cargo/config.toml (export and grow the function table) is found from the working directory
+# Panic locations and debug strings embed source paths, and this module is published (fm1tastik): remap every path that can contain the builder's home
+# directory (the last matching rule wins, so the broad one is first). CARGO_ENCODED_RUSTFLAGS replaces the crate's .cargo/config.toml rustflags, so the
+# link args are repeated here and must match it. The module is checked below: it must contain neither $HOME nor $REPO.
+US=$'\x1f'
+export CARGO_ENCODED_RUSTFLAGS="-Clink-args=--export-table --growable-table${US}--remap-path-prefix=$HOME=/home/build${US}--remap-path-prefix=$REPO=/fm1ntt"
 (cd "$REPO/web/wasm" || exit 1; CARGO_TARGET_DIR="$REPO/build/web-wasm" cargo build --release --locked --target wasm32-unknown-unknown -q 2>&1 | grep -E "^(error|warning: unused)" -A8 || true)
 built="$REPO/build/web-wasm/wasm32-unknown-unknown/release/fm1ntt_web.wasm"
 [ -f "$built" ] || die "the build produced no module (run it without -q to see why: cd web/wasm && cargo build --release --target wasm32-unknown-unknown)"
+
+echo "== checking the module for the builder's paths"
+if grep -a -q -F -e "$HOME" -e "$REPO" "$built"; then die "the module still contains $HOME or $REPO (a source path leaked: see the remap in this script)"; fi
 
 echo "== checking the module's contract"
 node - "$built" <<'JS' || die "the module does not match what web/public/fm1ntt.js expects"
