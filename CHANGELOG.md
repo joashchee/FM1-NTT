@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-21 (host): the start-up firmware load (command line) runs on the job thread behind the splash, which keeps drawing with the job's percent and answers the window; a failure still shows on the splash.
 - 2026-11-21 (core): the damaged-package fuzz test runs each case under a 60 s watchdog thread, so a hang fails instead of stalling.
 - 2026-11-21 (host): loading a firmware from FILES runs on a job thread with the progress box; Rec demo and the self-test keep the same-thread load.
 - 2026-11-21 (host): Device report gained a `== mapping ==` section (remapped panels, colour theme, pads seen).

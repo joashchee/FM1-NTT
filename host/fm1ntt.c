@@ -4693,7 +4693,17 @@ int main(int argc, char **argv) {
     pv_set(&a, NULL, 0);                        /* the built-in voices until a firmware brings its own */
     if (path) {
         SPLASH("LOADING THE FIRMWARE", 60);
-        if (load_firmware(&a, path, raw, entry) != 0) {
+        /* read and booted on the job thread: the splash keeps drawing (and the window answering) with the job's own percent */
+        load_start(&a, path, raw, entry);
+        while (a.job) {
+            SDL_Event se;
+            while (SDL_PollEvent(&se)) if (se.type == SDL_QUIT) a.quit = 1;
+            if (job_poll(&a)) break;
+            int jp = job_pct(&a);
+            SPLASH("LOADING THE FIRMWARE", 60 + (jp < 0 ? 0 : jp > 100 ? 100 : jp) * 20 / 100);
+            SDL_Delay(30);
+        }
+        if (!fm1ntt_loaded(a.m)) {
             a.panel = PANEL_FILES;
             /* the error stays on the splash until a press or 4 s, never a blank or frozen window (rule 8) */
             draw_splash_x(canvas, "LOADING THE FIRMWARE FAILED", 60, (int)(SDL_GetTicks() - t_start), a.msg);
