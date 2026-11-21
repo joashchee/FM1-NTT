@@ -66,7 +66,7 @@
 #define NTOOLS 15
 #define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
-enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT };
+enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT, CF_DELETE };
 enum { MK_NONE, MK_MAIN, MK_CTX, MK_ABOUT, MK_THEME, MK_KEYMAP };     /* the overlay menus (r3i6nos rule 17): the main menu, the context menu, About, the colour theme picker */
 
 typedef struct {
@@ -99,6 +99,8 @@ typedef struct {
     char files[PX_MAX_FILES][PX_NAME];
     char fpaths[PX_MAX_FILES][300];     /* each entry's full path */
     char fbundled[PX_MAX_FILES];        /* 1 when it ships with the app (bundled-firmware/) */
+    char fkind[PX_MAX_FILES];           /* 0 a firmware or instrument, 1 a recording (.wav in recordings), 2 a flash slot (slotN.flash in slots): the person's own, last in the list */
+    char del_name[PX_NAME], del_path[300];   /* the file a delete question is about */
     int nfiles, file_sel;
     uint32_t fbc[240 * 240];            /* the firmware's screen as last converted, with the LCD revision and emulated time it was taken at */
     uint32_t fb_rev;
@@ -196,6 +198,7 @@ static void scale_next(App *a);
 static int job_pct(const App *a);
 static void rain_still(App *a);
 static int files_press(App *a, int act);
+static int files_user_press(App *a, int act);
 static void ui_showcase(App *a, UiState *u);
 static void player_stop(App *a);
 
@@ -660,10 +663,29 @@ static void pack_dir(char *out, size_t n) {
     first_fw_dir(out, n, "FM1NTT_PACK", rel, abs);
 }
 
-typedef struct { char name[PX_NAME]; char path[300]; int bundled; } FileEnt;   /* bundled: 0 yours, 1 bundled (permissive), 2 the copyleft pack */
+typedef struct { char name[PX_NAME]; char path[300]; int bundled; int kind; } FileEnt;   /* bundled: 0 yours, 1 bundled (permissive), 2 the copyleft pack */
 static int cmp_ents(const void *x, const void *y) {
     const FileEnt *a = x, *b = y;
-    return a->bundled != b->bundled ? a->bundled - b->bundled : strcasecmp(a->name, b->name);
+    int ga = a->bundled ? a->bundled : a->kind ? 3 + a->kind : 0, gb = b->bundled ? b->bundled : b->kind ? 3 + b->kind : 0;   /* firmware yours, bundled, pack, then recordings and slots */
+    return ga != gb ? ga - gb : strcasecmp(a->name, b->name);
+}
+/* The person's own saved files: recordings (kind 1, .wav) and flash slots (kind 2, slotN.flash with N 1 to 4). */
+static int add_user(FileEnt *out, int n, const char *dir, int kind) {
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && (e = readdir(d)) && n < PX_MAX_FILES) {
+        char p[600];
+        const char *nm = e->d_name;
+        if (nm[0] == '.') continue;
+        int ok = kind == 1 ? has_ext(nm, ".wav") : (!strncmp(nm, "slot", 4) && nm[4] >= '1' && nm[4] <= '4' && !strcmp(nm + 5, ".flash"));
+        snprintf(p, sizeof p, "%s/%s", dir, nm);
+        if (!ok || !is_file(p) || strlen(nm) >= PX_NAME - 4 || strlen(p) >= sizeof out->path) continue;
+        snprintf(out[n].name, PX_NAME, "%s", nm);
+        snprintf(out[n].path, sizeof out[n].path, "%s", p);
+        out[n].bundled = 0; out[n++].kind = kind;
+    }
+    if (d) closedir(d);
+    return n;
 }
 static int add_dir(FileEnt *out, int n, const char *dir, int bundled) {
     DIR *d = opendir(dir);
@@ -707,12 +729,14 @@ static void scan_files(App *a) {
     n = add_dir(ents, n, idir, 0);
     if (bdir[0]) n = add_dir(ents, n, bdir, 1);
     if (pdir[0]) n = add_dir(ents, n, pdir, 2);
+    { char ud[300]; sub_path(ud, sizeof ud, "recordings", NULL); n = add_user(ents, n, ud, 1); sub_path(ud, sizeof ud, "slots", NULL); n = add_user(ents, n, ud, 2); }
     qsort(ents, (size_t)n, sizeof *ents, cmp_ents);
     a->nfiles = n;
     for (int i = 0; i < n; i++) {
         snprintf(a->files[i], PX_NAME, "%s", ents[i].name);
         snprintf(a->fpaths[i], sizeof a->fpaths[i], "%s", ents[i].path);
         a->fbundled[i] = (char)ents[i].bundled;
+        a->fkind[i] = (char)ents[i].kind;
     }
     free(ents);
     memset(a->fsha, 0, sizeof a->fsha);                         /* the files may have changed: hash them again when asked */
@@ -1262,6 +1286,7 @@ static void act(App *a, int act) {
             a->confirm = CF_NONE;
             if (k == CF_RESET) do_reset(a);
             else if (k == CF_RESTORE) restore_flash(a);
+            else if (k == CF_DELETE) { if (unlink(a->del_path) == 0) { say(a, 1, "Deleted %s", a->del_name); scan_files(a); } else say(a, 3, "Cannot delete %s", a->del_name); }
             else if (k == CF_QUIT) { rec_stop(a); a->quit = 1; }
         } else if (act == A_BACK) { a->confirm = CF_NONE; say(a, 0, "Cancelled", NULL); }
         return;
@@ -1271,6 +1296,7 @@ static void act(App *a, int act) {
     if (act == A_START && a->panel != PANEL_SOUND && a->panel != PANEL_MIDI) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); return; }
     switch (a->panel) {
     case PANEL_FILES:
+        if (files_user_press(a, act)) break;                                /* a recording or a slot of the person's: A plays or restores it, Y deletes it */
         if (files_press(a, act)) break;                                     /* the firmware's page, when it is open or A opens it */
         if (act == A_HOME) a->file_sel = 0;
         else if (act == A_END) a->file_sel = rows - 1;
@@ -1374,7 +1400,7 @@ static const char *btn_name(int b) {
 static const char *const SLOT_LABEL[PANEL_COUNT][NSLOT] = {
     /*        UP             LEFT            DOWN            RIGHT          Y                  B                 A                X                  SELECT           START */
     /*MACHINE*/ {"NOTE 1 (C)", "NOTE 2 (D)", "NOTE 3 (E)", "NOTE 4 (F)", "NOTE 5 (G)", "NOTE 6 (A)", "NOTE 7 (B)", "NOTE 8 (C)", "OCTAVE -", "OCTAVE +"},
-    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "", "MAKE OR STOP A DEMO", "BACK FROM A PAGE", "OPEN, LOAD", "RESCAN, PLAY DEMO", "", "PAUSE"},
+    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "", "MAKE OR STOP A DEMO, DELETE", "BACK FROM A PAGE", "OPEN, LOAD, PLAY", "RESCAN, PLAY DEMO", "", "PAUSE"},
     /*CPU*/     {"OTHER CORE", "OTHER CORE", "OTHER CORE", "OTHER CORE", "", "", "", "", "", "PAUSE"},
     /*MEMORY*/  {"ONE ROW UP", "PREVIOUS REGION", "ONE ROW DOWN", "NEXT REGION", "64 KIB FORTH", "", "", "64 KIB BACK", "", "PAUSE"},
     /*CONSOLE*/ {"", "", "", "", "", "", "", "", "", "PAUSE"},
@@ -1517,7 +1543,7 @@ enum { CX_PANIC = 1, CX_PAUSE, CX_SCALE, CX_SHOT, CX_ACT = 0x100 };
 typedef struct { int panel; const char *label; int code; } CtxItem;
 static const CtxItem CTX[] = {
     {PANEL_MACHINE, "PANIC: ALL NOTES OFF", CX_PANIC}, {PANEL_MACHINE, "PAUSE / RESUME", CX_PAUSE}, {PANEL_MACHINE, "NEXT SCALE", CX_SCALE},
-    {PANEL_FILES, "LOAD THE SELECTED FILE", CX_ACT | A_OK}, {PANEL_FILES, "RESCAN THE FOLDER", CX_ACT | A_X},
+    {PANEL_FILES, "LOAD THE SELECTED FILE", CX_ACT | A_OK}, {PANEL_FILES, "RESCAN THE FOLDER", CX_ACT | A_X}, {PANEL_FILES, "DELETE A RECORDING OR SLOT", CX_ACT | A_Y},
     {PANEL_CPU, "SWITCH CPU", CX_ACT | A_UP},
     {PANEL_MEMORY, "NEXT REGION", CX_ACT | A_RIGHT}, {PANEL_MEMORY, "BACK TO THE TOP", CX_ACT | A_HOME}, {PANEL_MEMORY, "NEXT PAGE", CX_ACT | A_PGDN},
     {PANEL_MIDI, "PANIC: ALL NOTES OFF", CX_ACT | A_BACK},
@@ -1813,7 +1839,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     snprintf(u->file_dir, sizeof u->file_dir, "%s", dir);
     snprintf(u->bundled_dir, sizeof u->bundled_dir, "%s", a->bdir);
     snprintf(u->pack_dir, sizeof u->pack_dir, "%s", a->pdir);
-    for (int i = 0; i < a->nfiles; i++) snprintf(u->files[i], PX_NAME, "%c%c %s", !strcmp(a->fpaths[i], a->fw_path) && a->fw_path[0] ? '*' : ' ', a->fbundled[i] == 2 ? 'G' : a->fbundled[i] ? 'B' : ' ', a->files[i]);
+    for (int i = 0; i < a->nfiles; i++) snprintf(u->files[i], PX_NAME, "%c%c %s", !strcmp(a->fpaths[i], a->fw_path) && a->fw_path[0] ? '*' : ' ', a->fbundled[i] == 2 ? 'G' : a->fbundled[i] ? 'B' : a->fkind[i] == 1 ? 'R' : a->fkind[i] == 2 ? 'S' : ' ', a->files[i]);
     u->nfiles = a->nfiles;
     u->file_sel = a->file_sel;
     u->cpu_sel = a->cpu_sel;
@@ -1878,6 +1904,7 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     u->tool_sel = a->tool_sel;
     if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried, and the saved settings are forgotten.");
     else if (a->confirm == CF_RESTORE) snprintf(u->confirm, sizeof u->confirm, "Restore slot %d into the flash? The machine reboots.", a->slot);
+    else if (a->confirm == CF_DELETE) snprintf(u->confirm, sizeof u->confirm, "Delete %.40s? It cannot be brought back.", a->del_name);
     else if (a->confirm == CF_QUIT) snprintf(u->confirm, sizeof u->confirm, "A recording is running. Stop it, save it and quit?");
     ui_showcase(a, u);
 }
@@ -2419,6 +2446,26 @@ static int player_start(App *a, int i) {
     unlock(a);
     say(a, 0, "Playing the demo: any key stops it", NULL);
     return 0;
+}
+/* A recording plays through the demo player's sound path (no picture); a slot is restored after a question; Y deletes either after a question. 1 when handled. */
+static int files_user_press(App *a, int act) {
+    int i = a->file_sel;
+    if (a->info_on || i < 0 || i >= a->nfiles) return 0;
+    int kind = a->fkind[i];
+    if (act == A_Y && !a->fbundled[i] && !kind && !a->info_on) { say(a, 2, "Only your recordings and slots are deleted here", NULL); return 1; }
+    if (!kind) return 0;
+    if (act == A_Y) { snprintf(a->del_name, sizeof a->del_name, "%s", a->files[i]); snprintf(a->del_path, sizeof a->del_path, "%s", a->fpaths[i]); a->confirm = CF_DELETE; return 1; }
+    if (act != A_OK) return 0;
+    if (kind == 2) { a->slot = a->files[i][4] - '0'; a->confirm = CF_RESTORE; return 1; }
+    int16_t *pcm = NULL; size_t fr = 0;
+    if (show_wav_read(a->fpaths[i], &pcm, &fr) != 0) { free(pcm); say(a, 3, "That recording cannot be played (this app's own 44.1 kHz stereo WAVs up to 3 minutes)", NULL); return 1; }
+    player_stop(a);
+    snprintf(a->pl.dir, sizeof a->pl.dir, "%s", ""); snprintf(a->pl.name, sizeof a->pl.name, "%s", a->files[i]);
+    snprintf(a->pl.tier, sizeof a->pl.tier, "%s", "YOUR RECORDING"); a->pl.licence[0] = 0;
+    a->pl.nf = 0; a->pl.total_ms = (int)(fr * 1000 / FM1_SAMPLE_RATE); a->pl.cur = -1; a->pl.pos = 0;
+    lock(a); a->pl.pcm = pcm; a->pl.frames = fr; a->pl.on = 1; unlock(a);
+    say(a, 0, "Playing the recording: any key stops it", NULL);
+    return 1;
 }
 /* A press on FILES: the page when it is open, or A opening it on a firmware. 1 when handled. */
 static int files_press(App *a, int act) {
@@ -3787,6 +3834,35 @@ static int selftest(void) {
     setenv("FM1NTT_PACK", nob, 1);
     scan_files(&a);
     CHECK(a.nfiles == 3 && !strcasecmp(a.files[0], "A.FWSC") && !strcasecmp(a.files[1], "b.bin") && !strcasecmp(a.files[2], "empty.fwsc"));
+    {   /* the person's own recordings and slots: listed last, A plays or restores, Y deletes after a question */
+        char rd[300], sd[300], wp[340], sp[340], f2[340];
+        sub_path(rd, sizeof rd, "recordings", NULL); mkdir_p(rd); sub_path(sd, sizeof sd, "slots", NULL); mkdir_p(sd);
+        uint8_t wb[44 + 8000]; memset(wb, 0, sizeof wb); wav_header(wb, 2000);
+        snprintf(wp, sizeof wp, "%s/rec-test.wav", rd); write_atomic(wp, wb, sizeof wb);
+        snprintf(f2, sizeof f2, "%s/bad.wav", rd); write_atomic(f2, junk, 100);
+        snprintf(sp, sizeof sp, "%s/slot2.flash", sd); write_atomic(sp, junk, 64);
+        snprintf(f2, sizeof f2, "%s/slot9.flash", sd); write_atomic(f2, junk, 64);                   /* not a slot: not listed */
+        scan_files(&a);
+        CHECK(a.nfiles == 6 && a.fkind[0] == 0 && a.fkind[3] == 1 && a.fkind[4] == 1 && a.fkind[5] == 2 && !strcasecmp(a.files[3], "bad.wav") && !strcasecmp(a.files[5], "slot2.flash"));
+        a.panel = PANEL_FILES;
+        a.file_sel = 4; act(&a, A_OK);
+        CHECK(a.pl.on && a.pl.frames == 2000 && !strcmp(a.pl.tier, "YOUR RECORDING") && a.msg_style == 0);   /* a recording plays */
+        player_stop(&a);
+        a.file_sel = 3; act(&a, A_OK);
+        CHECK(!a.pl.on && a.msg_style == 3);                                                          /* a damaged one says so */
+        a.file_sel = 5; act(&a, A_OK);
+        CHECK(a.confirm == CF_RESTORE && a.slot == 2); act(&a, A_BACK); CHECK(a.confirm == CF_NONE);   /* a slot asks before restoring */
+        a.file_sel = 0; act(&a, A_Y);
+        CHECK(a.confirm == CF_NONE && a.msg_style == 2 && is_file(wp));                                /* a firmware is not deleted from here */
+        a.file_sel = 4; act(&a, A_Y);
+        CHECK(a.confirm == CF_DELETE && is_file(wp)); act(&a, A_BACK); CHECK(a.confirm == CF_NONE && is_file(wp));   /* B keeps it */
+        act(&a, A_Y); CHECK(a.confirm == CF_DELETE); act(&a, A_OK);
+        CHECK(!is_file(wp) && a.nfiles == 5 && a.msg_style == 1);                                       /* A deletes it and the list follows */
+        snprintf(wp, sizeof wp, "%s/bad.wav", rd); unlink(wp); unlink(sp); snprintf(f2, sizeof f2, "%s/slot9.flash", sd); unlink(f2);
+        scan_files(&a);
+        CHECK(a.nfiles == 3);
+        a.slot = 1;
+    }
     a.panel = PANEL_FILES;
     a.file_sel = 0; act(&a, A_OK);
     CHECK(a.info_on && a.info_i == 0 && !fm1ntt_loaded(a.m));                  /* A opens the firmware's page first: nothing is loaded yet */
