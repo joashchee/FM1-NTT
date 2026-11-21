@@ -78,7 +78,7 @@ Read 2026-11-20: `../r3i6nos/CLAUDE.md` (new rules 15, 16, 17), `docs/r3i6nos-ma
 - [x] **Chords:** L1 + Fn first panel, R1 + Fn the panel before (a history); L1 or R1 with L2 + R2 does nothing (reserved).
 - [x] **R1 held = increase** on FILES, MEMORY, MONITOR, TOOLS and the menus (Page up and down, Home and End); **the right stick as the d-pad** off MACHINE; **L3 and R3** reply that the app has no virtual mouse or keyboard.
 - [x] **Colour theme** (`px_themes`: Midnight, High Contrast, Light, Mono Green; `theme.txt` in the app's folder): every theme's text pairs pass 4.5:1, checked by the self-test. Rec demo, the Device report and screenshots use whatever theme is on (decided).
-- [x] **A page to try every input on the unit:** the Keymap's test page (replaces a separate mapping page). [ ] The Device report has no `== mapping ==` section.
+- [x] **A page to try every input on the unit:** the Keymap's test page (replaces a separate mapping page). [x] The Device report has a `== mapping ==` section (2026-11-21: panels remapped, colour theme, pads seen; self-test checks it is there; not run on a unit).
 - [ ] **TOOLS still has Device report, Rec demo, Benchmark and Quit rows** next to the main menu's. They work and the tests and the Rec demo tour address them by row; remove the duplicates once the maintainer agrees (it renumbers `tool_sel` in the tests and `host/demo.h`).
 
 **Decisions (the maintainer, 2026-11-20, on the conflicts the first pass listed) and what was built for each:**

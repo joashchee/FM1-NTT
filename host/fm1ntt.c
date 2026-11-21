@@ -4184,7 +4184,7 @@ static int selftest(void) {
         if (rt) {
             char *txt = malloc(rn + 1); memcpy(txt, rt, rn); txt[rn] = 0;
             CHECK(strstr(txt, "# r3i6nos device report\napp: FM1-NTT ") == txt && strstr(txt, "\n# NEEDS: "));
-            const char *secs[] = {"== system ==", "== card ==", "== core ==", "== speed ==", "== screen ==", "== sound ==", "== files ==", "== power ==", "== memory ==", "== summary =="};
+            const char *secs[] = {"== system ==", "== card ==", "== core ==", "== speed ==", "== screen ==", "== sound ==", "== files ==", "== mapping ==", "== power ==", "== memory ==", "== summary =="};
             for (unsigned k = 0; k < sizeof secs / sizeof *secs; k++) CHECK(strstr(txt, secs[k]) != NULL);
             CHECK(strstr(txt, "FM-1 reference: the FM-1 itself runs about 12 h") != NULL);   /* the real machine's figures, to read the unit's against */
             CHECK(strstr(txt, "boot a machine:") && strstr(txt, "nop loop, interpreter:") && strstr(txt, "\nPASS ") != NULL);

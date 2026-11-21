@@ -686,6 +686,22 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     }
     if (a) a->paused = paused;
 
+    r3_report_section(&r, "mapping");           /* the input mapping the person ran with: which panels have their own buttons, and the theme (r3i6nos rule 17) */
+    {
+        if (!g_bind_ready) keymap_reset_all();
+        char names[300] = "";
+        int changed = 0;
+        for (int p = 0; p < PANEL_COUNT; p++) {
+            if (!memcmp(g_bind[p], DEF_BTN, sizeof DEF_BTN)) continue;
+            changed++;
+            size_t l = strlen(names);
+            snprintf(names + l, sizeof names - l, "%s%s", l ? ", " : "", PX_PANEL_NAMES[p]);
+        }
+        r3_report_line(&r, R3_INFO, "keymap", "%d of %d panels remapped%s%s", changed, (int)PANEL_COUNT, changed ? ": " : " (every panel on the defaults)", names);
+        r3_report_line(&r, R3_INFO, "colour theme", "%s", px_themes[px_theme_now].name);
+        r3_report_line(&r, R3_INFO, "pads", "%d seen; press every button in the Keymap's test page and read the result there", SDL_NumJoysticks());
+    }
+
     report_progress("power", 8, steps, r.path);
     r3_report_power_section(&r);
     R3PowerResult idle, work;
