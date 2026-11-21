@@ -148,6 +148,8 @@ typedef struct {
     int fw_raw;
     SDL_atomic_t callbacks;
     volatile int idle_probe;            /* the Device report's idle power window: the report's own job no longer keeps the sound device awake, so the window measures what an idle app costs */
+    SDL_AudioSpec aspec;                /* what the device was opened with (callback NULL: there is none), to open it again after it slept */
+    uint32_t reopen_ms;                 /* when a failed reopen may be tried again */
     int audio_asleep;                   /* the sound device is paused because nothing can make a sound and nobody has touched the unit (audio_wanted) */
     SDL_Thread *job;
     SDL_atomic_t job_done;
@@ -1008,10 +1010,17 @@ static int audio_wanted(const App *a, uint32_t now) {
     return fm1ntt_loaded(a->m) && !a->paused;
 }
 static void audio_sleep_tick(App *a, uint32_t now) {
-    if (!a->dev) return;
+    if (!a->aspec.callback) return;                                      /* no sound device in this run */
     int want = audio_wanted(a, now);
-    if (want && a->audio_asleep) { SDL_PauseAudioDevice(a->dev, 0); a->audio_asleep = 0; }
-    else if (!want && !a->audio_asleep) { SDL_PauseAudioDevice(a->dev, 1); a->audio_asleep = 1; }
+    if (want && a->audio_asleep) {                                        /* wake: open it again (SDL keeps waking 86 times a second to play silence while merely paused) */
+        if (now - a->reopen_ms < 1000 && a->reopen_ms) return;
+        SDL_AudioSpec got;
+        a->dev = SDL_OpenAudioDevice(NULL, 0, &a->aspec, &got, 0);
+        a->reopen_ms = now ? now : 1;
+        if (a->dev) { SDL_PauseAudioDevice(a->dev, 0); a->audio_asleep = 0; a->reopen_ms = 0; }
+    } else if (!want && !a->audio_asleep && a->dev) {                     /* sleep: close it (the unit, 2026-11-21: a paused device still woke the audio thread 89 times a second) */
+        SDL_CloseAudioDevice(a->dev); a->dev = 0; a->audio_asleep = 1;
+    }
 }
 static void audio_cb(void *ud, Uint8 *stream, int len) {
     App *a = ud;
@@ -4005,6 +4014,18 @@ static int selftest(void) {
     a.want_demo = 1; CHECK(audio_wanted(&a, 99000)); a.want_demo = 0;
     a.job = (SDL_Thread *)&a; CHECK(audio_wanted(&a, 99000));                        /* a job holds it awake (the report counts callbacks) ... */
     a.idle_probe = 1; CHECK(!audio_wanted(&a, 99000)); a.idle_probe = 0; a.job = NULL;   /* ... except in the report's idle window */
+    /* asleep means closed (a paused SDL device still wakes its thread at the buffer rate), and the next wanted tick opens it again */
+    { SDL_AudioSpec w = {.freq = FM1_SAMPLE_RATE, .format = AUDIO_S16SYS, .channels = 2, .samples = AUDIO_FRAMES, .callback = audio_cb, .userdata = &a}, g;
+      int ainit = SDL_InitSubSystem(SDL_INIT_AUDIO) == 0;
+      if (ainit && (a.dev = SDL_OpenAudioDevice(NULL, 0, &w, &g, 0)) != 0) {
+          a.aspec = w; a.last_input_ms = 1000;
+          audio_sleep_tick(&a, 1000 + AUDIO_QUIET_MS);  CHECK(a.audio_asleep && a.dev == 0);
+          audio_sleep_tick(&a, 1000 + AUDIO_QUIET_MS + 1); CHECK(a.audio_asleep && a.dev == 0);
+          a.last_input_ms = 1000 + AUDIO_QUIET_MS + 2;
+          audio_sleep_tick(&a, 1000 + AUDIO_QUIET_MS + 3); CHECK(!a.audio_asleep && a.dev != 0);
+          SDL_CloseAudioDevice(a.dev); a.dev = 0; a.audio_asleep = 0; memset(&a.aspec, 0, sizeof a.aspec);
+      } else fprintf(stderr, "  sound sleep: no audio device here, skipped\n");
+      if (ainit) SDL_QuitSubSystem(SDL_INIT_AUDIO); }
     CHECK(!audio_wanted(&a, 99000));
     /* the firmware folder: the right extensions, sorted, a garbage file refused with a reason, a raw file booted */
     char fdir[300], p[400];
@@ -4953,7 +4974,8 @@ int main(int argc, char **argv) {
     SDL_AudioSpec want = {.freq = FM1_SAMPLE_RATE, .format = AUDIO_S16SYS, .channels = 2, .samples = AUDIO_FRAMES, .callback = audio_cb, .userdata = &a}, got;
     a.dev = SDL_OpenAudioDevice(NULL, 0, &want, &got, 0);
     if (!a.dev) say(&a, 2, "No sound device: %s", SDL_GetError());
-    else if (!(getenv("FM1NTT_NO_EMU_THREAD") && *getenv("FM1NTT_NO_EMU_THREAD"))) emu_start(&a);       /* the machine renders on its own thread; FM1NTT_NO_EMU_THREAD=1 puts it back in the callback */
+    else a.aspec = want;
+    if (a.dev && !(getenv("FM1NTT_NO_EMU_THREAD") && *getenv("FM1NTT_NO_EMU_THREAD"))) emu_start(&a);       /* the machine renders on its own thread; FM1NTT_NO_EMU_THREAD=1 puts it back in the callback */
     a.mq_live = a.dev != 0;
     SPLASH("READING THE FIRMWARE FOLDER", 40);
     scan_files(&a);
