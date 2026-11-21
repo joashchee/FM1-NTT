@@ -709,7 +709,12 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     r3_report_power_section(&r);
     R3PowerResult idle, work;
     memset(&work, 0, sizeof work);
+    int fw_running = a && fm1ntt_loaded(a->m) && !a->paused;
+    if (fw_running) { a->paused = 1; r3_report_line(&r, R3_INFO, "idle", "the firmware is paused for the idle window, so it measures the app waiting, not the firmware; the working window below runs it"); }
+    if (a) a->idle_probe = 1;                    /* the report's own job must not keep the sound device awake: the person's last press was a minute ago, so it sleeps in this window */
     r3_report_power_idle(&r, r3_report_power_seconds(30), NULL, NULL, &idle);        /* the app open and waiting: its own main loop blocks on input */
+    if (a) a->idle_probe = 0;
+    if (fw_running) a->paused = 0;
     if (a && fm1ntt_loaded(a->m) && !a->paused) {
         R3Power p;
         r3_power_begin(&p);

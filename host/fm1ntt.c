@@ -130,6 +130,7 @@ typedef struct {
     double ips, speed;
     /* shared with the audio callback */
     volatile int paused, level_l, level_r, peak_l, peak_r;
+    int short_run;                      /* buffers in a row the emulation thread could not fill (the callback's own count; it mutes the firmware without waiting for the main loop) */
     volatile int fw_mute;               /* the firmware's sound is muted: the emulation is too slow to fill the audio buffers, and a late callback rattles (speed_tick sets it) */
     int16_t scope[PX_SCOPE];
     /* recorder */
@@ -146,6 +147,7 @@ typedef struct {
     char fw_path[300];
     int fw_raw;
     SDL_atomic_t callbacks;
+    volatile int idle_probe;            /* the Device report's idle power window: the report's own job no longer keeps the sound device awake, so the window measures what an idle app costs */
     int audio_asleep;                   /* the sound device is paused because nothing can make a sound and nobody has touched the unit (audio_wanted) */
     SDL_Thread *job;
     SDL_atomic_t job_done;
@@ -190,6 +192,7 @@ typedef struct {
     uint32_t budget;                    /* instructions a buffer may spend (0: MAX_INSNS_PER_BUFFER); Rec demo's self-test lowers it */
     /* the emulation thread (emu_start): it renders the machine into a ring, and the audio callback only reads the ring (NULL emu: the callback renders, as before) */
     SDL_Thread *emu;
+    SDL_atomic_t ui_wait;               /* callers of lock() waiting for the machine: the emulation thread gives way to them (a mutex is not fair, and a thread that never waits starved the UI) */
     SDL_mutex *mx;                      /* the machine: taken by the thread for each chunk it renders and by lock() for anything the UI does to it (always before the audio lock) */
     SDL_sem *emu_sem;                   /* the callback posts it when it has taken audio, so the thread wakes when there is room and sleeps when there is not */
     int16_t *emu_ring;                  /* EMU_RING stereo frames */
@@ -223,7 +226,7 @@ static void say(App *a, int style, const char *fmt, const char *arg) {
 }
 /* The machine's mutex first, then the audio device's: the UI waits for the emulation thread's chunk (a few ms) without holding the callback up, and the callback
  * never takes the mutex, so the two orders cannot meet. Both are recursive. */
-static void lock(App *a) { if (a->mx) SDL_LockMutex(a->mx); if (a->dev) SDL_LockAudioDevice(a->dev); }
+static void lock(App *a) { if (a->mx) { SDL_AtomicAdd(&a->ui_wait, 1); SDL_LockMutex(a->mx); SDL_AtomicAdd(&a->ui_wait, -1); } if (a->dev) SDL_LockAudioDevice(a->dev); }
 static void unlock(App *a) { if (a->dev) SDL_UnlockAudioDevice(a->dev); if (a->mx) SDL_UnlockMutex(a->mx); }
 
 /* ---- the SOUND preview ------------------------------------------------------------------------------------------------- */
@@ -848,6 +851,7 @@ static void rec_stop(App *a) {
 #define EMU_CHUNK 256                   /* frames rendered per lock of the machine, so the UI waits at most one chunk */
 #define EMU_TARGET (2 * AUDIO_FRAMES)   /* frames kept ahead of the device */
 static void emu_discard(App *a) { SDL_AtomicSet(&a->ring_r, SDL_AtomicGet(&a->ring_w)); a->emu_primed = 0; }
+#define SHORT_MUTE_RUN 6                /* buffers (70 ms) that came up short in a row */
 static void emu_pull(App *a, int16_t *out, size_t frames) {
     unsigned w = (unsigned)SDL_AtomicGet(&a->ring_w), r = (unsigned)SDL_AtomicGet(&a->ring_r);
     size_t have = (size_t)(w - r), n = have < frames ? have : frames;
@@ -855,6 +859,8 @@ static void emu_pull(App *a, int16_t *out, size_t frames) {
     for (size_t i = 0; i < n; i++) { size_t at = ((size_t)r + i) & (EMU_RING - 1); out[2 * i] = a->emu_ring[2 * at]; out[2 * i + 1] = a->emu_ring[2 * at + 1]; }
     SDL_MemoryBarrierRelease();
     SDL_AtomicSet(&a->ring_r, (int)(r + (unsigned)n));
+    if (n == frames) a->short_run = 0;
+    else if (a->emu_loaded && ++a->short_run >= SHORT_MUTE_RUN) a->fw_mute = 1;   /* the unit at 0.25x: a few real milliseconds of sound then silence is a click every buffer. Mute here, at once: the speed check that mutes needs the main loop, which may be waiting for the machine. The speed check lifts it above 0.7x. */
     if (n < frames) {
         memset(out + 2 * n, 0, (frames - n) * 4);
         if (a->emu_primed) SDL_AtomicAdd(&a->late_cb, 1);          /* the machine did not keep up: a gap of silence, once per buffer */
@@ -892,6 +898,9 @@ static int emu_main(void *ud) {
             }
         }
         SDL_UnlockMutex(a->mx);
+        /* Too slow to fill the ring (0.25x on the unit), the thread never waits and would take the mutex again at once, so the UI starved: no frame, no input, no
+         * speed check to mute the rattle (the unit, 2026-11-21). While anyone waits for the machine it stands aside, up to 20 ms a turn. */
+        for (int k = 0; k < 20 && SDL_AtomicGet(&a->ui_wait) > 0 && !a->emu_quit; k++) SDL_Delay(1);
         if (wait) SDL_SemWaitTimeout(a->emu_sem, wait);
     }
     return 0;
@@ -995,7 +1004,7 @@ static int g_quiet_logs;                /* the self-test keeps report text off s
 #define AUDIO_QUIET_MS 10000u
 static int audio_wanted(const App *a, uint32_t now) {
     if (now - a->last_input_ms < AUDIO_QUIET_MS) return 1;
-    if (a->pv_on || a->pl.on || a->rec_on || a->rec || a->job || a->want_demo || a->sw_pid) return 1;
+    if (a->pv_on || a->pl.on || a->rec_on || a->rec || (a->job && !a->idle_probe) || a->want_demo || a->sw_pid) return 1;
     return fm1ntt_loaded(a->m) && !a->paused;
 }
 static void audio_sleep_tick(App *a, uint32_t now) {
@@ -3577,8 +3586,17 @@ static int emu_selftest(const char *fw) {
         ECHECK((unsigned)(SDL_AtomicGet(&t->ring_w) - SDL_AtomicGet(&t->ring_r)) >= EMU_TARGET);                   /* and it refilled after the take */
     }
     lock(t); ECHECK(fm1ntt_loaded(t->m)); unlock(t);                                                            /* the UI's way in */
+    /* the thread never waits while the ring is drained as fast as it fills (what a unit at 0.25x looks like): the UI must still get the machine promptly each time */
+    { Uint32 worst = 0; for (int i = 0; i < 60; i++) { audio_step(t, out, AUDIO_FRAMES); Uint32 t0 = SDL_GetTicks(); lock(t); unlock(t); Uint32 d = SDL_GetTicks() - t0; if (d > worst) worst = d; }
+      if (worst >= 100) fprintf(stderr, "  emulation thread: the UI waited %u ms for the machine\n", (unsigned)worst);
+      ECHECK(worst < 100); }
     /* a callback that comes faster than the thread can fill: it never waits, and the missing frames are silence */
     { Uint32 t0 = SDL_GetTicks(); for (int i = 0; i < 40; i++) audio_step(t, out, AUDIO_FRAMES); ECHECK(SDL_GetTicks() - t0 < 1000); }
+    /* an empty ring buffer after buffer: the callback mutes the firmware by itself (the main loop may be waiting), and a full one lifts nothing by itself */
+    { App u; memset(&u, 0, sizeof u); u.emu_sem = SDL_CreateSemaphore(0); u.emu_loaded = 1;
+      for (int i = 0; i < SHORT_MUTE_RUN - 1; i++) emu_pull(&u, out, AUDIO_FRAMES);
+      ECHECK(!u.fw_mute); emu_pull(&u, out, AUDIO_FRAMES); ECHECK(u.fw_mute);
+      SDL_DestroySemaphore(u.emu_sem); }
     /* pause: the callback is silent and the ring is dropped, so nothing stale plays on resume */
     t->paused = 1;
     for (int i = 0; i < 3; i++) SDL_Delay(30);
@@ -3985,6 +4003,8 @@ static int selftest(void) {
     a.rec_on = 1; CHECK(audio_wanted(&a, 99000)); a.rec_on = 0;
     a.sw_pid = 1; CHECK(audio_wanted(&a, 99000)); a.sw_pid = 0;
     a.want_demo = 1; CHECK(audio_wanted(&a, 99000)); a.want_demo = 0;
+    a.job = (SDL_Thread *)&a; CHECK(audio_wanted(&a, 99000));                        /* a job holds it awake (the report counts callbacks) ... */
+    a.idle_probe = 1; CHECK(!audio_wanted(&a, 99000)); a.idle_probe = 0; a.job = NULL;   /* ... except in the report's idle window */
     CHECK(!audio_wanted(&a, 99000));
     /* the firmware folder: the right extensions, sorted, a garbage file refused with a reason, a raw file booted */
     char fdir[300], p[400];
