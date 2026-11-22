@@ -95,3 +95,22 @@ what a function is for tagged high, medium or low).
   - **Open:** the one-core or two-core question, the flash chip revisions, and the effects chain's algorithms (named, not described).
 
 Source: https://github.com/AL-255/FM-1-RE (`docs/architecture.md`, WTFPL).
+
+## From FM-1 Studio's README and the maintainer (2026-11-22; README only, no source read)
+
+FM-1 Studio (https://github.com/TimSamshuijzen/fm1studiocom, fm1studio.com) is **GPL-3.0**, so it is a black box (`CLAUDE.md` rule 3): only its public README and the
+maintainer's note were used, none of `src/`, `firmware/` or `examples/`. **Nothing here was run, and none of it is verified against a unit by this project.**
+
+- **Chip revisions:** the README says it is tested on one FM-1 with **the newer chip, B36014**, and **m-bootloader 2.4-395e6cc**. This is the first named chip revision, and the first named
+  bootloader version, in our notes; it bears on the open "flash chip revisions" question above (the kit says newer units differ). It does not say what differs.
+- **The processor** is named there as JieLi **pi32v2**, as above.
+- **A third-party compiler for it:** **pi32v2-llvm** (Julius Vitkauskas, https://github.com/jvitkauskas/pi32v2-llvm), LLVM with a pi32v2 target, described by its author as **experimental**;
+  FM-1 Studio builds clang 23.1.5 and ld.lld from commit `60b0340f47083cf088903030a9b55d8a65525dde` (release `pi32v2-23.1.5-5`) to make `.fwsc` packages. Its licence is Apache-2.0 with LLVM
+  exceptions (per FM-1 Studio's README; **not read from the project itself**). This answers "JieLi's toolchain is clang-based (unconfirmed for pi32v2)" above in part: JieLi's own is clang 4.0.1 for
+  pi32v2, a binary from JieLi's server with no source (README's words).
+- **The programming model it names:** programs are **C, `float` only, with the FM-1's C library**, written against an `fm1.h` API; FM-1 Studio **simulates that API** and does not emulate the CPUs
+  ("code that works in this simulator does not guarantee it will work on a real FM-1").
+- **Install path:** a `.fwsc` package is written to the unit **over USB MIDI by fm1-base's installer** (Chrome or Edge, Web MIDI); fm1-base is a separate project, not read here.
+- **A firmware gallery:** it loads source of open-source FM-1 firmware from GitHub. Candidates only: each would need its own licence file read (`CLAUDE.md` rule 2).
+
+Source: https://github.com/TimSamshuijzen/fm1studiocom (README).
