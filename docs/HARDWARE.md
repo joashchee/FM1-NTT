@@ -106,7 +106,7 @@ maintainer's note were used, none of `src/`, `firmware/` or `examples/`. **Nothi
 - **The processor** is named there as JieLi **pi32v2**, as above.
 - **A third-party compiler for it:** **pi32v2-llvm** (Julius Vitkauskas, https://github.com/jvitkauskas/pi32v2-llvm), LLVM with a pi32v2 target, described by its author as **experimental**;
   FM-1 Studio builds clang 23.1.5 and ld.lld from commit `60b0340f47083cf088903030a9b55d8a65525dde` (release `pi32v2-23.1.5-5`) to make `.fwsc` packages. Its licence is Apache-2.0 with LLVM
-  exceptions (per FM-1 Studio's README; **not read from the project itself**). This answers "JieLi's toolchain is clang-based (unconfirmed for pi32v2)" above in part: JieLi's own is clang 4.0.1 for
+  exceptions (**read from the project's own `LICENSE.TXT`, 2026-11-22**). This answers "JieLi's toolchain is clang-based (unconfirmed for pi32v2)" above in part: JieLi's own is clang 4.0.1 for
   pi32v2, a binary from JieLi's server with no source (README's words).
 - **The programming model it names:** programs are **C, `float` only, with the FM-1's C library**, written against an `fm1.h` API; FM-1 Studio **simulates that API** and does not emulate the CPUs
   ("code that works in this simulator does not guarantee it will work on a real FM-1").
@@ -114,3 +114,9 @@ maintainer's note were used, none of `src/`, `firmware/` or `examples/`. **Nothi
 - **A firmware gallery:** it loads source of open-source FM-1 firmware from GitHub. Candidates only: each would need its own licence file read (`CLAUDE.md` rule 2).
 
 Source: https://github.com/TimSamshuijzen/fm1studiocom (README).
+
+### The author's other projects (read 2026-11-22; the READMEs, docs and licences, not their source; **nothing was run except the compiler**)
+
+- **pi32v2-llvm, tried:** release `pi32v2-23.1.6-2` compiled a float C function for `-mcpu=r3` (CPUs offered: `ac791n`, `generic`, `r3`), and the vendored `fm1-isa` decoded all 12 resulting instructions (16, 32 and 48 bits) with the same lengths and forms as its objdump. A single small function, not a sweep.
+- **pi32v2-isa** (https://github.com/jvitkauskas/pi32v2-isa; code MIT-0, docs and table CC0-1.0): an open instruction table with an assembler, linker and objdump. Its README says every word JieLi's objdump decodes is in it, **1085 of 1171 forms are confirmed on a real AC791N**, and it builds m-bootloader, fm1-base, Felucca and SLOOP with the LLVM toolchain and runs them on a unit (`-mcpu=r3`, FPU `fprev1`). Its sources are public notes, black-box observation of JieLi's free but closed toolchain, and runs on the chip; it says no JieLi code is in it. Gaps it lists: `callns.r`, `gotoss.xl` and `btbclr` effects, and that the `??`-condition forms reset the chip. `docs/CPU1.md` there covers the second core, which bears on the one-core or two-core question above (not read).
+- **m-bootloader** (https://github.com/jvitkauskas/m-bootloader, MIT): an open bootloader for the FM-1 and SMK-37 Pro (firmware check, recovery menu, download mode, USB MIDI install and backup). Whether FM-1 Studio's "m-bootloader 2.4-395e6cc" is this project's release is **not checked**.
