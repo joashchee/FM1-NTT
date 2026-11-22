@@ -8,6 +8,8 @@
  *   fm1ntt --bench [--seconds N] [--fw FILE]   the Benchmark report to $BASE/bench/ (compare with scripts/bench-compare.py)
  *   fm1ntt --rec-demo [--features a,b] [--no-video] [FIRMWARE]   Rec demo (rule 11) to $BASE/Demo/
  *   fm1ntt --flash-part NAME ...       (or FM1NTT_FLASH_PART=NAME) the FM-1's flash chip a firmware sees: p25q80 (the stock Puya, default) or uc25hq80 (units sold since late 2026)
+ *   fm1ntt --cpu1-survives ...         a fault on the second core stops that core alone and core 0 goes on (the default halts the machine, which shows the emulator's gaps)
+ *   fm1ntt --flaky-core1 RATE[,SEED]   the second core's RAM loads misread with probability RATE (0 to 1), as on some FM-1 units: firmwares' one-core fallback can be tried
  *   fm1ntt --pin ...                   (or FM1NTT_PIN=1) the emulating (audio) thread on the last core, the main thread on the first: off by default, to be measured
  *   fm1ntt --reduced-motion ...        (or FM1NTT_REDUCED_MOTION=1) the MONITOR panel's data rain is a still page
  *   fm1ntt --version
@@ -120,6 +122,7 @@ typedef struct {
     uint32_t fl_rev, fl_t;
     char fl_sha[65];                      /* the loaded package's SHA-256, the name of its remembered flash */
     int jit_pref;                       /* the native JIT, applied to each firmware as it boots */
+    int cpu1_survives; double flaky_rate; unsigned long long flaky_seed;   /* --cpu1-survives, --flaky-core1: the second core's fault policy, applied to each firmware as it boots */
     char flash_part[16];                /* --flash-part: the FM-1's flash chip by name ("" keeps the core's default, the stock Puya), applied to each firmware as it boots */
     int pace_mode, pace_lvl;            /* main-loop pacing: 0 OFF, 1..3 fixed, PACE_AUTO follows the speed; pace_lvl is the level AUTO has reached */
     uint32_t mem_off;
@@ -531,6 +534,8 @@ static void speed_reset(App *a) { a->sp_real0 = SDL_GetTicks(); a->sp_insns0 = 0
 /* The JIT, pacing and flash-chip settings onto the machine (a load makes a new one, with the defaults). Callers hold no lock. */
 static void apply_prefs(App *a) {
     lock(a);
+    if (a->cpu1_survives) fm1ntt_cpu1_survives(a->m, 1);
+    if (a->flaky_rate > 0) fm1ntt_flaky_core1(a->m, a->flaky_rate, a->flaky_seed);
     if (a->flash_part[0]) fm1ntt_flash_part(a->m, a->flash_part);   /* before the firmware's first run: it reads the chip's id at start-up */
     fm1ntt_jit(a->m, a->jit_pref && fm1ntt_jit_available());
     fm1ntt_pace(a->m, a->pace_mode == PACE_AUTO ? a->pace_lvl : a->pace_mode);
@@ -4195,6 +4200,9 @@ static int selftest(void) {
     snprintf(a.flash_part, sizeof a.flash_part, "stock"); apply_prefs(&a); CHECK(fm1ntt_flash_jedec(a.m) == 0x856014);
     a.flash_part[0] = 0;
     CHECK(fm1ntt_flash_part_known("new") && !fm1ntt_flash_part_known("winbond"));
+    { unsigned long long l = 0, mr = 0; CHECK(fm1ntt_flaky_core1_stats(a.m, &l, &mr) == 0);          /* a good second core unless asked */
+      a.flaky_rate = 0.5; a.flaky_seed = 9; a.cpu1_survives = 1; apply_prefs(&a); CHECK(fm1ntt_flaky_core1_stats(a.m, &l, &mr) == 1);
+      a.flaky_rate = 0; a.cpu1_survives = 0; fm1ntt_flaky_core1(a.m, 0, 1); fm1ntt_cpu1_survives(a.m, 0); CHECK(fm1ntt_flaky_core1_stats(a.m, &l, &mr) == 0); }
     act(&a, A_OK); CHECK(a.pace_mode == PACE_AUTO && fm1ntt_pace_level(a.m) == 0);   /* AUTO starts exact */
     a.speed = 0.5; pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 2 && fm1ntt_pace_level(a.m) == 2);   /* behind: up a level a second */
     a.speed = 1.5; pace_auto(&a); CHECK(a.pace_lvl == 2);                                                 /* keeping up: stays */
@@ -4839,7 +4847,8 @@ int main(int argc, char **argv) {
     self_exe_init(argv[0]);
     int do_show = 0, show_jit = 0;
     const char *show_out = NULL;
-    const char *flash_opt = NULL;
+    const char *flash_opt = NULL, *flaky_opt = NULL;
+    int cpu1_opt = 0;
     int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, scale_opt = getenv("FM1NTT_SCALE") ? atoi(getenv("FM1NTT_SCALE")) : 0, pace_opt = PACE_AUTO;
     const char *inst_opt = NULL;
     double seconds = 1.0;
@@ -4861,6 +4870,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-jit")) no_jit = 1;
         else if (!strcmp(argv[i], "--pin")) pin_opt = 1;
         else if (!strcmp(argv[i], "--flash-part") && i + 1 < argc) flash_opt = argv[++i];
+        else if (!strcmp(argv[i], "--cpu1-survives")) cpu1_opt = 1;
+        else if (!strcmp(argv[i], "--flaky-core1") && i + 1 < argc) flaky_opt = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) { const char *v = argv[++i]; scale_opt = !strcmp(v, "auto") ? 0 : atoi(v); }
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
         else if (!strcmp(argv[i], "--showcase")) do_show = 1;
@@ -4887,6 +4898,12 @@ int main(int argc, char **argv) {
     a.jit_pref = !no_jit && !getenv("FM1NTT_NO_JIT");     /* on wherever the CPU supports it: the interpreter cannot keep up on a handheld */
     a.pace_mode = pace_opt;
     if (!flash_opt && getenv("FM1NTT_FLASH_PART") && *getenv("FM1NTT_FLASH_PART")) flash_opt = getenv("FM1NTT_FLASH_PART");
+    a.cpu1_survives = cpu1_opt || (getenv("FM1NTT_CPU1_SURVIVES") && *getenv("FM1NTT_CPU1_SURVIVES") && strcmp(getenv("FM1NTT_CPU1_SURVIVES"), "0"));
+    if (flaky_opt) {
+        char *end = NULL; double r = strtod(flaky_opt, &end); unsigned long long sd = 1;
+        if (end == flaky_opt || !(r >= 0 && r <= 1) || (*end && (*end != ',' || (sd = strtoull(end + 1, &end, 10), *end)))) { fprintf(stderr, "fm1ntt: --flaky-core1 wants RATE[,SEED], RATE from 0 to 1 (got \"%s\")\n", flaky_opt); return 2; }
+        a.flaky_rate = r; a.flaky_seed = sd;
+    }
     if (flash_opt) {
         if (!fm1ntt_flash_part_known(flash_opt)) { fprintf(stderr, "fm1ntt: unknown flash chip \"%s\" (p25q80 or uc25hq80)\n", flash_opt); return 2; }
         snprintf(a.flash_part, sizeof a.flash_part, "%s", flash_opt);

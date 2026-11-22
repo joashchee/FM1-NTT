@@ -214,6 +214,60 @@ pub unsafe extern "C" fn fm1ntt_flash_part(h: *mut Handle, name: *const c_char) 
     })
 }
 
+/// What a fault on the second core does: 0 (the default) halts the machine, nonzero stops that core alone and lets core 0 go on, as the chip's would. Kept across a reset.
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_cpu1_survives(h: *mut Handle, on: c_int) {
+    with(h, (), |m| m.set_cpu1_survives(on != 0));
+}
+
+/// Why the second core stopped (with `fm1ntt_cpu1_survives` on): the text's length, copied into `out` (NUL-terminated when it fits in `cap`); 0 when it has not faulted.
+///
+/// # Safety
+/// `h` is live or null; `out` has room for `cap` bytes or is null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_cpu1_fault(h: *mut Handle, out: *mut u8, cap: usize) -> usize {
+    with(h, 0, |m| {
+        let Some(t) = m.cpu1_fault() else { return 0 };
+        if !out.is_null() && cap > t.len() {
+            std::ptr::copy_nonoverlapping(t.as_ptr(), out, t.len());
+            *out.add(t.len()) = 0;
+        }
+        t.len()
+    })
+}
+
+/// A flaky second core: each RAM load it makes misreads with probability `rate` (0 to 1; 0 is a good unit), from `seed`. Kept across a reset.
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_flaky_core1(h: *mut Handle, rate: f64, seed: u64) {
+    with(h, (), |m| m.set_flaky_core1(rate, seed));
+}
+
+/// The second core's RAM loads and misreads so far into `loads` and `misreads` (either may be null). 1 when it is flaky, 0 when not (or no machine); the counts are left alone then.
+///
+/// # Safety
+/// `h` is live or null; the pointers are null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_flaky_core1_stats(h: *mut Handle, loads: *mut u64, misreads: *mut u64) -> c_int {
+    with(h, 0, |m| match m.flaky_core1_stats() {
+        Some((l, r)) => {
+            if let Some(p) = loads.as_mut() {
+                *p = l;
+            }
+            if let Some(p) = misreads.as_mut() {
+                *p = r;
+            }
+            1
+        }
+        None => 0,
+    })
+}
+
 /// 1 when `name` is one `fm1ntt_flash_part` knows, 0 when not (or NULL). Needs no machine, so a host can check an option before anything loads.
 ///
 /// # Safety
@@ -565,6 +619,19 @@ mod tests {
             assert_eq!(fm1ntt_flash_part(h, c"stock".as_ptr()), 1);
             assert_eq!(fm1ntt_flash_jedec(h), 0x85_60_14);
             assert_eq!(fm1ntt_flash_jedec(std::ptr::null_mut()), 0);
+            // the second core: a good unit by default; the settings come back after a reset; null is safe
+            let (mut l, mut r) = (9u64, 9u64);
+            assert_eq!((fm1ntt_flaky_core1_stats(h, &mut l, &mut r), l, r), (0, 9, 9));
+            fm1ntt_flaky_core1(h, 0.5, 3);
+            assert_eq!((fm1ntt_flaky_core1_stats(h, &mut l, &mut r), l, r), (1, 0, 0));
+            fm1ntt_cpu1_survives(h, 1);
+            fm1ntt_reset(h);
+            assert_eq!(fm1ntt_flaky_core1_stats(h, std::ptr::null_mut(), std::ptr::null_mut()), 1);
+            let mut why = [0u8; 8];
+            assert_eq!(fm1ntt_cpu1_fault(h, why.as_mut_ptr(), why.len()), 0, "no fault yet");
+            fm1ntt_flaky_core1(std::ptr::null_mut(), 1.0, 1);
+            fm1ntt_cpu1_survives(std::ptr::null_mut(), 1);
+            assert_eq!((fm1ntt_cpu1_fault(std::ptr::null_mut(), why.as_mut_ptr(), why.len()), fm1ntt_flaky_core1_stats(std::ptr::null_mut(), &mut l, &mut r)), (0, 0));
             assert!(CStr::from_ptr(fm1ntt_board(h)).to_bytes().is_empty());
             let (mut q, mut d) = (9u64, 9u64);
             fm1ntt_midi_stats(h, &mut q, &mut d);

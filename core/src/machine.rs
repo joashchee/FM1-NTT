@@ -59,6 +59,21 @@ pub const CLOCK_MHZ: u64 = DEFAULT_MHZ;
 
 pub use fm1_soc::FlashPart;
 
+/// The settings of the emulated unit that a reset must keep (the machine is rebuilt from the firmware, these are put back): the FM-1's flash chip, what a fault on the
+/// second core does, and whether that core misreads its RAM now and then.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Opts {
+    flash_part: FlashPart,
+    /// a fault on core 1 stops that core alone and core 0 goes on (the chip's behaviour), instead of halting the machine
+    cpu1_survives: bool,
+    /// core 1's RAM loads misread with this probability, from this seed (`None`: a good unit)
+    flaky_core1: Option<(f64, u64)>,
+}
+
+impl Opts {
+    const DEFAULT: Opts = Opts { flash_part: FlashPart::P25q80, cpu1_survives: false, flaky_core1: None };
+}
+
 pub struct Machine {
     boot: Boot,
     cpu: Cpu,
@@ -76,18 +91,20 @@ pub struct Machine {
     identity: String,
     /// main-loop pacing, 0 (off) to `PACE_LEVELS`: see `set_pace`
     pace: u8,
-    /// the FM-1's flash part (its JEDEC id), kept across `reset`: see `set_flash_part`
-    flash_part: FlashPart,
+    /// the unit's settings, kept across `reset`: see `set_flash_part`, `set_cpu1_survives`, `set_flaky_core1`
+    opts: Opts,
     /// where the queued MIDI of `render_events` falls in a buffer (evq.rs)
     clock: crate::evq::Clock,
 }
 
 impl Machine {
-    fn build(boot: &Boot, part: FlashPart) -> (Soc, Cpu) {
+    fn build(boot: &Boot, opts: Opts) -> (Soc, Cpu) {
         let mut soc = Soc::new(RAM_SIZE, boot.image.clone());
         soc.periph.hz = DEFAULT_MHZ * 1_000_000;
         soc.periph.skip_idle = true;
-        soc.set_flash_part(part);
+        soc.set_flash_part(opts.flash_part);
+        soc.cpu1_survives = opts.cpu1_survives;
+        soc.flaky_core1 = opts.flaky_core1.map(|(rate, seed)| fm1_soc::flaky::FlakyCore1::new(rate, seed));
         let mut cpu = Cpu::new(boot.entry);
         cpu.user = true; // the SPL hands cpu0 over in user mode
         let params = RAM_BASE + 0x7fc00;
@@ -101,14 +118,14 @@ impl Machine {
 
     fn boot(image: Vec<u8>, entry: u32, stock: Option<(Vec<u8>, fm1_soc::Board)>, identity: String) -> Machine {
         let boot = Boot { image, entry, stock };
-        let (soc, cpu) = Machine::build(&boot, FlashPart::P25q80);
-        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0, flash_part: FlashPart::P25q80, clock: crate::evq::Clock::new() }
+        let (soc, cpu) = Machine::build(&boot, Opts::DEFAULT);
+        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0, opts: Opts::DEFAULT, clock: crate::evq::Clock::new() }
     }
 
     /// Back to power-on with the same firmware: the emulated flash returns to what the package carried, and the inputs are released.
     pub fn reset(&mut self) {
         let jit = self.cpu.jit_on;
-        let (soc, mut cpu) = Machine::build(&self.boot, self.flash_part);
+        let (soc, mut cpu) = Machine::build(&self.boot, self.opts);
         cpu.jit_on = jit;
         self.soc = soc;
         self.cpu = cpu;
@@ -291,11 +308,37 @@ impl Machine {
     /// SMK-37 Pro keeps its own part (EB 60 14) whatever this says. Whether a real firmware behaves differently with it is only known
     /// where a test says so; nothing here was compared with a real unit.
     pub fn set_flash_part(&mut self, part: FlashPart) {
-        self.flash_part = part;
+        self.opts.flash_part = part;
         self.soc.set_flash_part(part);
     }
     pub fn flash_part(&self) -> FlashPart {
-        self.flash_part
+        self.opts.flash_part
+    }
+
+    /// What a fault on the second core does. Off (the default): the machine halts, which shows the emulator's own gaps (an instruction it cannot decode or run). On: that core
+    /// stops alone, held until a reset, and core 0 goes on, as the chip's would (felucca-bsp's fallback to one core is built for it); `cpu1_fault` then says where. Kept across `reset`.
+    pub fn set_cpu1_survives(&mut self, on: bool) {
+        self.opts.cpu1_survives = on;
+        self.soc.cpu1_survives = on;
+    }
+    pub fn cpu1_survives(&self) -> bool {
+        self.opts.cpu1_survives
+    }
+    /// Why the second core stopped, when it faulted with `set_cpu1_survives` on.
+    pub fn cpu1_fault(&self) -> Option<&str> {
+        self.soc.cpu1_fault.as_deref()
+    }
+
+    /// A flaky second core, as on some FM-1 units (Jangada's measurement): each RAM load core 1 makes misreads with probability `rate` (0 to 1; 0 or NaN is a good unit), drawn
+    /// from `seed`, so a run repeats. Firmwares that use core 1 check each job and fall back to one core; this makes that fallback testable. Kept across `reset`.
+    pub fn set_flaky_core1(&mut self, rate: f64, seed: u64) {
+        let on = rate > 0.0;
+        self.opts.flaky_core1 = on.then(|| (rate.min(1.0), seed));
+        self.soc.flaky_core1 = self.opts.flaky_core1.map(|(r, s)| fm1_soc::flaky::FlakyCore1::new(r, s));
+    }
+    /// Core 1's RAM loads so far and how many of them misread, when it is flaky.
+    pub fn flaky_core1_stats(&self) -> Option<(u64, u64)> {
+        self.soc.flaky_core1.as_ref().map(|f| (f.loads, f.misreads))
     }
 
     /// The three JEDEC bytes the emulated flash answers to command 9F with now (manufacturer, type, capacity).
@@ -547,6 +590,7 @@ mod tests {
         let mut m = Machine::from_raw(vec![0x11; 4096], 0x0200_0120).unwrap();
         assert_eq!(m.flash_part(), FlashPart::P25q80);
         assert_eq!(m.flash_jedec(), [0x85, 0x60, 0x14]);
+        assert!(!m.cpu1_survives() && m.cpu1_fault().is_none() && m.flaky_core1_stats().is_none(), "a good unit unless asked");
         m.set_flash_part(FlashPart::Uc25hq80);
         assert_eq!(m.flash_jedec(), [0xb3, 0x60, 0x14]);
         m.reset();
@@ -554,6 +598,50 @@ mod tests {
         m.set_flash_part(FlashPart::P25q80);
         m.reset();
         assert_eq!(m.flash_jedec(), [0x85, 0x60, 0x14]);
+    }
+
+    /// A firmware's word load at the last bytes of RAM used to panic in the vendored `Ram` (a release build of the C API aborts on a panic): rule 5. Assembled with pi32v2-isa's assembler:
+    /// `r1 = 0x01CFFFFE; r0 = [r1+0]; r2 = 0x600D; r3 = 0x01C30000; [r3+0] = r2; 1: goto 1b`. Bytes past the end read as 0 (an invention, VENDORED.md): the program runs on to its marker.
+    #[test]
+    fn a_word_access_across_the_end_of_ram_is_not_a_crash() {
+        let hex = "c1fffeffcf01106042e00d60c3ff0000c301b260f79f";
+        let code: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        for jit in [false, true] {
+            let mut img = vec![0u8; 0x120];
+            img.extend(&code);
+            img.resize(4096, 0);
+            let mut m = Machine::from_raw(img, 0x0200_0120).unwrap();
+            m.set_jit(jit);
+            let mut out = vec![0i16; 128];
+            for _ in 0..10 {
+                m.render(&mut out, 20_000);
+            }
+            let mut b = [0u8; 4];
+            m.read_mem(Region::Ram, 0x30000, &mut b);
+            assert!(!m.halted(), "jit {jit}: the load halted the machine");
+            assert_eq!(u32::from_le_bytes(b), 0x600D, "jit {jit}: the program ran on to its marker");
+        }
+    }
+
+    #[test]
+    fn the_second_cores_settings_survive_a_reset() {
+        let mut m = Machine::from_raw(vec![0x11; 4096], 0x0200_0120).unwrap();
+        m.set_cpu1_survives(true);
+        m.set_flaky_core1(0.25, 7);
+        assert!(m.cpu1_survives());
+        assert_eq!(m.flaky_core1_stats(), Some((0, 0)));
+        m.reset();
+        assert!(m.cpu1_survives(), "kept across a reset");
+        assert_eq!(m.flaky_core1_stats(), Some((0, 0)), "still flaky, the counts start again");
+        m.set_flaky_core1(0.0, 7);
+        assert!(m.flaky_core1_stats().is_none(), "a rate of 0 is a good unit");
+        m.set_flaky_core1(f64::NAN, 7);
+        assert!(m.flaky_core1_stats().is_none(), "NaN too");
+        m.set_flaky_core1(5.0, 7);
+        assert_eq!(m.flaky_core1_stats(), Some((0, 0)), "a rate above 1 is clamped, not refused");
+        m.set_cpu1_survives(false);
+        m.reset();
+        assert!(!m.cpu1_survives());
     }
 
     /// A real firmware (the bundled UNTRUE STEP) must still run after its flash is saved, the machine reset and the flash restored.

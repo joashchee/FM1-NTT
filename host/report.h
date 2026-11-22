@@ -730,6 +730,15 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
         snprintf(t, sizeof t, "the emulated flash answers as JEDEC %02X %02X %02X (%s)", j >> 16, (j >> 8) & 255, j & 255, j == 0x856014 ? "Puya P25Q80, the stock part" : j == 0xB36014 ? "UC25HQ80, the part in units sold since late 2026" : j == 0xEB6014 ? "the SMK-37 Pro's part" : "another part");
         r3_report_line(&r, R3_INFO, "flash chip", t);
     }
+    if (a && fm1ntt_loaded(a->m)) {   /* the second core's policy, and what it did */
+        unsigned long long l = 0, mr = 0; char t[300], why[160] = "";
+        size_t n = fm1ntt_cpu1_fault(a->m, (unsigned char *)why, sizeof why);
+        int flaky = fm1ntt_flaky_core1_stats(a->m, &l, &mr);
+        size_t k = (size_t)snprintf(t, sizeof t, "a fault on core 1 %s", a->cpu1_survives ? "stops that core alone (core 0 goes on)" : "halts the machine");
+        if (flaky && k < sizeof t) k += (size_t)snprintf(t + k, sizeof t - k, "; its RAM loads are flaky (%llu misreads in %llu loads)", mr, l);
+        if (n && n < sizeof why && k < sizeof t) snprintf(t + k, sizeof t - k, "; core 1 stopped: %s", why);
+        r3_report_line(&r, R3_INFO, "core 1", t);
+    }
     r3_report_section(&r, "memory");
     report_progress("memory", 9, steps, r.path);
     r3_report_memory(&r);

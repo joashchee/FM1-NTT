@@ -43,3 +43,13 @@ fixed bits match, which is not the same as JieLi's objdump showing it; its `-mcp
 ## Using the toolchain
 
 The same author's LLVM fork (pi32v2-llvm, Apache-2.0 with LLVM exceptions) built a float function whose 12 instructions `fm1-isa` decoded alike (`docs/HARDWARE.md`). Downloaded binaries stay out of the repo and run only in a container.
+
+## Which of the `pi32v2-isa`-only forms do the firmwares contain? (2026-11-22)
+
+**A static sweep, not an execution trace** (`scripts/isa-crosscheck/src/bin/sweep.rs`, `sweep_side.py`; the vendored core only traces by printing every instruction). For each of 15 firmwares (the stock 016, the 5 bundled, the Pack's 9) the code image
+is walked linearly from `0x120` with `fm1-isa`; a failure counts as "apparent code" only if it follows at least 32 good decodes in a row (about two random words in three decode, so data rarely does that). Those windows go to `pi32v2-isa`'s table.
+
+- **4,254 failures in apparent code across the 15 images; `pi32v2-isa` decodes 156 of them, as 48 forms, all shown by JieLi's objdump at `-mcpu=r3`.** The other 4,098 are neither decoder's instructions: data, or words neither table knows.
+- **The stock 016 has 67 of the 156**, among them `madd.f.rrr` 35 times (the floating-point multiply-add; `pi32v2-isa` notes that 016 uses it far more than JieLi's compiler ever emits it), `copex.ppi.p`, `mov.r_sr`, `ld.bs.sp.l`, `rev8.rr`. The others carry 1 to 24 each (FRASIL 24, Skiff 15, TRIO 10, Felucca 10); `copex.ppi.p` is in 10 firmwares, `div.u.ppr` (a 64-bit divide) in 2.
+- **`fm1-isa` has no `madd` form at all**, and a decode failure halts the machine (`CoreError::Decode`; `Machine::run_unpaced` sets `halted`). **None was reached, though:** the stock firmware was driven through all 41 buttons and keys, all 7 encoders, notes on two channels and every effect CC 0 to 23 at three values, and never halted; the 14 others ran 6 s each without halting. So the 156 are either code nothing exercised, or data that looks like code.
+- **What it does not show:** which of them are real code, which are executed on a path nobody drove (the effects in particular, which are mostly silent in the emulator: `docs/HARDWARE.md`), and what their semantics are. It is an upper bound, not a count of used instructions.

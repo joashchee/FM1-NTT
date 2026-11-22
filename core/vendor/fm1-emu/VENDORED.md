@@ -36,6 +36,13 @@
     block's hot code (`Gen::cold`, `emit_cold`), so the hot path is dense in the instruction cache. Not measured on the unit.
   - What it does: 5-7% fewer host instructions per guest instruction on seven firmwares (an Apple M1), the same audio, final pc and instruction count as the interpreter after 6 s on nine
     firmwares at pace 0 and 3, and the vendored tests (74 with the two new ones) pass in debug and release.
+- **Changed, 2026-11-22 (by this project; a crash fix, `crates/fm1-soc/src/ram.rs` only):** `Ram::read16`, `read32`, `write16`, `write32` and `restore32` (and `read8` / `write8`) indexed the
+  buffer unchecked for a word that **starts inside RAM and ends past it**, so a firmware's `r0 = [r1+0]` at the last 1 to 3 bytes of RAM (`0x01CFFFFE`) made the emulator **panic**
+  (`index out of bounds: the len is 1048576 but the index is 1048576`), which in a release build of the C API is an abort: a six-instruction program crashed the app, against rule 5 (firmware is
+  untrusted input). Now the in-range case is the same code as before and a straddling access goes byte by byte: bytes past the end **read as 0 and writes to them are dropped**. This is an
+  invention, not a measurement of the chip (the hardware's RAM ends at its own limit and what lies past it is not known here); it is the least that is not a crash. Found while trying the second
+  core's flaky-load option on the stock firmware, where a misread pointer lands there; **not yet reported upstream** (the report and a pull request are still to be made; until one is
+  merged an update of this tree must carry this file over). A regression test is `a_word_access_across_the_end_of_ram_is_not_a_crash` in `core/src/machine.rs`.
 - **Updating:** fetch the new commit into an empty folder outside the repository, diff it against this tree, read the diff, copy, and change
   the commit above, `NOTICE`, `docs/LICENSING.md` and the changelog in the same commit. Run `scripts/check.sh`.
 - **Not ours to fix here:** a bug in these crates is reported or fixed upstream; a local fix is a recorded change above.

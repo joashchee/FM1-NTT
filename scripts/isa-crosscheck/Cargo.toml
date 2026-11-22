@@ -3,9 +3,11 @@ name = "isa-crosscheck"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Decodes a list of instruction windows with the vendored fm1-isa (scripts/isa-crosscheck/README in docs/ISA-CROSSCHECK.md). Not part of the core; its own workspace."
+default-run = "isa-crosscheck"
+description = "Decodes a list of instruction windows (and, in src/bin/sweep.rs, sweeps firmware code images) with the vendored fm1-isa (scripts/isa-crosscheck/README in docs/ISA-CROSSCHECK.md). Not part of the core; its own workspace."
 
 [dependencies]
 fm1-isa = { path = "../../core/vendor/fm1-emu/crates/fm1-isa" }
+fm1ntt-core = { path = "../../core" }   # only for src/bin/sweep.rs, which reads a firmware's code image
 
 [workspace]

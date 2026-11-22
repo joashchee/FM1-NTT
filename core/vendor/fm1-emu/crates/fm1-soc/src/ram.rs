@@ -61,17 +61,25 @@ impl Ram {
         self.data.is_empty()
     }
 
+    // A word that starts inside RAM and ends past it (a firmware's load or store at the last 1 to 3 bytes) is not a crash: the bytes past the end read as 0 and
+    // writes to them are dropped (a change by FM1-NTT, recorded in VENDORED.md; the in-range case is the code it was).
     pub fn read8(&self, addr: u32) -> u8 {
-        self.data[addr as usize]
+        self.data.get(addr as usize).copied().unwrap_or(0)
     }
 
     pub fn read16(&self, addr: u32) -> u16 {
         let a = addr as usize;
+        if a + 2 > self.data.len() {
+            return u16::from_le_bytes([self.read8(addr), self.read8(addr.wrapping_add(1))]);
+        }
         u16::from_le_bytes([self.data[a], self.data[a + 1]])
     }
 
     pub fn read32(&self, addr: u32) -> u32 {
         let a = addr as usize;
+        if a + 4 > self.data.len() {
+            return u32::from_le_bytes(std::array::from_fn(|i| self.read8(addr.wrapping_add(i as u32))));
+        }
         u32::from_le_bytes([
             self.data[a],
             self.data[a + 1],
@@ -81,18 +89,34 @@ impl Ram {
     }
 
     pub fn write8(&mut self, addr: u32, value: u8) {
-        self.wrote(addr as usize);
-        self.data[addr as usize] = value;
+        let a = addr as usize;
+        if a >= self.data.len() {
+            return;
+        }
+        self.wrote(a);
+        self.data[a] = value;
     }
 
     pub fn write16(&mut self, addr: u32, value: u16) {
         let a = addr as usize;
+        if a + 2 > self.data.len() {
+            for (i, b) in value.to_le_bytes().into_iter().enumerate() {
+                self.write8(addr.wrapping_add(i as u32), b);
+            }
+            return;
+        }
         self.wrote(a);
         self.data[a..a + 2].copy_from_slice(&value.to_le_bytes());
     }
 
     pub fn write32(&mut self, addr: u32, value: u32) {
         let a = addr as usize;
+        if a + 4 > self.data.len() {
+            for (i, b) in value.to_le_bytes().into_iter().enumerate() {
+                self.write8(addr.wrapping_add(i as u32), b);
+            }
+            return;
+        }
         self.wrote(a);
         self.data[a..a + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -100,6 +124,14 @@ impl Ram {
     /// A word put back as it was (the polling-loop probe undoing its stores): not counted.
     pub(crate) fn restore32(&mut self, addr: u32, value: u32) {
         let a = addr as usize;
+        if a + 4 > self.data.len() {
+            for (i, b) in value.to_le_bytes().into_iter().enumerate() {
+                if let Some(d) = self.data.get_mut(a + i) {
+                    *d = b;
+                }
+            }
+            return;
+        }
         self.data[a..a + 4].copy_from_slice(&value.to_le_bytes());
     }
 

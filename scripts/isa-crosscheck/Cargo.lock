@@ -3,12 +3,35 @@
 version = 4
 
 [[package]]
+name = "fm1-core"
+version = "0.5.1"
+dependencies = [
+ "fm1-isa",
+]
+
+[[package]]
 name = "fm1-isa"
 version = "0.5.1"
+
+[[package]]
+name = "fm1-soc"
+version = "0.5.1"
+dependencies = [
+ "fm1-core",
+]
+
+[[package]]
+name = "fm1ntt-core"
+version = "0.2.0"
+dependencies = [
+ "fm1-core",
+ "fm1-soc",
+]
 
 [[package]]
 name = "isa-crosscheck"
 version = "0.0.0"
 dependencies = [
  "fm1-isa",
+ "fm1ntt-core",
 ]

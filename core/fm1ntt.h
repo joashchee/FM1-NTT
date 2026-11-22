@@ -36,6 +36,10 @@ void fm1ntt_jit(fm1ntt_machine *m, int on);                                     
 void fm1ntt_pace(fm1ntt_machine *m, int level);                                             /* main-loop pacing 0 (off, exact) to 3; off by default */
 int fm1ntt_pace_level(fm1ntt_machine *m);
 int fm1ntt_flash_part(fm1ntt_machine *m, const char *name);                                 /* the FM-1's flash chip by name: "p25q80"/"puya"/"stock" (default) or "uc25hq80"/"uc25"/"new"; 1 if set; before the first run, kept across a reset */
+void fm1ntt_cpu1_survives(fm1ntt_machine *m, int on);                                       /* a fault on the second core: 0 halts the machine (default), 1 stops that core alone and core 0 goes on; kept across a reset */
+size_t fm1ntt_cpu1_fault(fm1ntt_machine *m, unsigned char *out, size_t cap);                /* why core 1 stopped (copied, NUL-terminated if it fits); its length, 0 if it has not */
+void fm1ntt_flaky_core1(fm1ntt_machine *m, double rate, unsigned long long seed);           /* core 1's RAM loads misread with this probability (0 = a good unit, the default); kept across a reset */
+int fm1ntt_flaky_core1_stats(fm1ntt_machine *m, unsigned long long *loads, unsigned long long *misreads);   /* 1 and the counts when flaky, else 0 */
 int fm1ntt_flash_part_known(const char *name);                                              /* 1 if `name` is one fm1ntt_flash_part knows (needs no machine) */
 unsigned fm1ntt_flash_jedec(fm1ntt_machine *m);                                             /* its JEDEC id 0xMMTTCC, e.g. 0x856014 (Puya) or 0xB36014 (UC25HQ80); 0 for NULL */
 const char *fm1ntt_error(void);                                                             /* last failure, "" when none */

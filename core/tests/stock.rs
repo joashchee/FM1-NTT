@@ -330,3 +330,59 @@ fn a_dx7_bank_dump_asks_for_a_bank() {
 
     assert!(differs(&home, &asked) > 200, "a bank dump drew no question");
 }
+
+/// The flash the package leaves in the machine has the layout m-bootloader's specification gives for M-VAVE's stock images (its section 5.1 and 5.2: the cipher and the
+/// CRC16 with their test vectors, a 32-byte header and 32-byte top-level records, each decoded on its own). It holds for 015 and 016 alike, so it checks the
+/// layout and not a version: the header's CRC 0xDCA1 and burner field 0x0220, the filesystem size 0xFF000, and the four records in their places with good CRCs.
+#[test]
+fn the_flash_layout_is_the_one_the_bootloader_spec_describes() {
+    let Some(m) = stock() else { return };
+    // ENC: a 16-bit state from the key, XORed into each byte, one left shift (with 0x1021 on a carry) per byte; restarted for each object
+    fn enc(data: &[u8]) -> Vec<u8> {
+        let mut st = 0xFFFFu16;
+        data.iter()
+            .map(|&b| {
+                let o = b ^ (st & 0xFF) as u8;
+                st = (st << 1) ^ if st & 0x8000 != 0 { 0x1021 } else { 0 };
+                o
+            })
+            .collect()
+    }
+    fn crc16(data: &[u8]) -> u16 {
+        data.iter().fold(0u16, |mut c, &b| {
+            c ^= u16::from(b) << 8;
+            for _ in 0..8 {
+                c = (c << 1) ^ if c & 0x8000 != 0 { 0x1021 } else { 0 };
+            }
+            c
+        })
+    }
+    // the specification's own test vectors, so a wrong helper cannot pass the layout by agreeing with itself
+    assert_eq!(crc16(b"123456789"), 0x31C3);
+    let vec32: Vec<u8> = enc(&[0u8; 32]);
+    assert_eq!(&vec32[..8], &[0xff, 0xdf, 0x9f, 0x1f, 0x1f, 0x3e, 0x7c, 0xf8]);
+    assert_eq!(&vec32[24..], &[0x9c, 0x19, 0x13, 0x26, 0x4c, 0x98, 0x30, 0x60]);
+
+    let f = m.flash_image();
+    assert!(m.identity().starts_with("FM-1_"), "the package's identity: {:?}", m.identity());
+    let h = enc(&f[..32]);
+    let u16at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    let u32at = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    assert_eq!(u16at(&h, 0), crc16(&h[2..32]), "header CRC");
+    assert_eq!(u16at(&h, 0), 0xDCA1, "the stock images' header CRC");
+    assert_eq!((u16at(&h, 2), u32at(&h, 8), h[12], h[13]), (0x0220, 0xFF000, 0x10, 16), "burner field, filesystem size, version, alignment");
+    let rec = |at: usize| enc(&f[at..at + 32]);
+    let name = |r: &[u8]| String::from_utf8_lossy(r[16..32].split(|&b| b == 0).next().unwrap()).into_owned();
+    let mut seen = Vec::new();
+    for at in [0x20usize, 0x40, 0x60, 0x80] {
+        let r = rec(at);
+        assert_eq!(u16at(&r, 0), crc16(&r[2..32]), "record at {at:#x}: CRC");
+        seen.push((name(&r), u32at(&r, 4), u32at(&r, 8), r[12]));
+    }
+    let boot_len = seen[0].2;
+    assert_eq!(seen[0], ("uboot.boot".to_string(), 0xA0, boot_len, 0x00));
+    assert!((0x1000..=0x3FA0).contains(&boot_len), "the boot container fits the boot area: {boot_len:#x}");
+    assert_eq!((seen[1].0.as_str(), seen[1].1, seen[1].3), ("isd_config.ini", 0xA0 + boot_len, 0x02), "the configuration follows the boot container");
+    assert_eq!(seen[2], ("app_dir_head".to_string(), 0x4000, 0xFFFF_FFFF, 0x81));
+    assert_eq!(seen[3], ("key_mac".to_string(), 0xFF000, 0x1000, 0x12));
+}
