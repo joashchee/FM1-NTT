@@ -60,6 +60,9 @@ pub struct Instrument {
     in_sysex: bool,
 }
 
+/// The most decoded sample frames a kit package may hold in all (32 Mi frames, 64 MiB of 16-bit).
+pub const MAX_PACKAGE_FRAMES: usize = 32 << 20;
+
 fn fail<T>(why: impl Into<String>) -> Result<T> {
     Err(Error::BadImage(format!("instrument: {}", why.into())))
 }
@@ -88,9 +91,16 @@ impl Instrument {
                 if pkg.samples.is_empty() {
                     return fail("a kit package needs `sample` lines");
                 }
+                let mut frames = 0usize;
                 for s in &pkg.samples {
                     let Some(bytes) = resolve(&s.file) else { return fail(format!("cannot read sample {:?}", s.file)) };
-                    k.add(s.note, parse_wav(&bytes)?, &s.chokes)?;
+                    let sample = parse_wav(&bytes)?;
+                    // each sample is bounded (`MAX_FRAMES`), and so is their sum: 64 samples of 32 MiB would be 2 GiB
+                    frames = frames.saturating_add(sample.data.len());
+                    if frames > MAX_PACKAGE_FRAMES {
+                        return fail("the samples together are too long");
+                    }
+                    k.add(s.note, sample, &s.chokes)?;
                 }
                 Box::new(KitEngine::new(k))
             }
@@ -980,6 +990,34 @@ mod tests {
         let mut out = vec![0i16; 1024];
         i.render(&mut out);
         assert!(peak(&out) > 100);
+    }
+
+    #[test]
+    fn a_kit_of_many_long_samples_is_refused_not_loaded() {
+        // 8 samples of 8 Mi frames (16 MiB each as 16-bit): each is fine alone, together 64 Mi frames
+        let frames = 8usize << 20;
+        let data = vec![0u8; frames * 2];
+        let mut w = b"RIFF".to_vec();
+        w.extend((36 + data.len() as u32).to_le_bytes());
+        w.extend(b"WAVEfmt ");
+        w.extend(16u32.to_le_bytes());
+        w.extend(1u16.to_le_bytes());
+        w.extend(1u16.to_le_bytes());
+        w.extend(44_100u32.to_le_bytes());
+        w.extend(88_200u32.to_le_bytes());
+        w.extend(2u16.to_le_bytes());
+        w.extend(16u16.to_le_bytes());
+        w.extend(b"data");
+        w.extend((data.len() as u32).to_le_bytes());
+        w.extend(&data);
+        let mut p = Package::new("S", "kit", "CC0-1.0");
+        for n in 0..8u8 {
+            p.samples.push(crate::package::SampleRef { note: 36 + n, file: "long.wav".into(), chokes: vec![] });
+        }
+        let resolve = |_: &str| Some(w.clone());
+        assert!(Instrument::from_package(&p, 44_100.0, &resolve).is_err());
+        p.samples.truncate(3); // 24 Mi frames: allowed
+        assert!(Instrument::from_package(&p, 44_100.0, &resolve).is_ok());
     }
 
     #[test]

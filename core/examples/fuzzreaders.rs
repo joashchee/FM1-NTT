@@ -7,7 +7,41 @@
 use fm1ntt::{catalog, extract, machine::Machine, package::Package, port, sampler};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use Relaxed as R;
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::time::Instant;
+
+/// Counts live heap bytes and their peak (std only), so a case that asks for
+/// a huge buffer shows up: rule 5 says bounded memory, not only no panic.
+struct Counting;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc(l);
+        if !p.is_null() {
+            let now = LIVE.fetch_add(l.size(), R) + l.size();
+            PEAK.fetch_max(now, R);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        System.dealloc(p, l);
+        LIVE.fetch_sub(l.size(), R);
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        let q = System.realloc(p, l, n);
+        if !q.is_null() {
+            let now = if n >= l.size() { LIVE.fetch_add(n - l.size(), R) + (n - l.size()) } else { LIVE.fetch_sub(l.size() - n, R) - (l.size() - n) };
+            PEAK.fetch_max(now, R);
+        }
+        q
+    }
+}
+#[global_allocator]
+static A: Counting = Counting;
+/// A case may hold at most this much heap above what it started with.
+const MEM_LIMIT: usize = 256 << 20;
 
 /// How many cases got past the first refusal: a fuzz that only meets early errors tests little.
 static WAV_OK: AtomicUsize = AtomicUsize::new(0);
@@ -360,7 +394,10 @@ fn main() {
         }
         let mut found: std::collections::BTreeMap<String, (u64, usize)> = Default::default();
         let (mut slow, mut worst) = (0, (0.0f64, 0u64));
+        let (mut mem_worst, mut mem_over) = ((0usize, 0u64), 0usize);
         for seed in first..first + cases {
+            let base_live = LIVE.load(R);
+            PEAK.store(base_live, R);
             let t = Instant::now();
             let res = catch_unwind(AssertUnwindSafe(|| match target {
                 "catalog" => catalog_case(seed),
@@ -376,6 +413,11 @@ fn main() {
                 worst = (el, seed);
             }
             slow += usize::from(el > 2.0);
+            let used = PEAK.load(R).saturating_sub(base_live);
+            if used > mem_worst.0 {
+                mem_worst = (used, seed);
+            }
+            mem_over += usize::from(used > MEM_LIMIT);
             if res.is_err() {
                 let why = last.lock().unwrap().clone();
                 found.entry(why).or_insert((seed, 0)).1 += 1;
@@ -391,7 +433,8 @@ fn main() {
             "flash" => format!("{} restored", FLASH_OK.load(Relaxed)),
             _ => String::new(),
         };
-        println!("{target:8} {cases} cases from seed {first}: {} distinct panic site(s); {deep}; slowest {:.3}s (seed {}); over 2 s: {slow}", found.len(), worst.0, worst.1);
+        println!("{target:8} {cases} cases from seed {first}: {} distinct panic site(s); {deep}; slowest {:.3}s (seed {}); over 2 s: {slow}; peak heap {:.1} MiB (seed {}); over {} MiB: {mem_over}", found.len(), worst.0, worst.1, mem_worst.0 as f64 / 1048576.0, mem_worst.1, MEM_LIMIT >> 20);
+        total_panics += mem_over;
         for (why, (seed, n)) in &found {
             println!("    {n:5} x  {why}   (first: seed {seed})");
         }
