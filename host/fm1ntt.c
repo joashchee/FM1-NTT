@@ -7,6 +7,7 @@
  *   fm1ntt --report [FIRMWARE]         the Device report (r3i6nos rule 9) to $BASE/r36s-report.txt, with the power windows
  *   fm1ntt --bench [--seconds N] [--fw FILE]   the Benchmark report to $BASE/bench/ (compare with scripts/bench-compare.py)
  *   fm1ntt --rec-demo [--features a,b] [--no-video] [FIRMWARE]   Rec demo (rule 11) to $BASE/Demo/
+ *   fm1ntt --flash-part NAME ...       (or FM1NTT_FLASH_PART=NAME) the FM-1's flash chip a firmware sees: p25q80 (the stock Puya, default) or uc25hq80 (units sold since late 2026)
  *   fm1ntt --pin ...                   (or FM1NTT_PIN=1) the emulating (audio) thread on the last core, the main thread on the first: off by default, to be measured
  *   fm1ntt --reduced-motion ...        (or FM1NTT_REDUCED_MOTION=1) the MONITOR panel's data rain is a still page
  *   fm1ntt --version
@@ -119,6 +120,7 @@ typedef struct {
     uint32_t fl_rev, fl_t;
     char fl_sha[65];                      /* the loaded package's SHA-256, the name of its remembered flash */
     int jit_pref;                       /* the native JIT, applied to each firmware as it boots */
+    char flash_part[16];                /* --flash-part: the FM-1's flash chip by name ("" keeps the core's default, the stock Puya), applied to each firmware as it boots */
     int pace_mode, pace_lvl;            /* main-loop pacing: 0 OFF, 1..3 fixed, PACE_AUTO follows the speed; pace_lvl is the level AUTO has reached */
     uint32_t mem_off;
     uint8_t midi_log[PX_MIDI_LOG];
@@ -526,9 +528,10 @@ static void stamp(char *out, size_t n) {
 /* ---- loading ----------------------------------------------------------------------------------------------------------- */
 static void speed_reset(App *a) { a->sp_real0 = SDL_GetTicks(); a->sp_insns0 = 0; a->sp_ms0 = 0; a->ips = a->speed = 0; }
 
-/* The JIT and pacing settings onto the machine (a load makes a new one, with both off). Callers hold no lock. */
+/* The JIT, pacing and flash-chip settings onto the machine (a load makes a new one, with the defaults). Callers hold no lock. */
 static void apply_prefs(App *a) {
     lock(a);
+    if (a->flash_part[0]) fm1ntt_flash_part(a->m, a->flash_part);   /* before the firmware's first run: it reads the chip's id at start-up */
     fm1ntt_jit(a->m, a->jit_pref && fm1ntt_jit_available());
     fm1ntt_pace(a->m, a->pace_mode == PACE_AUTO ? a->pace_lvl : a->pace_mode);
     unlock(a);
@@ -4187,6 +4190,11 @@ static int selftest(void) {
     a.tool_sel = 3; act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == fm1ntt_jit_available()); act(&a, A_OK); CHECK(fm1ntt_jit_on(a.m) == 0);
     a.tool_sel = 11; act(&a, A_OK); CHECK(a.pace_mode == 1 && fm1ntt_pace_level(a.m) == 1);
     act(&a, A_OK); act(&a, A_OK); CHECK(a.pace_mode == 3 && fm1ntt_pace_level(a.m) == 3);
+    CHECK(fm1ntt_flash_jedec(a.m) == 0x856014);                                       /* the stock Puya unless asked */
+    snprintf(a.flash_part, sizeof a.flash_part, "uc25hq80"); apply_prefs(&a); CHECK(fm1ntt_flash_jedec(a.m) == 0xB36014);
+    snprintf(a.flash_part, sizeof a.flash_part, "stock"); apply_prefs(&a); CHECK(fm1ntt_flash_jedec(a.m) == 0x856014);
+    a.flash_part[0] = 0;
+    CHECK(fm1ntt_flash_part_known("new") && !fm1ntt_flash_part_known("winbond"));
     act(&a, A_OK); CHECK(a.pace_mode == PACE_AUTO && fm1ntt_pace_level(a.m) == 0);   /* AUTO starts exact */
     a.speed = 0.5; pace_auto(&a); pace_auto(&a); CHECK(a.pace_lvl == 2 && fm1ntt_pace_level(a.m) == 2);   /* behind: up a level a second */
     a.speed = 1.5; pace_auto(&a); CHECK(a.pace_lvl == 2);                                                 /* keeping up: stays */
@@ -4831,6 +4839,7 @@ int main(int argc, char **argv) {
     self_exe_init(argv[0]);
     int do_show = 0, show_jit = 0;
     const char *show_out = NULL;
+    const char *flash_opt = NULL;
     int raw = 0, zoomed = 0, preview_opt = 0, panel = 0, do_report = 0, do_bench = 0, do_demo = 0, no_video = 0, no_jit = 0, pin_opt = 0, scale_opt = getenv("FM1NTT_SCALE") ? atoi(getenv("FM1NTT_SCALE")) : 0, pace_opt = PACE_AUTO;
     const char *inst_opt = NULL;
     double seconds = 1.0;
@@ -4851,6 +4860,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--pace") && i + 1 < argc) { const char *v = argv[++i]; pace_opt = !strcmp(v, "auto") ? PACE_AUTO : atoi(v) % 4; }
         else if (!strcmp(argv[i], "--no-jit")) no_jit = 1;
         else if (!strcmp(argv[i], "--pin")) pin_opt = 1;
+        else if (!strcmp(argv[i], "--flash-part") && i + 1 < argc) flash_opt = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) { const char *v = argv[++i]; scale_opt = !strcmp(v, "auto") ? 0 : atoi(v); }
         else if (!strcmp(argv[i], "--rec-demo")) do_demo = 1;
         else if (!strcmp(argv[i], "--showcase")) do_show = 1;
@@ -4876,6 +4886,11 @@ int main(int argc, char **argv) {
     a.remember = !getenv("FM1NTT_FORGET");               /* on: a firmware's saved settings come back next run (TOOLS turns it off) */
     a.jit_pref = !no_jit && !getenv("FM1NTT_NO_JIT");     /* on wherever the CPU supports it: the interpreter cannot keep up on a handheld */
     a.pace_mode = pace_opt;
+    if (!flash_opt && getenv("FM1NTT_FLASH_PART") && *getenv("FM1NTT_FLASH_PART")) flash_opt = getenv("FM1NTT_FLASH_PART");
+    if (flash_opt) {
+        if (!fm1ntt_flash_part_known(flash_opt)) { fprintf(stderr, "fm1ntt: unknown flash chip \"%s\" (p25q80 or uc25hq80)\n", flash_opt); return 2; }
+        snprintf(a.flash_part, sizeof a.flash_part, "%s", flash_opt);
+    }
     a.pin = pin_opt || (getenv("FM1NTT_PIN") && *getenv("FM1NTT_PIN") && strcmp(getenv("FM1NTT_PIN"), "0"));
     say(&a, 0, "Pick a firmware in FILES, or give a path on the command line", NULL);
 

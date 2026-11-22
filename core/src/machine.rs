@@ -57,6 +57,8 @@ pub fn native_jit_available() -> bool {
 /// The emulated clock in MHz: one instruction a cycle, so this is the instructions a second real time needs.
 pub const CLOCK_MHZ: u64 = DEFAULT_MHZ;
 
+pub use fm1_soc::FlashPart;
+
 pub struct Machine {
     boot: Boot,
     cpu: Cpu,
@@ -74,16 +76,18 @@ pub struct Machine {
     identity: String,
     /// main-loop pacing, 0 (off) to `PACE_LEVELS`: see `set_pace`
     pace: u8,
+    /// the FM-1's flash part (its JEDEC id), kept across `reset`: see `set_flash_part`
+    flash_part: FlashPart,
     /// where the queued MIDI of `render_events` falls in a buffer (evq.rs)
     clock: crate::evq::Clock,
 }
 
 impl Machine {
-    fn build(boot: &Boot) -> (Soc, Cpu) {
+    fn build(boot: &Boot, part: FlashPart) -> (Soc, Cpu) {
         let mut soc = Soc::new(RAM_SIZE, boot.image.clone());
         soc.periph.hz = DEFAULT_MHZ * 1_000_000;
         soc.periph.skip_idle = true;
-        soc.set_flash_part(fm1_soc::FlashPart::P25q80);
+        soc.set_flash_part(part);
         let mut cpu = Cpu::new(boot.entry);
         cpu.user = true; // the SPL hands cpu0 over in user mode
         let params = RAM_BASE + 0x7fc00;
@@ -97,14 +101,14 @@ impl Machine {
 
     fn boot(image: Vec<u8>, entry: u32, stock: Option<(Vec<u8>, fm1_soc::Board)>, identity: String) -> Machine {
         let boot = Boot { image, entry, stock };
-        let (soc, cpu) = Machine::build(&boot);
-        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0, clock: crate::evq::Clock::new() }
+        let (soc, cpu) = Machine::build(&boot, FlashPart::P25q80);
+        Machine { boot, cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false, started: false, keys: 0, instructions: 0, identity, pace: 0, flash_part: FlashPart::P25q80, clock: crate::evq::Clock::new() }
     }
 
     /// Back to power-on with the same firmware: the emulated flash returns to what the package carried, and the inputs are released.
     pub fn reset(&mut self) {
         let jit = self.cpu.jit_on;
-        let (soc, mut cpu) = Machine::build(&self.boot);
+        let (soc, mut cpu) = Machine::build(&self.boot, self.flash_part);
         cpu.jit_on = jit;
         self.soc = soc;
         self.cpu = cpu;
@@ -279,6 +283,24 @@ impl Machine {
     }
     pub fn pace(&self) -> u8 {
         self.pace
+    }
+
+    /// Which flash chip the FM-1 has: the Puya P25Q80 (JEDEC 85 60 14, the default) or the UC25HQ80 of the units sold since late 2026
+    /// (B3 60 14). Only the id the firmware reads at its start-up probe differs (the vendored model, `spiflash.rs`), so **set it before
+    /// the first run**: a firmware that has already probed keeps what it saw until the next `reset`. It is kept across `reset`. The
+    /// SMK-37 Pro keeps its own part (EB 60 14) whatever this says. Whether a real firmware behaves differently with it is only known
+    /// where a test says so; nothing here was compared with a real unit.
+    pub fn set_flash_part(&mut self, part: FlashPart) {
+        self.flash_part = part;
+        self.soc.set_flash_part(part);
+    }
+    pub fn flash_part(&self) -> FlashPart {
+        self.flash_part
+    }
+
+    /// The three JEDEC bytes the emulated flash answers to command 9F with now (manufacturer, type, capacity).
+    pub fn flash_jedec(&self) -> [u8; 3] {
+        self.soc.flash.jedec
     }
 
     /// Turns the second-by-second compile of hot code to native code on or off (off by default; speed on the R36S is untested).
@@ -518,6 +540,20 @@ mod tests {
         assert!(m.restore_flash(&flash[1..]).is_err());
         assert!(m.restore_flash(&flash).is_ok());
         assert_eq!(m.flash_image()[5], 0xAB);
+    }
+
+    #[test]
+    fn the_flash_part_sets_the_jedec_id_and_survives_a_reset() {
+        let mut m = Machine::from_raw(vec![0x11; 4096], 0x0200_0120).unwrap();
+        assert_eq!(m.flash_part(), FlashPart::P25q80);
+        assert_eq!(m.flash_jedec(), [0x85, 0x60, 0x14]);
+        m.set_flash_part(FlashPart::Uc25hq80);
+        assert_eq!(m.flash_jedec(), [0xb3, 0x60, 0x14]);
+        m.reset();
+        assert_eq!((m.flash_part(), m.flash_jedec()), (FlashPart::Uc25hq80, [0xb3, 0x60, 0x14]), "kept across a reset");
+        m.set_flash_part(FlashPart::P25q80);
+        m.reset();
+        assert_eq!(m.flash_jedec(), [0x85, 0x60, 0x14]);
     }
 
     /// A real firmware (the bundled UNTRUE STEP) must still run after its flash is saved, the machine reset and the flash restored.

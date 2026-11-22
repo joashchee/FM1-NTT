@@ -1,7 +1,7 @@
 //! The C face (`fm1ntt.h`). Every function tolerates null and never unwinds (panic = "abort" in release).
 
 use crate::{devices, machine::{Machine, Region}};
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, c_uint};
 
 #[no_mangle]
 pub extern "C" fn fm1ntt_version() -> *const c_char {
@@ -193,6 +193,49 @@ pub unsafe extern "C" fn fm1ntt_pace(h: *mut Handle, level: c_int) {
 #[no_mangle]
 pub unsafe extern "C" fn fm1ntt_pace_level(h: *mut Handle) -> c_int {
     with(h, 0, |m| c_int::from(m.pace()))
+}
+
+/// Chooses the FM-1's flash chip by name (`p25q80`, `puya`, `stock`, `old`; `uc25hq80`, `uc25`, `new`; any case): the JEDEC id a firmware reads from it.
+/// Returns 1 when the name was known and set, 0 for an unknown name, NULL or a NULL machine (nothing changes). Call it before the first run; it
+/// is kept across a reset.
+///
+/// # Safety
+/// `h` is live or null; `name` is a NUL-terminated string or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_flash_part(h: *mut Handle, name: *const c_char) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    let Ok(name) = std::ffi::CStr::from_ptr(name).to_str() else { return 0 };
+    let Some(part) = crate::machine::FlashPart::parse(name) else { return 0 };
+    with(h, 0, |m| {
+        m.set_flash_part(part);
+        1
+    })
+}
+
+/// 1 when `name` is one `fm1ntt_flash_part` knows, 0 when not (or NULL). Needs no machine, so a host can check an option before anything loads.
+///
+/// # Safety
+/// `name` is a NUL-terminated string or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_flash_part_known(name: *const c_char) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    std::ffi::CStr::from_ptr(name).to_str().ok().and_then(crate::machine::FlashPart::parse).is_some() as c_int
+}
+
+/// The flash chip's JEDEC id as 0xMMTTCC (manufacturer, type, capacity code), e.g. 0x856014; 0 for a NULL machine.
+///
+/// # Safety
+/// `h` is live or null.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_flash_jedec(h: *mut Handle) -> c_uint {
+    with(h, 0, |m| {
+        let j = m.flash_jedec();
+        u32::from(j[0]) << 16 | u32::from(j[1]) << 8 | u32::from(j[2])
+    })
 }
 
 /// One core's state, for the CPU panel.
@@ -509,6 +552,19 @@ mod tests {
             assert_eq!(fm1ntt_pace_level(h), 0);
             fm1ntt_pace(std::ptr::null_mut(), 2);
             assert_eq!(fm1ntt_pace_level(std::ptr::null_mut()), 0);
+            // the flash chip: the stock Puya by default, the newer UC25HQ80 by name, an unknown or null name changes nothing, a reset keeps it
+            assert_eq!((fm1ntt_flash_part_known(c"puya".as_ptr()), fm1ntt_flash_part_known(c"x".as_ptr()), fm1ntt_flash_part_known(std::ptr::null())), (1, 0, 0));
+            assert_eq!(fm1ntt_flash_jedec(h), 0x85_60_14);
+            assert_eq!(fm1ntt_flash_part(h, c"UC25HQ80".as_ptr()), 1);
+            assert_eq!(fm1ntt_flash_jedec(h), 0xb3_60_14);
+            assert_eq!(fm1ntt_flash_part(h, c"winbond".as_ptr()), 0);
+            assert_eq!(fm1ntt_flash_part(h, std::ptr::null()), 0);
+            assert_eq!(fm1ntt_flash_part(std::ptr::null_mut(), c"new".as_ptr()), 0);
+            fm1ntt_reset(h);
+            assert_eq!(fm1ntt_flash_jedec(h), 0xb3_60_14);
+            assert_eq!(fm1ntt_flash_part(h, c"stock".as_ptr()), 1);
+            assert_eq!(fm1ntt_flash_jedec(h), 0x85_60_14);
+            assert_eq!(fm1ntt_flash_jedec(std::ptr::null_mut()), 0);
             assert!(CStr::from_ptr(fm1ntt_board(h)).to_bytes().is_empty());
             let (mut q, mut d) = (9u64, 9u64);
             fm1ntt_midi_stats(h, &mut q, &mut d);

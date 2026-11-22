@@ -35,6 +35,9 @@ uint64_t fm1ntt_ms(fm1ntt_machine *m);                                          
 void fm1ntt_jit(fm1ntt_machine *m, int on);                                                 /* off by default */
 void fm1ntt_pace(fm1ntt_machine *m, int level);                                             /* main-loop pacing 0 (off, exact) to 3; off by default */
 int fm1ntt_pace_level(fm1ntt_machine *m);
+int fm1ntt_flash_part(fm1ntt_machine *m, const char *name);                                 /* the FM-1's flash chip by name: "p25q80"/"puya"/"stock" (default) or "uc25hq80"/"uc25"/"new"; 1 if set; before the first run, kept across a reset */
+int fm1ntt_flash_part_known(const char *name);                                              /* 1 if `name` is one fm1ntt_flash_part knows (needs no machine) */
+unsigned fm1ntt_flash_jedec(fm1ntt_machine *m);                                             /* its JEDEC id 0xMMTTCC, e.g. 0x856014 (Puya) or 0xB36014 (UC25HQ80); 0 for NULL */
 const char *fm1ntt_error(void);                                                             /* last failure, "" when none */
 
 /* ---- the sandbox panels' views ---- */

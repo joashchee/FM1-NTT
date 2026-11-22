@@ -725,6 +725,11 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     r3_report_power_advice(&r, &idle, &work);
     /* what the real machine does, from M-VAVE's manual, to read this unit's figures against (not measured here) */
     r3_report_line(&r, R3_INFO, "FM-1 reference", "the FM-1 itself runs about 12 h on its battery, plays 12 voices at once and reads MIDI at 31250 baud (M-VAVE's manual); this unit's own time-left lines above are what it manages with this app");
+    if (a && fm1ntt_loaded(a->m)) {   /* which flash chip the emulated FM-1 answers as (the id a firmware reads at start-up) */
+        unsigned j = fm1ntt_flash_jedec(a->m); char t[200];
+        snprintf(t, sizeof t, "the emulated flash answers as JEDEC %02X %02X %02X (%s)", j >> 16, (j >> 8) & 255, j & 255, j == 0x856014 ? "Puya P25Q80, the stock part" : j == 0xB36014 ? "UC25HQ80, the part in units sold since late 2026" : j == 0xEB6014 ? "the SMK-37 Pro's part" : "another part");
+        r3_report_line(&r, R3_INFO, "flash chip", t);
+    }
     r3_report_section(&r, "memory");
     report_progress("memory", 9, steps, r.path);
     r3_report_memory(&r);
