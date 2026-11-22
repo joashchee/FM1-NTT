@@ -600,6 +600,35 @@ mod tests {
         assert_eq!(m.flash_jedec(), [0x85, 0x60, 0x14]);
     }
 
+    /// A damaged or hostile `.fwsc` used to make the vendored package reader panic (`Machine::from_package`: the app area's offset is a field of the package and was
+    /// used to index the flash image unchecked), which a release build of the C API turns into an abort: rule 5. These are the first two inputs the package fuzz
+    /// (`examples/fuzzmachine.rs --package`) found, as edits to the bundled UNTRUE STEP's bytes (offset, new value), and the package cut short at many lengths.
+    /// What matters is that none of them panics; an `Err` or a machine that runs and halts are both fine.
+    #[test]
+    fn a_mutated_package_is_an_error_not_a_crash() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../bundled-firmware/haunted-fm1/untrue-0.1.fwsc");
+        let Ok(pkg) = std::fs::read(path) else { return }; // a source tree without the bundle: nothing to test
+        let edits: [&[(usize, u8)]; 2] = [&[(0x51, 0xb5), (0x1ec, 0x63), (0x31f, 0x9d), (0x47b, 0x17)], &[(0x337, 0x0d), (0x47b, 0x47), (0x598, 0x3f)]];
+        let mut errs = 0;
+        for e in edits {
+            let mut v = pkg.clone();
+            for &(at, b) in e {
+                v[at] = b;
+            }
+            match Machine::from_package(&v) {
+                Err(_) => errs += 1,
+                Ok(mut m) => {
+                    let mut out = vec![0i16; 128];
+                    m.render(&mut out, 100_000);
+                }
+            }
+        }
+        assert!(errs > 0, "at least one of the two is now refused (they were crashes)");
+        for len in (0..=2000usize).step_by(13).chain([4096, 65_536, pkg.len() / 2, pkg.len() - 1]) {
+            let _ = Machine::from_package(&pkg[..len.min(pkg.len())]);
+        }
+    }
+
     /// A firmware's word load at the last bytes of RAM used to panic in the vendored `Ram` (a release build of the C API aborts on a panic): rule 5. Assembled with pi32v2-isa's assembler:
     /// `r1 = 0x01CFFFFE; r0 = [r1+0]; r2 = 0x600D; r3 = 0x01C30000; [r3+0] = r2; 1: goto 1b`. Bytes past the end read as 0 (an invention, VENDORED.md): the program runs on to its marker.
     #[test]

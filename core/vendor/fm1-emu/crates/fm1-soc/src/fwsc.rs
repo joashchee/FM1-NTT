@@ -302,6 +302,10 @@ fn unpack_n(file: &[u8], blocks: usize) -> Result<Unpacked, String> {
     let (Some(key), Some(area)) = (key.or(key_unchecked), area) else {
         return Err("no chip key or app area in the flash image".into());
     };
+    // (the area's offset is the package's own: it must leave room for its head and the first two blocks, or the reads below run past the image. FM1-NTT, VENDORED.md)
+    if area.checked_add(64).map_or(true, |e| e > flash.len()) {
+        return Err("app area starts past the flash image".into());
+    }
     let first = ((area + 32 + 31) & !31) - area;
     unscramble(&mut flash, area, first, area, key);
     let size = head(&flash, area).size;
@@ -338,6 +342,9 @@ fn unpack_n(file: &[u8], blocks: usize) -> Result<Unpacked, String> {
         .unwrap_or(area + size);
     if end > area + size {
         let blk = area + first + ((area + size).saturating_sub(area + first) & !31);
+        if blk > end {
+            return Err("app area's tail is inconsistent".into());
+        }
         let mut t = raw[..end].to_vec();
         unscramble(&mut t, blk, end - blk, area, key);
         flash[area + size..end].copy_from_slice(&t[area + size..end]);

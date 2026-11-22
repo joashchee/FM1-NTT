@@ -43,6 +43,11 @@
   invention, not a measurement of the chip (the hardware's RAM ends at its own limit and what lies past it is not known here); it is the least that is not a crash. Found while trying the second
   core's flaky-load option on the stock firmware, where a misread pointer lands there; **not yet reported upstream** (the report and a pull request are still to be made; until one is
   merged an update of this tree must carry this file over). A regression test is `a_word_access_across_the_end_of_ram_is_not_a_crash` in `core/src/machine.rs`.
+- **Changed, 2026-11-22 (by this project; a second crash fix, `crates/fm1-soc/src/fwsc.rs`, `unpack_n` only):** a **damaged or hostile `.fwsc`** made `Machine::from_package` **panic** (found by mutating a real package,
+  `core/examples/fuzzmachine.rs --package`: `range start index 3204464640 out of range for slice of length 602112` at `unscramble`). The app area's offset is a field of the package (a 32-bit value from one of its
+  32-byte records) and was used to index the flash image unchecked; and the tail's start `blk` could pass the area's end, so `end - blk` underflowed. Now `unpack_n` returns an `Err` ("app area starts past the flash
+  image" when the area plus its first two blocks do not fit in the image; "app area's tail is inconsistent" when `blk > end`), and everything that was accepted before is accepted the same way. **Not yet
+  reported upstream**, with the `ram.rs` change above; until they are merged an update of this tree must carry both files over. Regression tests: `a_mutated_package_is_an_error_not_a_crash` in `core/src/machine.rs`.
 - **Updating:** fetch the new commit into an empty folder outside the repository, diff it against this tree, read the diff, copy, and change
   the commit above, `NOTICE`, `docs/LICENSING.md` and the changelog in the same commit. Run `scripts/check.sh`.
 - **Not ours to fix here:** a bug in these crates is reported or fixed upstream; a local fix is a recorded change above.
