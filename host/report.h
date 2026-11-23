@@ -544,6 +544,11 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     r3_report_raw(&r, "# NEEDS: for the draw in mW: run on battery (unplug the charger)\n# NEEDS: for the working window: a firmware loaded, or given as --report FILE\n");
     report_progress("system", 1, steps, r.path);
     r3_report_system(&r);
+    {   /* the app's memory before the report allocates anything of its own: a report run after a Rec demo in the same session reads higher than one run fresh */
+        char hwm[64], rss[64];
+        if (r3_report_field("/proc/self/status", "VmHWM", hwm, sizeof hwm) == 0 && r3_report_field("/proc/self/status", "VmRSS", rss, sizeof rss) == 0)
+            r3_report_line(&r, R3_INFO, "memory at start", "peak %s, now %s when the report began (the app's whole session so far: a Rec demo or a firmware load before it shows here)", hwm, rss);
+    }
     { char cf[300]; cpufreq_text(cf, sizeof cf); r3_report_line(&r, R3_INFO, "cpu0 clock", "%s", cf[0] ? cf : "the kernel shows no cpufreq"); }
     {   /* where the firmware the app lists comes from: a unit that shows none of one kind says why here */
         char bd[300], pd[300], cwd[300] = "?";
@@ -712,8 +717,12 @@ static int device_report(App *a, const char *how, const char *fw, int fw_raw, ch
     int fw_running = a && fm1ntt_loaded(a->m) && !a->paused;
     if (fw_running) { a->paused = 1; r3_report_line(&r, R3_INFO, "idle", "the firmware is paused for the idle window, so it measures the app waiting, not the firmware; the working window below runs it"); }
     if (a) a->idle_probe = 1;                    /* the report's own job must not keep the sound device awake: the person's last press was a minute ago, so it sleeps in this window */
+    unsigned ev0 = g_ev_axis, ov0 = g_ev_other, lt0 = g_loop_turns, ld0 = g_loop_draws;
+    double idle_t0 = r3_report_ms();
     r3_report_power_idle(&r, r3_report_power_seconds(30), NULL, NULL, &idle);        /* the app open and waiting: its own main loop blocks on input */
     if (a) a->idle_probe = 0;
+    { double secs = (r3_report_ms() - idle_t0) / 1000.0; if (secs < 0.1) secs = 0.1;   /* where the main thread's wake-ups come from: events (a drifting stick), loop turns, redraws */
+      r3_report_line(&r, R3_INFO, "idle main loop", "%.1f axis events/s, %.1f other events/s, %.1f loop turns/s, %.1f redraws/s over %.0f s (a turn is a sleep slice or an event)", (g_ev_axis - ev0) / secs, (g_ev_other - ov0) / secs, (g_loop_turns - lt0) / secs, (g_loop_draws - ld0) / secs, secs); }
     if (fw_running) a->paused = 0;
     if (a && fm1ntt_loaded(a->m) && !a->paused) {
         R3Power p;

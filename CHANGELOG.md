@@ -4,6 +4,7 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-23 (host): **idle wake-ups: a drifting stick no longer redraws or shortens the sleep slice** (`wait_event`, the main loop), and the Device report prints `idle main loop` (axis and other events, loop turns and redraws a second over the idle window) and `memory at start`, to find the main thread's 45 wake-ups and the memory rise on the unit. Self-tested, built in Debian under Docker; not run on the unit.
 - 2026-11-23 (docs): **the Rec demo's constant rushing noise is the firmware's bed, not a fault** (measured: all five bundled Haunted FM-1 firmwares hiss at idle; the stock firmware and the Pack's others are silent, so the core adds none); `docs/SHOWCASE.md` says so for all five.
 - 2026-11-23 (host, docs): **the first complete Rec demo on the unit is read: PASS 5, FAIL 0** (1335 frames, 44.5 s, mp4 made; 1050.8 s to record). The zoom hero's text no longer says Tab (Tab is the map's Y).
 - 2026-11-23 (docs): **fifth Device report from the unit read (build 81f6099+dirty): the sound-device close works** (`SDLAudioP2` gone from the wakers; idle 5.13% of a core, 95.5 wake-ups/s, 1225 mW; goals 2% and 25 still fail, the main thread is next); resident memory rose from 73 to 126 MB, not yet explained.

@@ -2357,6 +2357,8 @@ static void present(SDL_Renderer *r, SDL_Texture *t, const uint32_t *c) {
     SDL_RenderPresent(r);
 }
 
+/* What the main loop did, for the Device report's idle window to difference (wake-ups come from these: a stick that drifts sends axis events all day). */
+static volatile unsigned g_ev_axis, g_ev_other, g_loop_turns, g_loop_draws;
 #include "report.h"
 #include "demo.h"
 #include "showcase.h"
@@ -5048,7 +5050,7 @@ static int wait_event(SDL_Event *e, int ms) {
     static uint32_t last_act;                    /* when a key last arrived */
     uint32_t end = SDL_GetTicks() + (uint32_t)ms;
     for (;;) {
-        if (SDL_PollEvent(e)) { last_act = SDL_GetTicks(); return 1; }
+        if (SDL_PollEvent(e)) { if (e->type != SDL_JOYAXISMOTION) last_act = SDL_GetTicks(); return 1; }   /* a drifting stick is not a person at the keys */
         uint32_t now = SDL_GetTicks();
         if ((int32_t)(end - now) <= 0) return 0;
         uint32_t left = end - now;
@@ -5264,13 +5266,16 @@ int main(int argc, char **argv) {
     int dirty = 1, settle = 0;     /* settle: re-presents of the last frame still owed (a page flip can hold a frame back until the next present) */
     for (int run = 1; run && !a.quit;) {
         SDL_Event e;
+        g_loop_turns++;
         /* idle: block, never spin; with a firmware running the panels are redrawn about ten times a second */
         int wait = settle ? 16 : sticks_active(&a) ? 16 : a.job ? 100 : fm1ntt_loaded(a.m) ? 60 : toast_active(&a.toast) ? 100 : 250;
         if (dirty ? SDL_PollEvent(&e) : wait_event(&e, wait)) {
             do {
                 if (e.type == SDL_JOYBUTTONDOWN || e.type == SDL_JOYBUTTONUP) trace("event %s button %d (panel %d)", e.type == SDL_JOYBUTTONDOWN ? "down" : "up", e.jbutton.button, a.panel);
                 else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) trace("event key %s %d", e.type == SDL_KEYDOWN ? "down" : "up", (int)e.key.keysym.sym);
-                dispatch(&a, &e); dirty = 1;
+                dispatch(&a, &e);
+                if (e.type == SDL_JOYAXISMOTION) g_ev_axis++;          /* the stick is read by sticks_tick, which says when it moves the selection: the event alone redraws nothing */
+                else { g_ev_other++; dirty = 1; }
             } while (SDL_PollEvent(&e));
         }
         if (sticks_active(&a)) { dirty = 1; a.last_input_ms = SDL_GetTicks(); }
@@ -5335,6 +5340,7 @@ int main(int argc, char **argv) {
             if (a.frame_ms > a.frame_max_ms) a.frame_max_ms = a.frame_ms;
             if (dirty) trace("draw (by input) took %u ms, sel %d/%d", SDL_GetTicks() - t0, a.tool_sel, a.file_sel);
             last_draw = last_settle = now;
+            g_loop_draws++;
             dirty = 0;
             if (by_input) settle = 3;                         /* only a press needs it: the periodic redraws are followed by another soon enough */
         } else if (settle && now - last_settle >= 16) {     /* the same pixels again: it costs a texture copy, no repaint and no lock */
