@@ -4,6 +4,9 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-23 (docs): **the Rec demo's constant rushing noise is the firmware's bed, not a fault** (measured: all five bundled Haunted FM-1 firmwares hiss at idle; the stock firmware and the Pack's others are silent, so the core adds none); `docs/SHOWCASE.md` says so for all five.
+- 2026-11-23 (host, docs): **the first complete Rec demo on the unit is read: PASS 5, FAIL 0** (1335 frames, 44.5 s, mp4 made; 1050.8 s to record). The zoom hero's text no longer says Tab (Tab is the map's Y).
+- 2026-11-23 (docs): **fifth Device report from the unit read (build 81f6099+dirty): the sound-device close works** (`SDLAudioP2` gone from the wakers; idle 5.13% of a core, 95.5 wake-ups/s, 1225 mW; goals 2% and 25 still fail, the main thread is next); resident memory rose from 73 to 126 MB, not yet explained.
 - 2026-11-23 (host): **the r3i6nos keyboard map of 2026-11-23 is adopted**: W A S D, I J K L, F, H, T (Fn), Q E O U, R, Y are pad buttons (`KB_MAP`), so chords and R1-held work from the keyboard. Decided the same day: the keyboard's note rows, P, Home, End, Insert and Delete are gone; Space is A, Tab is Y, Backspace is X; zoom is F1 only; W and S repeat in a menu. Self-tested; not tried on a real keyboard.
 - 2026-11-23 (docs): roadmap refreshed from the sister repositories (header counts corrected to 165 open); new item: adopt r3i6nos's keyboard map of 2026-11-23.
 - 2026-11-23 (docs): **fourth Device report from the unit read (build 2559d0b, no firmware idle):** idle and speed figures unchanged and the build predates the sound-device close, so that fix is still unmeasured; see the roadmap.

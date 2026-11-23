@@ -19,7 +19,7 @@
 typedef struct { const char *id, *label; } Hero;
 static const Hero HEROES[] = {
     {"carousel", "The nine panels on Fn"},
-    {"zoom", "Standard and Zoomed with F1 or Tab"},
+    {"zoom", "Standard and Zoomed with F1"},
     {"midi", "Send notes to the MIDI jack"},
     {"tools", "Pause, reset and flash slots"},
     {"firmware", "Boot a firmware and play it (a bundled one, or yours)"},

@@ -3,7 +3,7 @@
 A cross-platform sandbox, playground and emulator for **FM-1 firmware**: run the M-VAVE FM-1 pocket FM synth's community
 firmwares (Felucca, SLOOP, Melodee, S1Vave and the rest) on a computer, in a browser, or on an **R36S** handheld running
 [r3i6nos](https://github.com/joashchee/r3i6nos), to audition them before flashing a real FM-1. The FM-1's own
-240 x 240 screen is drawn pixel for pixel at the top left, with sandbox panels around it; **F1 or Tab** zooms it to 2x.
+240 x 240 screen is drawn pixel for pixel at the top left, with sandbox panels around it; **F1** zooms it to 2x.
 
 > **Early days.** The CPU, memory map and peripherals are the vendored MIT [`fm1-emu`](https://github.com/joakimeriksson/fm1-emu) crates;
 > the C and SDL2 host, the pixel layouts, the C API and the web shell are in and tested, but **nothing has run on a real R36S** (`ROADMAP.md`). Five permissively licensed firmwares
@@ -79,7 +79,7 @@ and PgUp/PgDn turn encoders on MACHINE and move around the other panels, Return 
 
 ## Hero features (the Rec demo's checklist)
 
-1. **carousel**: the nine panels on Fn, and the main menu on L1 + R1. 2. **zoom**: Standard and Zoomed with F1 or Tab. 3. **midi**: send notes to the MIDI jack.
+1. **carousel**: the nine panels on Fn, and the main menu on L1 + R1. 2. **zoom**: Standard and Zoomed with F1. 3. **midi**: send notes to the MIDI jack.
 4. **tools**: pause, reset, flash slots. 5. **firmware**: boot a firmware and play it (a bundled one unless you give yours).
 
 ## Docs

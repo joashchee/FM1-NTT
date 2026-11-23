@@ -31,7 +31,7 @@ of silence in nearly every other tick: the stutter and distortion heard on playb
 firmware still ends), no tick came near it on the five bundled firmwares, `state.txt` records `shorts=N` (ticks that were padded) and the self-test fails on a gap of
 40 or more silent samples after the boot. Demos made with tour 1 are made again. The Rec demo had the same cap: its tour had 538 such gaps and has 4 (the pauses of the
 music) since its budget was raised the same way; the Rec demo's self-test run still uses a tiny budget on purpose (to be quick), so it does not check gaps.
-**A steady rushing sound is not a fault:** HALF-LIGHT and MIDNIGHT ROUTE have a "bed" (rain, crackle, hiss, wind, room; their own documents), audible before any note.
+**A steady rushing sound is not a fault:** all five bundled Haunted FM-1 firmwares have a "bed" (rain, crackle, hiss, wind, room; their own documents; UNTRUE STEP's is the Key page's Bed: None, Vinyl, Rain, Both, Hiss, Room), audible before any note. Measured on the Mac (2026-11-23, idle seconds 6 to 8 of the tour, left channel): HALF-LIGHT -41 dBFS, MIDNIGHT ROUTE -37, UNTRUE STEP -45, VOICEMAIL -38, WORN TAPE -57, all broadband (about 6.4 kHz zero crossings, left and right different), while the stock firmware and the Pack's Felucca, Skiff, Jangada and MIDIMON are digital silence (0 exactly) with no key pressed: the core adds no noise of its own.
 
 **More cores.** The time of one demo is the emulation, one host thread: the machine's two cores are stepped in turn by one thread, and each step needs the one before.
 Writing the pictures was 0.1 s of 21.6 s with the interpreter (and 0.09 s of 3.1 s with the JIT, which is 7 times faster here), so handing it to another core gains nothing.
