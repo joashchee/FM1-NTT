@@ -36,7 +36,7 @@ jobs:
           python3 scripts/bench-gate.py docs/bench-baseline-linux-x86_64.txt "$FM1NTT_DIR/bench/latest.txt"
       - name: Keep the benchmark report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-linux-x86_64
           path: ${{ runner.temp }}/fm1ntt-bench/bench/latest.txt
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build the archive
         run: scripts/build-linux.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: FM1-NTT-linux-x86_64
           path: build/linux/*.tar.gz
