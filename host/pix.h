@@ -7,7 +7,7 @@
  *             (x 0..239, y 240..479).
  *   Zoomed    the FM-1 screen at 2x (0,0)-(479,479), each pixel a 2x2 block; one panel at the right (x 480..639).
  *
- * Fn (raw button 16, or Tab / F1 on a keyboard) toggles between them. No file here depends on SDL: the canvas is a plain pixel
+ * F1 on a keyboard toggles between them. No file here depends on SDL: the canvas is a plain pixel
  * array, so the layout and the drawing are tested headless (host/fm1ntt.c --selftest). The font is original to this project.
  * Static functions, one header. */
 #ifndef FM1NTT_PIX_H

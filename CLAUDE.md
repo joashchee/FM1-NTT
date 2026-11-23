@@ -42,7 +42,7 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
 4. **The core's only dependencies are the vendored crates, it is deterministic, and the C API never unwinds** (`panic = "abort"`; every function tolerates null). No new dependency without asking.
 5. **Firmware is untrusted input:** an `Error`, never a crash, a hang or unbounded memory. Bound every size, check every access.
 6. **The window is pixel graphics, not r3i6nos's text theme** (the maintainer, 2026-11-16): the FM-1's 240 x 240 screen flush top left,
-   pixel for pixel; **Tab or F1** toggles Standard (1x, panels right and below) and Zoomed (2x, one panel at the right).
+   pixel for pixel; **F1** toggles Standard (1x, panels right and below) and Zoomed (2x, one panel at the right).
    **Fn (raw button 16) turns the panel carousel** (MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND MONITOR TOOLS), **L1+R1 open the menu** (the maintainer, 2026-11-16);
    Start pauses off MACHINE; the FM-1's own controls (notes, sticks, L1/L2/R2 modifiers: README) are the pad only on MACHINE. Only the app's folder is written (`firmware/ slots/ recordings/ screenshots/`), temp name then rename.
    Text is the project's own 5 x 7 font; every text pair passes 4.5:1; nothing scrolls (a long list is whole pages). **Quit is how the app is left**
@@ -74,7 +74,7 @@ is `docs/HARDWARE.md`; the decisions are `docs/ARCHITECTURE.md`; the licence lin
     **Fn the next panel, L1+Fn the first, R1+Fn the one before** (a history); **R1 held is "increase"** (Page up and down, Home and End; on MACHINE the octave and the key). **L1, R1, L2, R2, Fn, L3, R3 are the
     system's: no panel binds them. A panel binds the other ten buttons as it needs** (the maintainer, 2026-11-20: panels may remap the one-touch buttons while in focus, as close to the defaults as their
     context allows); the binding is a permutation per panel (`g_bind`), so the **Keymap** (help, test, remap with conflict checking, saved in `keymap.txt`, reverts by row, page and all) can swap but never
-    double-bind, and a menu or a question always uses the defaults. **Quit is deliberate: only the main menu's Quit leaves, never a button or Esc.** Keyboard: the backquote key the main menu, the backslash key the context menu (the maintainer, 2026-11-20).
+    double-bind, and a menu or a question always uses the defaults. **Quit is deliberate: only the main menu's Quit leaves, never a button or Esc.** Keyboard: the backquote key the main menu, the backslash key the context menu (the maintainer, 2026-11-20). **The keyboard is r3i6nos's map of 2026-11-23** (`KB_MAP` in `host/fm1ntt.c`: W A S D, I J K L, F H, T Fn, Q E O U, R Y, plus Space A, Tab Y, Backspace X, Esc B; the maintainer's decisions of that day): a key is dispatched as its pad button; the keyboard plays no note rows; zoom is F1 only.
     The right stick moves the selection off MACHINE (dead zone 0.35, 6 a second; MACHINE's knobs stay 12). **Rec demo, screenshots and the Device report use whatever colour theme is on** (the maintainer, 2026-11-20);
     the tour sets the person's Keymap aside. Every colour theme passes 4.5:1 (the self-test checks each); the self-test never writes the person's `theme.txt` or `keymap.txt` (it uses a temp folder).
 

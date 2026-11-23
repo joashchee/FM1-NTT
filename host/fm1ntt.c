@@ -14,9 +14,9 @@
  *   fm1ntt --reduced-motion ...        (or FM1NTT_REDUCED_MOTION=1) the MONITOR panel's data rain is a still page
  *   fm1ntt --version
  *
- * The FM-1's 240x240 screen sits flush top left, pixel for pixel. Fn (raw button 16, Tab or F1) toggles Standard (1x, panels right and
- * below) and Zoomed (2x, one narrow panel at the right; Tab or F1 on a keyboard). On the pad Fn turns the panel carousel and L1+R1 together
- * open and close the menu (TOOLS); Home and End turn the carousel on a keyboard; on MACHINE the pad plays, see the pad section below. The carousel is as TinyNTT's:
+ * The FM-1's 240x240 screen sits flush top left, pixel for pixel. Fn is the carousel; F1 toggles Standard (1x, panels right and
+ * below) and Zoomed (2x, one narrow panel at the right; F1 on a keyboard). On the pad Fn turns the panel carousel and L1+R1 together
+ * open and close the menu (TOOLS); T turns the carousel on a keyboard; on MACHINE the pad plays, see the pad section below. The carousel is as TinyNTT's:
  * MACHINE FILES CPU MEMORY CONSOLE MIDI SOUND MONITOR TOOLS. The audio device paces the emulation: SDL's callback asks the core for frames.
  * Files are only written under the app's folder ($FM1NTT_DIR, else r3i6nos's choice: the DATA card /roms2/FM1-NTT when a valid one is in, else /roms/FM1-NTT; else ~/FM1-NTT; see base_dir), to a temporary name
  * and then renamed. Nothing here has run on an R36S. */
@@ -81,6 +81,7 @@ typedef struct {
     int enc_turns[7];
     /* the pad: held buttons, the matrix id each press sent (+1; 0 none) so its release matches, the sticks, the note scale and key */
     unsigned pad_mask;
+    unsigned char kb_sent[128];         /* the pad button + 1 a key press was sent as, so its release is the same button's */
     int pad_sent[32];
     float axis[4], axis_acc[4];
     uint32_t axis_t;
@@ -2038,25 +2039,13 @@ static void speed_tick(App *a) {
 }
 
 /* ---- input ------------------------------------------------------------------------------------------------------------- */
-/* The computer keyboard as the FM-1's note keys: two rows, as a tracker's. Returns the note key 0..26, or -1. */
-static int note_of_key(SDL_Keycode k) {
-    static const char lower[] = "zsxdcvgbhnjm,l.;/";   /* keys 0..16 */
-    static const char upper[] = "q2w3er5t6y7ui9o";      /* keys 12..26 */
-    if (k < 128 && k > 0) {
-        const char *p = strchr(lower, (int)k);
-        if (p && *p) return (int)(p - lower);
-        p = strchr(upper, (int)k);
-        if (p && *p) return 12 + (int)(p - upper);
-    }
-    return -1;
-}
 static int button_of_key(SDL_Keycode k) {
     switch (k) {
     case SDLK_LEFTBRACKET: return 0;
     case SDLK_RIGHTBRACKET: return 1;
     case SDLK_F2: return 2;  case SDLK_F3: return 3;  case SDLK_F4: return 4;  case SDLK_F5: return 5;
     case SDLK_F6: return 6;  case SDLK_F7: return 7;  case SDLK_F8: return 8;  case SDLK_F9: return 9;
-    case SDLK_F10: return 10; case SDLK_F11: return 11; case SDLK_SPACE: return 12; case SDLK_F12: return 13;
+    case SDLK_F10: return 10; case SDLK_F11: return 11; case SDLK_F12: return 13;
     default: return -1;
     }
 }
@@ -2175,20 +2164,19 @@ static void pad_machine_press(App *a, int b) {
 static int act_of_key(SDL_Keycode k) {
     switch (k) {
     case SDLK_UP: return A_UP; case SDLK_DOWN: return A_DOWN; case SDLK_LEFT: return A_LEFT; case SDLK_RIGHT: return A_RIGHT;
-    case SDLK_RETURN: case SDLK_KP_ENTER: return A_OK; case SDLK_BACKSPACE: return A_BACK;
-    case SDLK_INSERT: return A_X; case SDLK_DELETE: return A_Y; case SDLK_PAGEUP: return A_PGUP; case SDLK_PAGEDOWN: return A_PGDN;
+    case SDLK_RETURN: case SDLK_KP_ENTER: return A_OK;
+    case SDLK_PAGEUP: return A_PGUP; case SDLK_PAGEDOWN: return A_PGDN;
     default: return A_NONE;
     }
 }
 
-/* Zoom is a keyboard key (Tab or F1); the pad's Fn is the carousel. */
+/* Zoom is a keyboard key (F1; Tab is the map's Y); the pad's Fn is the carousel (T on a keyboard). */
 static int is_toggle(const SDL_Event *e) {
-    return e->type == SDL_KEYDOWN && !e->key.repeat && (e->key.keysym.sym == SDLK_TAB || e->key.keysym.sym == SDLK_F1);
+    return e->type == SDL_KEYDOWN && !e->key.repeat && e->key.keysym.sym == SDLK_F1;
 }
-/* Fn on the pad and Home / End on a keyboard turn the carousel: -1 before, +1 after, 0 neither. */
+/* Fn on the pad (T on a keyboard, sent as the pad's Fn) turns the carousel: +1 after, 0 neither; L1 + Fn and R1 + Fn are handled in dispatch. */
 static int is_carousel(const SDL_Event *e) {
     if (e->type == SDL_JOYBUTTONDOWN) return e->jbutton.button == PAD_FN ? 1 : 0;
-    if (e->type == SDL_KEYDOWN && !e->key.repeat) return e->key.keysym.sym == SDLK_HOME ? -1 : e->key.keysym.sym == SDLK_END ? 1 : 0;
     return 0;
 }
 
@@ -2199,11 +2187,9 @@ static void handle(App *a, const SDL_Event *e) {
         SDL_Keycode k = e->key.keysym.sym;
         if (a->panel == PANEL_MIDI && !a->confirm && (k == SDLK_RETURN || k == SDLK_KP_ENTER)) { midi_ok(a, down); return; }
         if (e->key.repeat) return;
-        if (down && (k == SDLK_p || k == SDLK_PAUSE)) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (P or Start resumes)" : "Running", NULL); return; }
+        if (down && k == SDLK_PAUSE) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); return; }
         if (a->confirm) { if (down) act(a, act_of_key(k)); return; }
-        int n = note_of_key(k), b = button_of_key(k);
-        if (n >= 0 && a->panel == PANEL_SOUND && a->pv_on) { pv_note(a, &a->pv_key[n], pv_midi(a, n), down); return; }   /* the preview's keys, not the machine's */
-        if (n >= 0) { key_id(a, FM1_KEY_BASE + n, down); return; }
+        int b = button_of_key(k);
         if (b >= 0) { key_id(a, b, down); return; }
         if (!down) return;
         if (machine_panel) switch (k) {
@@ -2264,16 +2250,54 @@ static void menu_input(App *a, const SDL_Event *e) {
         menu_press(a, k == SDLK_ESCAPE ? A_BACK : k == SDLK_HOME ? A_HOME : k == SDLK_END ? A_END : k == SDLK_PAGEUP ? A_PGUP : k == SDLK_PAGEDOWN ? A_PGDN : act_of_key(k));
     } else if (e->type == SDL_JOYBUTTONDOWN) menu_press(a, act_of_pad_r1(e->jbutton.button, a->pad_mask >> PAD_R1 & 1));
 }
+/* The r3i6nos keyboard map (docs: ../r3i6nos/docs/r3i6nos-mapping.md, "The keyboard bindings", 2026-11-23): each letter is a pad button, and a key press is
+ * dispatched as that button, so a chord (Q + O the main menu), R1 held and Fn behave exactly as on the pad. T is Fn (a tap), Q E O U are L1 L2 R1 R2 (held).
+ * Enter, Esc (B: it closes a menu, a question, the info page or the editor), the arrows and the backquote and backslash menu keys are handled where they were;
+ * Space is A, Tab is Y, Backspace is X. */
+static const struct { char key; int pad; } KB_MAP[] = {
+    {'w', 8}, {'s', 9}, {'a', 10}, {'d', 11},                       /* the d-pad */
+    {'i', 2}, {'j', 3}, {'k', 0}, {'l', 1},                         /* X, Y, B, A */
+    {'f', PAD_SELECT}, {'h', PAD_START}, {'t', PAD_FN},
+    {'q', PAD_L1}, {'e', PAD_L2}, {'o', PAD_R1}, {'u', PAD_R2},
+    {'r', PAD_L3}, {'y', PAD_R3},
+    {' ', 1}, {'\t', 3}, {'\b', 2},                                   /* Space is A, Tab is Y, Backspace is X (Esc is B, below) */
+};
+/* The pad button a key stands for, or -1. The computer keyboard no longer plays the FM-1's notes (the maintainer, 2026-11-23): the pad does. */
+static int kb_pad_button(const App *a, SDL_Keycode k) {
+    (void)a;
+    if (k <= 0 || k >= 128) return -1;
+    for (size_t i = 0; i < sizeof KB_MAP / sizeof KB_MAP[0]; i++) if (KB_MAP[i].key == (char)k) return KB_MAP[i].pad;
+    return -1;
+}
 static void cmp_press(App *a, int act);
 static void dispatch(App *a, const SDL_Event *e) {
     if (a->cmp_on && (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && !(e->type == SDL_KEYDOWN && e->key.repeat)) {   /* compare mode is modal: its own few keys, the rest used up */
-        int ac = e->type == SDL_JOYBUTTONDOWN ? act_of_pad_r1(e->jbutton.button, 0) : e->key.keysym.sym == SDLK_ESCAPE ? A_BACK : e->key.keysym.sym == SDLK_SPACE || e->key.keysym.sym == SDLK_p ? A_START : act_of_key(e->key.keysym.sym);
+        int ac = e->type == SDL_JOYBUTTONDOWN ? act_of_pad_r1(e->jbutton.button, 0) : e->key.keysym.sym == SDLK_ESCAPE ? A_BACK : e->key.keysym.sym == SDLK_h ? A_START : act_of_key(e->key.keysym.sym);
         cmp_press(a, ac);
         return;
     }
     if (a->pl.on && (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && !(e->type == SDL_KEYDOWN && e->key.repeat)) { player_stop(a); return; }   /* a press ends the demo and is used up */
     if (e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN || e->type == SDL_JOYAXISMOTION || e->type == SDL_JOYHATMOTION) a->last_input_ms = SDL_GetTicks();   /* the data rain's whole-panel mode ends on any of them */
     if ((e->type == SDL_KEYDOWN || e->type == SDL_JOYBUTTONDOWN) && toast_key(&a->toast, SDL_GetTicks())) return;   /* a failure's key is used up */
+    if ((e->type == SDL_KEYDOWN || e->type == SDL_KEYUP) && a->menu_kind != MK_KEYMAP) {   /* the keyboard map: a letter is a pad button (the Keymap's test page shows the raw key) */
+        SDL_Keycode ks = e->key.keysym.sym;
+        if (ks > 0 && ks < 128) {
+            int down = e->type == SDL_KEYDOWN, pb2 = down ? kb_pad_button(a, ks) : a->kb_sent[ks] - 1;
+            if (pb2 >= 0) {
+                if (e->key.repeat) {                                                  /* a held W or S repeats in a menu, as the arrows do */
+                    if (a->menu_kind && !a->confirm && (pb2 == 8 || pb2 == 9) && a->kb_sent[ks]) { SDL_Event rp; memset(&rp, 0, sizeof rp); rp.type = SDL_JOYBUTTONDOWN; rp.jbutton.button = (Uint8)pb2; dispatch(a, &rp); }
+                    return;
+                }
+                if (down && a->kb_sent[ks]) return;
+                a->kb_sent[ks] = down ? (unsigned char)(pb2 + 1) : 0;
+                SDL_Event je;
+                memset(&je, 0, sizeof je);
+                je.type = down ? SDL_JOYBUTTONDOWN : SDL_JOYBUTTONUP; je.jbutton.button = (Uint8)pb2;
+                dispatch(a, &je);
+                return;
+            }
+        }
+    }
     int turn = is_carousel(e), pad_down = e->type == SDL_JOYBUTTONDOWN, pb = pad_down || e->type == SDL_JOYBUTTONUP ? e->jbutton.button : -1;
     if (pad_down && pb < 32) a->pad_mask |= 1u << pb;
     if (e->type == SDL_JOYBUTTONUP && pb < 32) a->pad_mask &= ~(1u << pb);
@@ -3850,12 +3874,12 @@ static int selftest(void) {
             remove(tp);
         }
     }
-    /* the carousel: Fn goes round on the pad, Home and End both ways on a keyboard; L1 and R1 together are the menu */
+    /* the carousel: Fn (T on a keyboard) goes round on the pad; L1 and R1 together are the menu */
     CHECK(panel_step(PANEL_MACHINE, -1) == PANEL_TOOLS && panel_step(PANEL_TOOLS, 1) == PANEL_MACHINE && panel_step(PANEL_CPU, 1) == PANEL_MEMORY);
     SDL_Event l1 = {.type = SDL_JOYBUTTONDOWN}, r1 = {.type = SDL_JOYBUTTONDOWN}, fn = {.type = SDL_JOYBUTTONDOWN}, tab = {.type = SDL_KEYDOWN}, home = {.type = SDL_KEYDOWN}, end = {.type = SDL_KEYDOWN};
     l1.jbutton.button = PAD_L1; r1.jbutton.button = PAD_R1; fn.jbutton.button = PAD_FN; tab.key.keysym.sym = SDLK_TAB; home.key.keysym.sym = SDLK_HOME; end.key.keysym.sym = SDLK_END;
-    CHECK(is_carousel(&fn) == 1 && is_carousel(&home) == -1 && is_carousel(&end) == 1 && is_carousel(&l1) == 0 && is_carousel(&r1) == 0);
-    CHECK(is_toggle(&tab) && !is_toggle(&fn) && !is_toggle(&l1));
+    CHECK(is_carousel(&fn) == 1 && is_carousel(&home) == 0 && is_carousel(&end) == 0 && is_carousel(&l1) == 0 && is_carousel(&r1) == 0);
+    CHECK(!is_toggle(&tab) && !is_toggle(&fn) && !is_toggle(&l1));
     {
         App p;
         memset(&p, 0, sizeof p);
@@ -3950,6 +3974,17 @@ static int selftest(void) {
         kb.key.keysym.sym = SDLK_BACKSLASH; dispatch(&p, &kb); CHECK(p.menu_kind == MK_CTX);
         kb.key.keysym.sym = SDLK_BACKSLASH; dispatch(&p, &kb); CHECK(p.menu_kind == MK_NONE);
         CHECK(!is_menu_key(&kb) && button_of_key(SDLK_F10) == 10);
+        /* the r3i6nos keyboard map: one key a pad input, no key twice; Q + O the main menu, T the next panel, a release matches its press */
+        for (size_t i = 0; i < sizeof KB_MAP / sizeof KB_MAP[0]; i++) for (size_t j = i + 1; j < sizeof KB_MAP / sizeof KB_MAP[0]; j++) CHECK(KB_MAP[i].key != KB_MAP[j].key);
+        { unsigned seen = 0; for (size_t i = 0; i < sizeof KB_MAP / sizeof KB_MAP[0]; i++) seen |= 1u << KB_MAP[i].pad; CHECK(seen == 0x1ffffu); }   /* every one of the pad's 17 inputs has a key */
+        p.panel = PANEL_CPU; p.menu_kind = MK_NONE;
+        { SDL_Event ke = {.type = SDL_KEYDOWN}, ku = {.type = SDL_KEYUP};
+          ke.key.keysym.sym = SDLK_q; dispatch(&p, &ke); ke.key.keysym.sym = SDLK_o; dispatch(&p, &ke); CHECK(p.menu_kind == MK_MAIN);
+          kb.key.keysym.sym = SDLK_ESCAPE; dispatch(&p, &kb); CHECK(p.menu_kind == MK_NONE);
+          ku.key.keysym.sym = SDLK_o; dispatch(&p, &ku); ku.key.keysym.sym = SDLK_q; dispatch(&p, &ku); CHECK(!(p.pad_mask >> PAD_L1 & 1) && !(p.pad_mask >> PAD_R1 & 1));
+          int before = p.panel; ke.key.keysym.sym = SDLK_t; dispatch(&p, &ke); ku.key.keysym.sym = SDLK_t; dispatch(&p, &ku); CHECK(p.panel != before);
+          p.panel = PANEL_MACHINE; CHECK(kb_pad_button(&p, SDLK_s) == 9 && kb_pad_button(&p, SDLK_k) == 0);   /* no note keys: S is the d-pad down on MACHINE too */
+          CHECK(kb_pad_button(&p, SDLK_SPACE) == 1 && kb_pad_button(&p, SDLK_TAB) == 3 && kb_pad_button(&p, SDLK_BACKSPACE) == 2 && kb_pad_button(&p, SDLK_ESCAPE) == -1 && kb_pad_button(&p, SDLK_p) == -1); }
         /* the right stick steps a list 6 a second at most; Page up and down with R1; Home or End once for a push; nothing inside the dead zone */
         PmStick st;
         memset(&st, 0, sizeof st);
@@ -4046,8 +4081,7 @@ static int selftest(void) {
 #undef TAP
     }
     /* the controls map to the matrix */
-    CHECK(note_of_key('z') == 0 && note_of_key('/') == 16 && note_of_key('q') == 12 && note_of_key('o') == 26 && note_of_key('1') == -1);
-    CHECK(button_of_key(SDLK_SPACE) == 12 && button_of_key(SDLK_F12) == 13 && button_of_key(SDLK_a) == -1);
+    CHECK(button_of_key(SDLK_SPACE) == -1 && button_of_key(SDLK_F12) == 13 && button_of_key(SDLK_a) == -1);
     CHECK(act_of_pad(0) == A_BACK && act_of_pad(4) == A_NONE);
     /* the pad on MACHINE: notes of the scale (C major: up C, left D, down E, right F, Y G, B A, A B, X C), modifiers, sticks */
     {
@@ -4403,16 +4437,14 @@ static int selftest(void) {
         act(&a, A_RIGHT); act(&a, A_RIGHT); act(&a, A_RIGHT); CHECK(a.pv_oct == 2);
         act(&a, A_LEFT); act(&a, A_LEFT); act(&a, A_LEFT); act(&a, A_LEFT); act(&a, A_LEFT); CHECK(a.pv_oct == -2);
         act(&a, A_RIGHT); act(&a, A_RIGHT); CHECK(a.pv_oct == 0);
-        SDL_Event ev; memset(&ev, 0, sizeof ev);
-        ev.type = SDL_KEYDOWN; ev.key.keysym.sym = 'q';                          /* key 12: F4 + 12 = MIDI 65 */
-        handle(&a, &ev);
+        pv_note(&a, &a.pv_key[12], pv_midi(&a, 12), 1);                          /* key 12: F4 + 12 = MIDI 65 (the keyboard no longer plays notes: the pad's chord does) */
         CHECK(a.pv_key[12] == 65 + 1 && fm1ntt_keys_down(a.m) == 0);          /* the preview heard it, the machine did not */
         audio_step(&a, loud, 2048);
         long e0 = 0, e1 = 0;
         for (int i = 0; i < 2 * 2048; i++) { e0 += abs(quiet[i]); e1 += abs(loud[i]); }
         CHECK(e1 > e0 + 2048 * 20);                                              /* it sounds */
-        ev.type = SDL_KEYUP; handle(&a, &ev); CHECK(a.pv_key[12] == 0);
-        memset(&ev, 0, sizeof ev); ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = 3; handle(&a, &ev);   /* the pad's Y: the root */
+        pv_note(&a, &a.pv_key[12], pv_midi(&a, 12), 0); CHECK(a.pv_key[12] == 0);
+        SDL_Event ev; memset(&ev, 0, sizeof ev); ev.type = SDL_JOYBUTTONDOWN; ev.jbutton.button = 3; handle(&a, &ev);   /* the pad's Y: the root */
         CHECK(a.pv_pad[0] == 60 + 1);
         /* Solo (R2): the machine is not run, the engine still sounds, and leaving the preview ends it */
         {
