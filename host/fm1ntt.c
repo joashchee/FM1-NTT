@@ -66,7 +66,7 @@
 #define STICK_MAX_CPS 12.0f     /* clicks a second at full deflection */
 #define REC_RING_FRAMES (1 << 18)
 
-#define NTOOLS 15
+#define NTOOLS 17
 #define RAIN_IDLE_MS 30000u       /* no input for this long and the monitor's whole panel is the data rain (when it is on) */
 #define PACE_AUTO 4
 enum { CF_NONE, CF_RESET, CF_RESTORE, CF_QUIT, CF_DELETE };
@@ -1353,6 +1353,14 @@ static void tools_run(App *a) {
     case 14: a->remember = !a->remember; a->fl_dirty = 0; if (a->remember) a->fl_rev = fm1ntt_flash_revision(a->m); say(a, 0, a->remember ? "Remembering the firmware's saved settings between runs" : "Saved settings are no longer kept", NULL); break;
     case 13: a->bg_demos = !a->bg_demos; say(a, 0, a->bg_demos ? "Background demos on: one at a time, paused while you play" : "Background demos off", NULL); break;
     case 12: a->rain_on = !a->rain_on; if (a->rain_on && a->reduced_motion) rain_still(a); say(a, 0, a->rain_on ? (a->reduced_motion ? "Data rain on, as a still page (reduced motion)" : "Data rain on: it shows on the MONITOR panel") : "Data rain off", NULL); break;
+    case 15: {   /* the FM-1's flash chip: the id the firmware reads at its start-up, so it takes effect at the next reset */
+        int uc = !strcmp(a->flash_part, "uc25hq80");
+        snprintf(a->flash_part, sizeof a->flash_part, "%s", uc ? "p25q80" : "uc25hq80");
+        apply_prefs(a);
+        say(a, 0, uc ? "Flash chip: PUYA P25Q80, read at the next reset" : "Flash chip: UC25HQ80, read at the next reset", NULL);
+    } break;
+    case 16: a->cpu1_survives = !a->cpu1_survives; lock(a); fm1ntt_cpu1_survives(a->m, a->cpu1_survives); unlock(a);
+        say(a, 0, a->cpu1_survives ? "A fault on core 1 stops that core only" : "A fault on core 1 halts the machine", NULL); break;
     default: break;
     }
 }
@@ -1502,7 +1510,9 @@ typedef struct { int ctx, mod, part; } KmPage;
 #define KM_MAXP 24
 static const char *const KM_SYS_ROWS[][2] = {
     {"L1 + R1", "MAIN MENU"}, {"L2 + R2", "CONTEXT MENU"}, {"FN", "NEXT PANEL"}, {"L1 + FN", "FIRST PANEL"}, {"R1 + FN", "PANEL BEFORE (AGAIN: BACK)"},
-    {"` KEY", "MAIN MENU"}, {"\\ KEY", "CONTEXT MENU"}, {"HOME / END KEYS", "PANEL BEFORE / NEXT"}, {"TAB, F1", "ZOOM 1X / 2X"}, {"P", "PAUSE"}, {"ESC", "CLOSES A MENU"},
+    {"` KEY, Q + O", "MAIN MENU"}, {"\\ KEY, E + U", "CONTEXT MENU"}, {"T KEY", "FN (A TAP)"}, {"F1 KEY", "ZOOM 1X / 2X"}, {"ESC KEY", "B: CLOSES A MENU"},
+    {"W A S D", "D-PAD"}, {"I J K L", "X, Y, B, A"}, {"F, H", "SELECT, START"}, {"Q E O U (HELD)", "L1 L2 R1 R2"}, {"R, Y", "L3, R3"},
+    {"SPACE, TAB, BKSP", "A, Y, X"}, {"ARROW KEYS", "RIGHT STICK"},
     {"R1 + D-PAD UP DOWN", "PAGE UP, PAGE DOWN"}, {"R1 + D-PAD LEFT RIGHT", "HOME, END"}, {"R1 + RIGHT STICK", "THE SAME, 6 A SECOND"}, {"RIGHT STICK", "SELECTION (NOT MACHINE)"},
     {"STICKS ON MACHINE", "KNOBS 1 TO 4"}, {"L3", "NO VIRTUAL MOUSE"}, {"R3", "NO VIRTUAL KEYBOARD"}, {"L1 L2 R1 R2 FN L3 R3", "THE SYSTEM'S, NEVER BOUND"},
     {"IN A MENU", "D-PAD, A, B (FIXED)"}, {"QUIT", "THE MAIN MENU ONLY"},
@@ -1988,6 +1998,8 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
     else snprintf(u->tools[11], PX_NAME, "  PACE: OFF");
     snprintf(u->tools[12], PX_NAME, "  DATA RAIN: %s", a->rain_on ? "ON" : "OFF");
     snprintf(u->tools[13], PX_NAME, "  BACKGROUND DEMOS: %s", a->bg_demos ? (a->sw_pid ? "ON (MAKING ONE)" : "ON") : "OFF");
+    snprintf(u->tools[15], PX_NAME, "  FLASH CHIP: %s", !strcmp(a->flash_part, "uc25hq80") ? "UC25HQ80" : "PUYA P25Q80");
+    snprintf(u->tools[16], PX_NAME, "  CORE 1 FAULT: %s", a->cpu1_survives ? "STOPS CORE 1" : "HALTS");
     u->ntools = NTOOLS;
     u->tool_sel = a->tool_sel;
     if (a->confirm == CF_RESET) snprintf(u->confirm, sizeof u->confirm, "Reset the machine? The emulated flash goes back to what the firmware package carried, and the saved settings are forgotten.");
@@ -4247,7 +4259,7 @@ static int selftest(void) {
     a.panel = PANEL_CPU; a.mode = MODE_STANDARD;
     fill_ui(&a, ui, 0);
     CHECK(ui->ncpu >= 1 && (!strcmp(ui->run_state, "RUN") || !strcmp(ui->run_state, "HALT")));
-    CHECK(ui->nfiles == 3 && ui->files[1][0] == '*' && ui->ntools == NTOOLS && strstr(ui->tools[NTOOLS - 1], "REMEMBER") != NULL);   /* Quit is not a TOOLS row: leaving is the main menu's */
+    CHECK(ui->nfiles == 3 && ui->files[1][0] == '*' && ui->ntools == NTOOLS && strstr(ui->tools[14], "REMEMBER") != NULL && strstr(ui->tools[15], "FLASH CHIP") != NULL && strstr(ui->tools[16], "CORE 1") != NULL);   /* Quit is not a TOOLS row: leaving is the main menu's */
     a.cpu_sel = 0; act(&a, A_LEFT); CHECK(a.cpu_sel == 1); act(&a, A_UP); CHECK(a.cpu_sel == 0);
     a.panel = PANEL_MEMORY; a.mem_region = 1;
     fill_ui(&a, ui, 0);

@@ -4,6 +4,10 @@ Add a bullet whenever a change lands. Newest first.
 
 ## Unreleased
 
+- 2026-11-23 (checks): **the C host's self-test passes under ASan and UBSan** (gcc, Debian 12 arm64 under Docker, the light run): no report.
+- 2026-11-23 (core example): **`bufcost` can hold a chord** (`bufcost FW jit 512 chord`); with four keys held the cost per buffer is still even on all 15 firmwares (p99 1.1 to 1.4x the mean; the stock firmware 1.93x), so even pacing stays unneeded.
+- 2026-11-23 (host): **TOOLS has rows for the flash chip and the second core's fault policy** (17 rows); the footer says F1 for zoom (not Tab) and the Keymap's system page lists the keyboard map.
+- 2026-11-23 (core example): **`drive`: random input on every firmware here (15 firmwares, 4 seeds, 6 s each after the boot): none halted**, so none of the 156 undecodable forms was reached by it. `scripts/check.sh` passes in full (core tests, clippy, host self-test, web test, firmware checkers, shellcheck 0.9.0 in Docker).
 - 2026-11-23 (host): **idle wake-ups: a drifting stick no longer redraws or shortens the sleep slice** (`wait_event`, the main loop), and the Device report prints `idle main loop` (axis and other events, loop turns and redraws a second over the idle window) and `memory at start`, to find the main thread's 45 wake-ups and the memory rise on the unit. Self-tested, built in Debian under Docker; not run on the unit.
 - 2026-11-23 (docs): **the Rec demo's constant rushing noise is the firmware's bed, not a fault** (measured: all five bundled Haunted FM-1 firmwares hiss at idle; the stock firmware and the Pack's others are silent, so the core adds none); `docs/SHOWCASE.md` says so for all five.
 - 2026-11-23 (host, docs): **the first complete Rec demo on the unit is read: PASS 5, FAIL 0** (1335 frames, 44.5 s, mp4 made; 1050.8 s to record). The zoom hero's text no longer says Tab (Tab is the map's Y).

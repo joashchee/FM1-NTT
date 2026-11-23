@@ -200,7 +200,7 @@ static const char *const PX_ENCODER_NAMES[7] = {"SELECT", "ALGORITHM", "KNOB1", 
 static const char *const PX_REGION_NAMES[3] = {"RAM", "XIP IMAGE", "FLASH"};
 
 enum { ED_ROWS = 24 };   /* the instrument editor's rows on a page */
-enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 16, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48, PX_MENU_MAX = 12 };
+enum { PX_NAME = 48, PX_MAX_FILES = 64, PX_MAX_TOOLS = 17, PX_SCOPE = 240, PX_MEM_BYTES = 256, PX_CONSOLE_BYTES = 1024, PX_MIDI_LOG = 48, PX_MENU_MAX = 12 };
 
 typedef struct { uint32_t pc, sp, flags, regs[16]; uint64_t insns; } PxCpu;
 
@@ -1146,7 +1146,7 @@ static inline void px_draw(uint32_t *c, int mode, const UiState *u) {
     }
     if (u->confirm[0]) px_confirm(c, cr, u->confirm);
     /* the foot of the panel */
-    px_hint(c, pr[0], narrow ? "L1 R1 MENU  FN PANEL" : "L1 R1 MENU  L2 R2 CONTEXT  FN PANEL  START PAUSE  TAB ZOOM");
+    px_hint(c, pr[0], narrow ? "L1 R1 MENU  FN PANEL" : "L1 R1 MENU  L2 R2 CONTEXT  FN PANEL  START PAUSE  F1 ZOOM");
     if (!narrow) {
         PxRect b = pr[1];
         px_box(c, (PxRect){b.x + 4, b.y + 8, b.w - 8, b.h - 16}, PX_PANEL_NAMES[p]);
