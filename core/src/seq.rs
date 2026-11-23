@@ -169,6 +169,11 @@ impl Seq {
         }
     }
 
+    /// The step the sequencer is at in its pattern (0 to 15).
+    pub fn position(&self) -> usize {
+        self.step_at % STEPS
+    }
+
     pub fn on(&self) -> bool {
         self.p[P_ON as usize] == 1
     }

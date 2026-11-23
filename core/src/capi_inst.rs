@@ -195,6 +195,189 @@ pub unsafe extern "C" fn fm1ntt_inst_load(text: *const u8, len: usize, rate: f64
     finish(r, pkg)
 }
 
+// ---- the package's UI model (ui.rs, docs/PORTING-UI.md): pages, the display list of the page shown, controls and published state ---------------------------------------
+
+/// One thing to paint: `kind` 0 a filled rectangle (x, y, w, h), 1 a filled disc (centre x, y; radius in w), 2 text (x, y, scale in `size`; 5 x 7 font); `color` is 0xRRGGBB.
+#[repr(C)]
+pub struct UiOp {
+    pub kind: c_int,
+    pub x: c_int,
+    pub y: c_int,
+    pub w: c_int,
+    pub h: c_int,
+    pub size: c_int,
+    pub color: u32,
+    pub text: [c_char; 65],
+}
+
+/// The number of pages of the package's UI model (0: the package has none).
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_pages(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.ui().pages.len())
+}
+
+/// The page shown (an index), or -1 when there is none.
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_page(h: *const InstHandle) -> c_int {
+    h.as_ref().filter(|h| h.0.has_ui()).map_or(-1, |h| h.0.ui_page() as c_int)
+}
+
+/// Shows page `i`; 0 ok, -1 when there is no such page.
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_set_page(h: *mut InstHandle, i: usize) -> c_int {
+    match h.as_mut() {
+        Some(h) => {
+            if h.0.ui_set_page(i) {
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
+}
+
+/// The title of page `i` into `out`; the full length (0 for none).
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_page_title(h: *const InstHandle, i: usize, out: *mut c_char, cap: usize) -> usize {
+    match h.as_ref().and_then(|h| h.0.ui().pages.get(i)) {
+        Some(p) => put_str(&p.1, out, cap),
+        None => 0,
+    }
+}
+
+/// The page shown as a display list, in paint order, into `ops` (up to `cap`); the number written. The rectangles and discs are what `fm1ntt_inst_ui_raster` paints.
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_draw(h: *const InstHandle, ops: *mut UiOp, cap: usize) -> usize {
+    use crate::ui::Op;
+    let Some(h) = h.as_ref() else { return 0 };
+    if ops.is_null() {
+        return 0;
+    }
+    let list = h.0.ui_draw();
+    let mut n = 0;
+    for op in list.iter().take(cap) {
+        let mut o = UiOp { kind: 0, x: 0, y: 0, w: 0, h: 0, size: 1, color: 0, text: [0; 65] };
+        match op {
+            Op::Rect { x, y, w, h, color } => (o.kind, o.x, o.y, o.w, o.h, o.color) = (0, *x, *y, *w, *h, *color),
+            Op::Disc { cx, cy, r, color } => (o.kind, o.x, o.y, o.w, o.color) = (1, *cx, *cy, *r, *color),
+            Op::Text { x, y, size, color, text } => {
+                (o.kind, o.x, o.y, o.size, o.color) = (2, *x, *y, *size, *color);
+                for (k, b) in text.bytes().take(64).enumerate() {
+                    o.text[k] = b as c_char;
+                }
+            }
+        }
+        *ops.add(n) = o;
+        n += 1;
+    }
+    n
+}
+
+/// The page shown as pixels, 240 x 240 of 0x00RRGGBB (`ui::rasterize`: text as solid cells) into `out` (`cap` of at least 57600 values); the number written (0 when too small).
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_raster(h: *const InstHandle, out: *mut u32, cap: usize) -> usize {
+    let Some(h) = h.as_ref() else { return 0 };
+    let px = crate::ui::rasterize(&h.0.ui_draw());
+    if out.is_null() || cap < px.len() {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(px.as_ptr(), out, px.len());
+    px.len()
+}
+
+/// The number of controls the model gives a job (buttons and encoders).
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_control_count(h: *const InstHandle) -> usize {
+    h.as_ref().map_or(0, |h| h.0.ui().controls.len())
+}
+
+/// Control `i`: its name into `name`; `info` = { page it opens (-1 none), lowest value, highest value, current value } (the last three 0 when it binds nothing). 1 for an
+/// encoder, 0 for a button, -1 when there is no such control.
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_control(h: *const InstHandle, i: usize, info: *mut i32, name: *mut c_char, cap: usize) -> c_int {
+    let Some(h) = h.as_ref() else { return -1 };
+    let Some(c) = h.0.ui().controls.get(i) else { return -1 };
+    put_str(&c.name, name, cap);
+    if !info.is_null() {
+        let page = h.0.ui().pages.iter().position(|p| p.0 == c.page).map_or(-1, |p| p as i32);
+        let (lo, hi) = h.0.ui_range(&c.bind).unwrap_or((0, 0));
+        let cur = h.0.ui_get(&c.bind).unwrap_or(0);
+        for (k, v) in [page, lo, hi, cur].into_iter().enumerate() {
+            *info.add(k) = v;
+        }
+    }
+    c.encoder as c_int
+}
+
+/// Control `i` pressed (a button) or turned by `clicks` (an encoder): opens its page and steps its binding. 1 when something changed, 0 when not, -1 for no such control.
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_press(h: *mut InstHandle, i: usize, clicks: c_int) -> c_int {
+    match h.as_mut() {
+        Some(h) if i < h.0.ui().controls.len() => c_int::from(h.0.ui_control(i, clicks)),
+        _ => -1,
+    }
+}
+
+/// Publishes state `name` (an index into `ui::STATE_NAMES`: title key scale bpm mood beat bar progress playing level0 level1 pattern0) by hand: only key, scale and mood take
+/// it (0 ok); the rest are derived and give -1.
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_publish(h: *mut InstHandle, name: usize, value: c_int) -> c_int {
+    match h.as_mut() {
+        Some(h) => {
+            if h.0.ui_publish(name, value) {
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
+}
+
+/// State `name` now; `ok` (when not null) is 1 when it has a number (title has none).
+///
+/// # Safety
+/// `h` is null or a live handle; every pointer is null or has room for what its length says.
+#[no_mangle]
+pub unsafe extern "C" fn fm1ntt_inst_ui_state(h: *const InstHandle, name: usize, ok: *mut c_int) -> i32 {
+    let v = h.as_ref().and_then(|h| h.0.ui_state(name));
+    if !ok.is_null() {
+        *ok = c_int::from(v.is_some());
+    }
+    v.unwrap_or(0)
+}
+
 /// The built-in voices as an instrument (an `fm6` package of the project's own eight), or null with the reason.
 #[no_mangle]
 pub extern "C" fn fm1ntt_inst_factory(rate: f64) -> *mut InstHandle {
@@ -242,7 +425,7 @@ unsafe fn put_str(s: &str, out: *mut c_char, cap: usize) -> usize {
 }
 
 /// The instrument's name, kind ("fm6", "fm4", "analog", "sampler", "kit"), licence or verification note, as text in `out` (NUL-terminated, cut to `cap`); the full length.
-/// `which`: 0 name, 1 kind, 2 licence, 3 verification note (empty when unverified), 4 voice name of the current program (fm6).
+/// `which`: 0 name, 1 kind, 2 licence, 3 verification note (empty when unverified), 4 voice name of the current program (fm6), 5 the UI check's note (empty when not checked).
 ///
 /// # Safety
 /// `out` is null or has room for `cap` bytes.
@@ -255,6 +438,7 @@ pub unsafe extern "C" fn fm1ntt_inst_text(h: *const InstHandle, which: c_int, ou
         1 => put_str(i.kind(), out, cap),
         2 => put_str(i.licence(), out, cap),
         3 => put_str(i.verify_note(), out, cap),
+        5 => put_str(i.verify_ui_note(), out, cap),
         4 => {
             let name = i.params().iter().find(|d| d.id == 145).map(|_| (145..155).map(|k| i.get_param(k).map(|c| c as u8 as char).unwrap_or(' ')).collect::<String>()).unwrap_or_default();
             put_str(name.trim_end(), out, cap)
@@ -861,6 +1045,82 @@ mod tests {
             assert_eq!((fm1ntt_inst_fx_set(h, 5, 2, 1), fm1ntt_inst_fx_set(h, 0, 77, 1), fm1ntt_inst_fx_get(h, 7, 0), fm1ntt_inst_fx_param_count(h, 9)), (-1, -1, i32::MIN, 0));
             assert_eq!(fm1ntt_inst_fx_param(h, 0, 9, info.as_mut_ptr(), nm.as_mut_ptr(), 24), -1);
             fm1ntt_inst_free(h);
+        }
+    }
+
+    #[test]
+    fn the_c_face_shows_a_ui_and_takes_its_controls() {
+        unsafe {
+            let text = "fm1i = 3\nname = DRIFT\nengine = analog\nlicence = MIT\nui = theme bg=#101010 fg=#f0f0f0 dim=#808080 accent=#ff8040\nui = page home \"HOME\"\nui = page song \"SONG\"\n\
+                ui = bar home 10 10 w=100 h=6 bind=param:3 min=0 max=99 color=accent\nui = disc home 120 120 r=20 bind=state:beat\nui = text song 4 4 \"HI\" size=2\n\
+                ui = key PLAY page=song\nui = enc KNOB1 page=home bind=param:3 step=5\n";
+            let h = fm1ntt_inst_load(text.as_ptr(), text.len(), 44_100.0, None, std::ptr::null_mut());
+            assert!(!h.is_null());
+            assert_eq!((fm1ntt_inst_ui_pages(h), fm1ntt_inst_ui_page(h), fm1ntt_inst_ui_control_count(h)), (2, 0, 2));
+            let mut t = [0 as c_char; 16];
+            assert_eq!(fm1ntt_inst_ui_page_title(h, 1, t.as_mut_ptr(), 16), 4);
+            assert_eq!(CStr::from_ptr(t.as_ptr()).to_str().unwrap(), "SONG");
+            let mut ops: Vec<UiOp> = Vec::new();
+            ops.resize_with(64, || UiOp { kind: 0, x: 0, y: 0, w: 0, h: 0, size: 1, color: 0, text: [0; 65] });
+            let n = fm1ntt_inst_ui_draw(h, ops.as_mut_ptr(), 64);
+            assert!(n >= 4 && ops[0].kind == 0 && ops[0].w == 240 && ops[0].color == 0x101010);
+            // the host's paint of the rectangles equals the core's raster
+            let mut px = vec![0u32; 240 * 240];
+            assert_eq!(fm1ntt_inst_ui_raster(h, px.as_mut_ptr(), px.len()), 57_600);
+            assert_eq!(fm1ntt_inst_ui_raster(h, px.as_mut_ptr(), 10), 0);
+            let mut mine = vec![0u32; 240 * 240];
+            for o in &ops[..n] {
+                match o.kind {
+                    0 => {
+                        for y in o.y..(o.y + o.h).min(240) {
+                            for x in o.x..(o.x + o.w).min(240) {
+                                mine[(y * 240 + x) as usize] = o.color;
+                            }
+                        }
+                    }
+                    1 => {
+                        for y in (o.y - o.w)..=(o.y + o.w) {
+                            for x in (o.x - o.w)..=(o.x + o.w) {
+                                if (0..240).contains(&x) && (0..240).contains(&y) && (x - o.x).pow(2) + (y - o.y).pow(2) <= o.w * o.w {
+                                    mine[(y * 240 + x) as usize] = o.color;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(mine == px, "painting the rectangles and discs gives the core's raster");
+            // controls: a button opens its page; an encoder opens its page and steps by 5
+            let (mut info, mut nm) = ([0i32; 4], [0 as c_char; 16]);
+            assert_eq!(fm1ntt_inst_ui_control(h, 0, info.as_mut_ptr(), nm.as_mut_ptr(), 16), 0);
+            assert_eq!((CStr::from_ptr(nm.as_ptr()).to_str().unwrap(), info[0]), ("PLAY", 1));
+            assert_eq!(fm1ntt_inst_ui_control(h, 1, info.as_mut_ptr(), nm.as_mut_ptr(), 16), 1);
+            let v0 = info[3];
+            assert_eq!(fm1ntt_inst_ui_control(h, 9, info.as_mut_ptr(), nm.as_mut_ptr(), 16), -1);
+            assert_eq!(fm1ntt_inst_ui_press(h, 0, 1), 1);
+            assert_eq!(fm1ntt_inst_ui_page(h), 1);
+            assert_eq!(fm1ntt_inst_ui_press(h, 1, 1), 1);
+            assert_eq!(fm1ntt_inst_ui_page(h), 0);
+            fm1ntt_inst_ui_control(h, 1, info.as_mut_ptr(), nm.as_mut_ptr(), 16);
+            assert_eq!(info[3], v0 + 5);
+            assert_eq!(fm1ntt_inst_ui_press(h, 7, 1), -1);
+            // state
+            let mut ok = 0;
+            assert_eq!(fm1ntt_inst_ui_publish(h, 1, 4), 0);
+            assert_eq!(fm1ntt_inst_ui_state(h, 1, &mut ok), 4);
+            assert_eq!(ok, 1);
+            assert_eq!(fm1ntt_inst_ui_publish(h, 5, 1), -1);
+            fm1ntt_inst_ui_state(h, 0, &mut ok);
+            assert_eq!(ok, 0);
+            // none of it is a crash on a null or a package with no UI
+            assert_eq!(fm1ntt_inst_ui_pages(std::ptr::null()), 0);
+            assert_eq!(fm1ntt_inst_ui_page(std::ptr::null()), -1);
+            assert_eq!(fm1ntt_inst_ui_draw(std::ptr::null(), ops.as_mut_ptr(), 4), 0);
+            fm1ntt_inst_free(h);
+            let f = fm1ntt_inst_factory(44_100.0);
+            assert_eq!((fm1ntt_inst_ui_pages(f), fm1ntt_inst_ui_page(f), fm1ntt_inst_ui_control_count(f)), (0, -1, 0));
+            fm1ntt_inst_free(f);
         }
     }
 }

@@ -104,6 +104,83 @@ pub fn port_fm6(bytes: &[u8], name: &str, source: &str, licence: &str, model: Mo
     Ok((p, t))
 }
 
+/// The stock FM-1 firmware's 128 presets, read from **the running machine**: the package holds them scrambled (`fwx` finds no bank in it), but once it has booted its
+/// flash-mapped image (the XIP window) holds the DX7 bank, 128 packed voices of 128 bytes one after another (found at 0x92267 in the 2026-11-22 package, with a copy 0x4000
+/// later). Boots the package for 3 emulated seconds, scans that window for voices and returns the longest run of at least 128. M-VAVE's firmware is **local only** (rule 2):
+/// what comes out is not shipped.
+pub fn stock_bank(package: &[u8]) -> Result<Vec<[u8; 128]>> {
+    use crate::machine::{Machine, Region};
+    let mut m = Machine::from_package(package)?;
+    let mut out = vec![0i16; 2 * 441];
+    for _ in 0..300 {
+        m.render(&mut out, 4_000_000);
+    }
+    let (_, len) = m.region(Region::Xip);
+    let mut xip = vec![0u8; len.min(16 << 20)];
+    let n = m.read_mem(Region::Xip, 0, &mut xip);
+    xip.truncate(n);
+    let banks = extract::find_banks(&xip, "xip", 128);
+    let Some(best) = banks.iter().max_by_key(|b| b.names.len()) else {
+        return Err(Error::BadImage("no run of 128 DX7-style voices in the booted firmware's image: this is not the stock bank layout".into()));
+    };
+    Ok((0..128).map(|i| <[u8; 128]>::try_from(&xip[best.offset + i * 128..best.offset + (i + 1) * 128]).unwrap_or([0; 128])).collect())
+}
+
+/// A level-A port of the stock FM-1: its 128 presets (`stock_bank`) in the `fm6` engine with the stock model. `licence` is what the person states for their own copy (M-VAVE's
+/// firmware has none on the allowlist, so a port of it is local output and is never shipped).
+pub fn port_stock(package: &[u8], name: &str, source: &str, licence: &str) -> Result<(Package, Tier)> {
+    let t = tier(licence)?;
+    let mut p = Package::new(name, "fm6", licence);
+    p.source = source.into();
+    p.source_sha256 = hex(&sha256(package));
+    p.voices = stock_bank(package)?;
+    let mut e = Fm6Engine::new(44_100.0, &p.voices[0])?;
+    apply_model(&mut e, Model::Stock);
+    for d in e.params() {
+        if d.id >= FM6_POT {
+            if let Some(v) = e.get(d.id) {
+                if v != d.default {
+                    p.params.push((d.id, v));
+                }
+            }
+        }
+    }
+    Ok((p, t))
+}
+
+/// The notes X0X 1.2.2 sounds on MIDI channel 10 and the sample file a package names for each (`docs/SAMPLER.md`: kick, rim, snare, clap, three toms, closed and open hat, crash,
+/// ride; the closed hat chokes the open hat and not the other way round).
+pub const X0X_DRUMS: [(u8, &str, &[u8]); 11] = [
+    (36, "kick.wav", &[]),
+    (37, "rim.wav", &[]),
+    (38, "snare.wav", &[]),
+    (39, "clap.wav", &[]),
+    (41, "tom-low.wav", &[]),
+    (42, "hat-closed.wav", &[46]),
+    (45, "tom-mid.wav", &[]),
+    (46, "hat-open.wav", &[]),
+    (49, "crash.wav", &[]),
+    (50, "tom-high.wav", &[]),
+    (51, "ride.wav", &[]),
+];
+
+/// A level B port of a sampled drum machine in X0X's manner: a `kit` package of the eleven drums above with **X0X's measured velocity law and its 0.4 peak limiter**
+/// (`KIT_VELOCITY_LAW` 1, `KIT_CEILING` 40) and no sample data: **the samples are the firmware's own and are not in the package** (a person puts WAVs of those names beside it,
+/// their own recordings or ones they may use). `licence` is the licence of the package as the person will use it (their own samples, so theirs to state); it must be on the
+/// allowlist. Written from measurements, never from a firmware's source.
+pub fn x0x_kit_package(name: &str, licence: &str, source: &str, source_sha256: &str) -> Result<(Package, Tier)> {
+    let t = tier(licence)?;
+    let mut p = Package::new(name, "kit", licence);
+    p.source = source.into();
+    p.source_sha256 = source_sha256.into();
+    p.verify = "level B: X0X 1.2.2's velocity law, choke and 0.4 limiter, measured in the emulator (docs/SAMPLER.md); the drum samples are the person's own and are not included; not compared with a unit".into();
+    for &(note, file, chokes) in &X0X_DRUMS {
+        p.samples.push(crate::package::SampleRef { note, file: file.into(), chokes: chokes.to_vec() });
+    }
+    p.params = vec![(crate::engine::KIT_CEILING, 40), (crate::engine::KIT_VELOCITY_LAW, 1)];
+    Ok((p, t))
+}
+
 /// Plays `note` on the firmware (the emulator) and on the port's `fm6` (voice `voice`, the same MIDI program selecting it on the firmware if `program` is given), and
 /// returns the comparison. The firmware's own program numbering is the firmware's: choose `program` and `voice` so they are the same sound.
 pub fn verify_fm6(firmware: &[u8], pkg: &Package, voice: usize, channel: u8, program: Option<u8>, note: u8, velocity: u8) -> Result<verify::Comparison> {
@@ -213,6 +290,75 @@ mod tests {
         let w = verify_felucca_family(&fw, &pkg, 1).unwrap(); // TINE EP, three notes
         assert!(w.worst_level_db.abs() < 1.0 && w.worst_pitch_cents < 2.0, "{w:?}");
         assert_eq!(felucca_steps(0).len(), 8);
+    }
+
+    fn tone_wav(freq: f64, secs: f64, amp: f64) -> Vec<u8> {
+        let n = (44_100.0 * secs) as usize;
+        let data: Vec<u8> = (0..n).flat_map(|k| (((k as f64 * freq * std::f64::consts::TAU / 44_100.0).sin() * amp) as i16).to_le_bytes()).collect();
+        let mut w = b"RIFF".to_vec();
+        w.extend((36 + data.len() as u32).to_le_bytes());
+        w.extend(b"WAVEfmt ");
+        for v in [16u32, 0x0001_0001, 44_100, 88_200] {
+            w.extend(v.to_le_bytes());
+        }
+        w.extend(0x0010_0002u32.to_le_bytes());
+        w.extend(b"data");
+        w.extend((data.len() as u32).to_le_bytes());
+        w.extend(data);
+        w
+    }
+
+    /// The level B port of a drum machine in X0X's manner: eleven drums, its velocity law, its choke and its 0.4 limiter, with samples of the person's own (here tones).
+    #[test]
+    fn an_x0x_style_kit_package_plays_by_the_measured_law() {
+        use crate::instrument::Instrument;
+        let (pkg, tier) = x0x_kit_package("My X0X kit", "CC0-1.0", "x0x-1.2.2.fwsc", &"0".repeat(64)).unwrap();
+        assert_eq!(tier, Tier::Permissive);
+        assert_eq!(pkg.samples.len(), 11);
+        assert!(x0x_kit_package("x", "AGPL-3.0-only", "x", "").is_err(), "the licence gate");
+        // it survives the text format
+        let again = Package::parse(&pkg.to_text()).unwrap();
+        assert_eq!((again.samples.len(), again.params.clone()), (11, pkg.params.clone()));
+        let resolve = |f: &str| X0X_DRUMS.iter().position(|d| d.1 == f).map(|k| tone_wav(100.0 + 50.0 * k as f64, if f.starts_with("hat-open") { 1.0 } else if f.starts_with("hat-closed") { 0.05 } else { 0.3 }, 8_000.0));
+        let render = |i: &mut Instrument, n: usize| {
+            let mut o = vec![0i16; n];
+            i.render(&mut o);
+            o
+        };
+        let peak = |o: &[i16]| o.iter().map(|&x| i32::from(x).abs()).max().unwrap_or(0);
+        let mk = || Instrument::from_package(&pkg, 44_100.0, &resolve).unwrap();
+        // an unmapped key is silent; a mapped one sounds
+        let mut i = mk();
+        i.midi_bytes(&[0x99, 60, 127]);
+        assert_eq!(peak(&render(&mut i, 2048)), 0);
+        i.midi_bytes(&[0x99, 36, 127]);
+        assert!(peak(&render(&mut i, 2048)) > 1000);
+        // velocity 64 is 0.58 of velocity 127 (the measured law), where linear would be 0.50
+        let (mut a, mut b) = (mk(), mk());
+        a.midi_bytes(&[0x99, 38, 127]);
+        b.midi_bytes(&[0x99, 38, 64]);
+        let (pa, pb) = (f64::from(peak(&render(&mut a, 2048))), f64::from(peak(&render(&mut b, 2048))));
+        assert!((pb / pa - 0.5789).abs() < 0.02, "{}", pb / pa);
+        // the closed hat chokes the open hat, and not the other way round
+        let mut c = mk();
+        c.midi_bytes(&[0x99, 46, 100]);
+        render(&mut c, 4096);
+        c.midi_bytes(&[0x99, 42, 100]);
+        render(&mut c, 8192); // the closed hat is short (0.3 s) and the open one would run to 1 s
+        assert_eq!(peak(&render(&mut c, 4096)), 0, "the open hat was cut");
+        let mut d = mk();
+        d.midi_bytes(&[0x99, 42, 100]);
+        render(&mut d, 1024);
+        d.midi_bytes(&[0x99, 46, 100]);
+        render(&mut d, 8192);
+        assert!(peak(&render(&mut d, 2048)) > 1000, "the open hat was not cut by a closed one before it");
+        // a pile of loud drums stays under the 0.4 limiter (13107 of 32767), a little over while its release catches up
+        let mut e = mk();
+        for n in [36, 37, 38, 39, 41, 45, 49, 50, 51] {
+            e.midi_bytes(&[0x99, n, 127]);
+        }
+        let big = peak(&render(&mut e, 8192));
+        assert!(big > 8000 && big < 16_000, "peak {big}");
     }
 
     #[test]

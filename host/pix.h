@@ -154,6 +154,24 @@ static inline int px_text(uint32_t *c, int x, int y, const char *s, uint32_t col
 }
 static inline int px_text_w(const char *s, int scale) { return (int)strlen(s) * PX_CELL_W * scale; }
 
+/* A package's UI page (core fm1ntt_ui_op, a display list) painted into the FM-1's 240 x 240 screen (0x00RRGGBB). Rectangles and discs are the core's own (ui::rasterize paints the
+ * same pixels: the host's self-test compares them); text is this file's 5 x 7 font at the op's scale, where the core's raster has solid cells. */
+typedef struct { int kind, x, y, w, h, size; uint32_t color; char text[65]; } PxUiOp;
+static inline void px_paint_ui(uint32_t *fb, const PxUiOp *ops, int n) {
+    static uint32_t cv[PX_W * PX_H];
+    for (int i = 0; i < n; i++) {
+        const PxUiOp *o = &ops[i];
+        uint32_t col = 0xFF000000u | o->color;
+        if (o->kind == 0) px_rect(cv, (PxRect){o->x, o->y, o->w, o->h}, col);
+        else if (o->kind == 1) {
+            for (int y = o->y - o->w; y <= o->y + o->w; y++)
+                for (int x = o->x - o->w; x <= o->x + o->w; x++)
+                    if (x >= 0 && x < FM_W && y >= 0 && y < FM_H && (x - o->x) * (x - o->x) + (y - o->y) * (y - o->y) <= o->w * o->w) cv[y * PX_W + x] = col;
+        } else if (o->kind == 2) px_text(cv, o->x, o->y, o->text, col, o->size < 1 ? 1 : o->size, 0);
+    }
+    for (int y = 0; y < FM_H; y++) for (int x = 0; x < FM_W; x++) fb[y * FM_W + x] = cv[y * PX_W + x] & 0xFFFFFFu;
+}
+
 /* Word-wrapped text in a column w pixels wide, at most max_lines lines of 10 px (a long word is broken); the rest is cut with "...". */
 static inline void px_wrap(uint32_t *c, int x, int y, const char *s, uint32_t col, int w, int max_lines) {
     int per = w / PX_CELL_W, line = 0;
@@ -256,7 +274,8 @@ typedef struct {
     char demo_run[PX_NAME];             /* the firmware a background demo is being made of, "" when none */
     int demo_pct, demo_secs, demo_paused;
     int info_on;                        /* the page of the picked firmware replaces the list */
-    char info_name[PX_NAME], info_tier[40], info_licence[104], info_source[124], info_sha[65], info_demo[104];
+    char info_name[PX_NAME], info_tier[40], info_licence[104], info_source[124], info_sha[65], info_demo[104], info_port[PX_NAME + 24];
+    int info_port_ok;                 /* a package made from this firmware is in FILES: Right loads it */
     int info_demo_kind, info_pct, info_busy, info_can_play;   /* kind: 0 none yet, 1 being made, 2 ready, 3 failed; busy: a demo of THIS firmware is being made */
     int playing;                        /* a demo is playing: the whole window is the player (the picture at 2x, flush top left, and this column) */
     int pl_tick, pl_ticks, pl_idx, pl_nf;
@@ -358,7 +377,7 @@ static inline void px_carousel(uint32_t *c, int mode, int cur) {
 /* What the buttons do, per panel: the area below the FM-1's screen in Standard. */
 static const char *const PX_HINTS[PANEL_COUNT][9] = {
     {"PAD ON MACHINE", "D-PAD A B X Y  NOTES", "SELECT START  OCT- OCT+", "STICKS KNOBS  R1+PAD OCT KEY", "L1  OP1-6 PIT GLO MONO POLY", "L1 STICKS MASTER PRESETS...", "L2  FX HOME SAVE ENV ARP SEQ", "R2  GLO EDIT PLAY REC", "L1+R1 MENU  L2+R2 CONTEXT"},
-    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "R1 UP DOWN  PAGE", "R1 LEFT RIGHT  FIRST LAST", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO", "Y  MAKE OR STOP IT  B BACK"},
+    {"THE FIRMWARE FOLDER", "UP DOWN  PICK", "R1 UP DOWN  PAGE", "R1 LEFT RIGHT  FIRST LAST", "A  OPEN ITS PAGE", "X  RESCAN THE FOLDER", "ON A PAGE: A  LOAD IT", "X  PLAY ITS DEMO  Y  MAKE IT", "RIGHT  LOAD ITS PORT  B  BACK"},
     {"BOTH CORES", "UP DOWN  CORE 0 1", "LEFT RIGHT  CORE 0 1", "", "", "", "", "", ""},
     {"RAM, XIP IMAGE, FLASH", "UP DOWN  ONE ROW", "R1 UP DOWN  PAGE", "R1 LEFT RIGHT  START END", "LEFT RIGHT  RAM XIP FLASH", "X Y  64 KIB BACK FORTH", "", "", ""},
     {"THE DEBUG BOX", "WHAT THE FIRMWARE", "WRITES TO IT", "", "", "", "", "", ""},
@@ -448,11 +467,14 @@ static inline void px_panel_info(uint32_t *c, PxRect r, const UiState *u, int na
     uint32_t col = u->info_demo_kind == 2 ? C_OK : u->info_demo_kind == 3 ? C_ERR : u->info_demo_kind == 1 ? C_HEAD : C_DIM;
     px_wrap(c, x, y + 10, u->info_demo, col, w, 4);
     if (u->info_demo_kind == 1) px_meter(c, (PxRect){x, y + 44, w, 8}, u->info_pct, C_HEAD);
-    PxRect b = {r.x + 4, r.y + (narrow ? 346 : 306), r.w - 8, 48};
+    px_text(c, x, y + 58, "PORT", C_HEAD, 1, 0);
+    px_wrap(c, x, y + 68, u->info_port, u->info_port_ok ? C_OK : C_DIM, w, 2);
+    PxRect b = {r.x + 4, r.y + (narrow ? 346 : 306), r.w - 8, 60};
     px_box(c, b, NULL);
     px_text(c, x, b.y + 8, "A  LOAD IT", C_TEXT, 1, w);
     px_text(c, x, b.y + 19, u->info_can_play ? "X  PLAY THE DEMO" : "X  NO DEMO YET", u->info_can_play ? C_TEXT : C_DIM, 1, w);
     px_text(c, x, b.y + 30, u->info_busy ? "Y  STOP MAKING THE DEMO" : "Y  MAKE THE DEMO NOW", C_TEXT, 1, w);
+    px_text(c, x, b.y + 41, u->info_port_ok ? "RIGHT  LOAD ITS PORT" : "RIGHT  NO PORT YET", u->info_port_ok ? C_TEXT : C_DIM, 1, w);
 }
 
 static inline void px_panel_files(uint32_t *c, PxRect r, const UiState *u, int narrow) {

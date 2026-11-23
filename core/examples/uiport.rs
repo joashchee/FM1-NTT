@@ -8,7 +8,7 @@
 //!
 //! A screen's identity is its **layout** (the text bands and the main colours), not its pixels, so an animated element (a spinning disc, a meter) does not make
 //! every probe a new screen. Two screens with the same layout and colours are one: a limit, said in the docs.
-use fm1ntt::{devices, machine::Machine, screen, ui::Ui};
+use fm1ntt::{devices, machine::Machine, screen, ui, ui::Ui};
 use std::{collections::HashMap, fs, path::PathBuf, process::ExitCode};
 
 #[derive(Clone)]
@@ -93,7 +93,9 @@ fn main() -> ExitCode {
     let mut tsv = String::from("path\taction\tpixels\tbox\tpage\tnew\n");
     let mut ptsv = String::from("page\tpath\tbackground\tpalette\tblobs\tbands\n");
     let mut transitions: Vec<(usize, Act, usize)> = Vec::new();
+    let frames = std::cell::RefCell::new(Vec::<Vec<u32>>::new());
     let save = |i: usize, path: &[Act], f: &[u32], ptsv: &mut String| {
+        frames.borrow_mut().push(f.to_vec());
         let _ = fs::write(out.join("pages").join(format!("{i:02}.png")), screen::png(f, 3));
         let bg = screen::background(f);
         let pal: Vec<String> = screen::palette(f, 6).iter().map(|(c, n)| format!("#{c:06x}:{n}")).collect();
@@ -165,6 +167,32 @@ fn main() -> ExitCode {
     for i in 0..pages.len() {
         lines.push(format!("page p{i:02} \"PAGE {i:02}\""));
     }
+    // the widgets the detector finds on each screen (text as `?` marks: the words need text recovery), with the colours they name
+    let mut defs: Vec<String> = Vec::new();
+    let mut widget_lines: Vec<String> = Vec::new();
+    for (i, f) in frames.borrow().iter().enumerate() {
+        let (d, w) = screen::draft_lines(&format!("p{i:02}"), &screen::detect(f, screen::background(f)));
+        for c in d {
+            let name = c.split('=').next().unwrap_or("").to_string();
+            if !defs.iter().any(|e| e.starts_with(&name)) && defs.len() < 56 {
+                defs.push(c);
+            }
+        }
+        widget_lines.extend(w);
+    }
+    let known: Vec<String> = defs.iter().map(|c| c.trim_start_matches("color ").split('=').next().unwrap_or("").to_string()).collect();
+    for l in &mut widget_lines {
+        if let Some(at) = l.find(" color=c") {
+            let name = l[at + 7..].split_whitespace().next().unwrap_or("").to_string();
+            if !known.contains(&name) {
+                *l = l.replace(&format!(" color={name}"), " color=fg");
+            }
+        }
+    }
+    let cut = widget_lines.len().saturating_sub(ui::MAX_WIDGETS);
+    widget_lines.truncate(ui::MAX_WIDGETS); // the model holds 256 widgets: the later pages lose theirs first (said below)
+    lines.extend(defs);
+    lines.extend(widget_lines);
     let mut seen_names: HashMap<String, usize> = HashMap::new();
     for (from, a, to) in &transitions {
         let n = name(a);
@@ -173,11 +201,19 @@ fn main() -> ExitCode {
             lines.push(format!("key {n} page=p{to:02}"));
         }
     }
+    // the check of the draft against each captured screen
+    let mut verify_lines: Vec<String> = Vec::new();
+    if let Ok(model) = Ui::parse(&lines) {
+        for (i, f) in frames.borrow().iter().enumerate() {
+            verify_lines.push(format!("verify-ui = {}", screen::verify_ui_line(&format!("p{i:02}"), screen::verify_ui(&model, i, f))));
+        }
+    }
     let verdict = match Ui::parse(&lines) {
+        Ok(_) if cut > 0 => format!("checked: Ui::parse accepts it ({cut} widgets of the later pages were cut: the model holds {} widgets)", ui::MAX_WIDGETS),
         Ok(_) => "checked: Ui::parse accepts it".to_string(),
         Err(e) => format!("NOT accepted by Ui::parse: {e}"),
     };
-    let _ = fs::write(out.join("ui-draft.txt"), lines.iter().map(|l| format!("ui = {l}\n")).collect::<String>() + &format!("# {verdict}\n"));
+    let _ = fs::write(out.join("ui-draft.txt"), lines.iter().map(|l| format!("ui = {l}\n")).collect::<String>() + &verify_lines.iter().map(|l| format!("# {l}\n")).collect::<String>() + &format!("# {verdict}\n"));
     println!("{} screens, {probes} probes, {verdict}; wrote {}", pages.len(), out.display());
     ExitCode::SUCCESS
 }

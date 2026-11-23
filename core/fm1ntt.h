@@ -107,7 +107,7 @@ fm1ntt_inst *fm1ntt_inst_load(const uint8_t *text, size_t len, double rate, fm1n
 fm1ntt_inst *fm1ntt_inst_factory(double rate);                                              /* the built-in voices */
 void fm1ntt_inst_free(fm1ntt_inst *h);
 int fm1ntt_package_tier(const uint8_t *text, size_t len);                                   /* 0 permissive (MIT app ok), 1 copyleft (the Pack only; never the MIT app or a Mac App Store build), -1 not a package */
-size_t fm1ntt_inst_text(const fm1ntt_inst *h, int which, char *out, size_t cap);            /* 0 name, 1 kind, 2 licence, 3 verification note ("" = unverified), 4 voice name (fm6); the full length */
+size_t fm1ntt_inst_text(const fm1ntt_inst *h, int which, char *out, size_t cap);            /* 0 name, 1 kind, 2 licence, 3 verification note ("" = unverified), 4 voice name (fm6), 5 the UI check's note; the full length */
 void fm1ntt_inst_midi(fm1ntt_inst *h, const uint8_t *bytes, size_t len);                    /* raw MIDI bytes: notes, controllers through the package's map, bend, program change */
 void fm1ntt_inst_note_on(fm1ntt_inst *h, int note, int velocity);
 void fm1ntt_inst_note_off(fm1ntt_inst *h, int note);
@@ -138,6 +138,20 @@ size_t fm1ntt_inst_arp_count(const fm1ntt_inst *h);                             
 int fm1ntt_inst_arp_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
 int32_t fm1ntt_inst_arp_get(const fm1ntt_inst *h, int id);
 int fm1ntt_inst_arp_set(fm1ntt_inst *h, int id, int value);                                 /* off releases the held note */
+/* The package's UI model (core/src/ui.rs): pages, the page shown as a display list, controls (buttons and encoders) and the state it binds. State indices are ui::STATE_NAMES:
+ * 0 title 1 key 2 scale 3 bpm 4 mood 5 beat 6 bar 7 progress 8 playing 9 level0 10 level1 11 pattern0 (only key, scale and mood are set by hand; the rest are derived) */
+typedef struct { int kind, x, y, w, h, size; uint32_t color; char text[65]; } fm1ntt_ui_op;   /* kind 0 rect (x y w h), 1 disc (centre x y, radius w), 2 text (x y, scale size); color 0xRRGGBB */
+size_t fm1ntt_inst_ui_pages(const fm1ntt_inst *h);                                          /* 0: the package has no UI */
+int fm1ntt_inst_ui_page(const fm1ntt_inst *h);                                              /* the page shown, -1 for none */
+int fm1ntt_inst_ui_set_page(fm1ntt_inst *h, size_t i);
+size_t fm1ntt_inst_ui_page_title(const fm1ntt_inst *h, size_t i, char *out, size_t cap);
+size_t fm1ntt_inst_ui_draw(const fm1ntt_inst *h, fm1ntt_ui_op *ops, size_t cap);            /* the page shown in paint order; the number written */
+size_t fm1ntt_inst_ui_raster(const fm1ntt_inst *h, uint32_t *out, size_t cap);              /* 240 x 240 of 0x00RRGGBB, text as solid cells; cap at least 57600 */
+size_t fm1ntt_inst_ui_control_count(const fm1ntt_inst *h);
+int fm1ntt_inst_ui_control(const fm1ntt_inst *h, size_t i, int32_t info[4], char *name, size_t cap);   /* 1 encoder, 0 button, -1 none; info {page or -1, min, max, current} */
+int fm1ntt_inst_ui_press(fm1ntt_inst *h, size_t i, int clicks);                             /* press a button or turn an encoder: its page opens, its binding steps; 1 changed, 0 not, -1 none */
+int fm1ntt_inst_ui_publish(fm1ntt_inst *h, size_t name, int value);                         /* 0 ok (key, scale, mood), -1 derived */
+int32_t fm1ntt_inst_ui_state(const fm1ntt_inst *h, size_t name, int *ok);
 size_t fm1ntt_inst_global_count(const fm1ntt_inst *h);                                     /* the global settings (core/src/globals.rs): MIDI channel, effect channel, bend range, fixed velocity, mono; the same four calls */
 int fm1ntt_inst_global_param(const fm1ntt_inst *h, size_t index, int32_t info[4], char *name, size_t cap);
 int32_t fm1ntt_inst_global_get(const fm1ntt_inst *h, int id);

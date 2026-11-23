@@ -189,7 +189,7 @@ fn parse_bind(s: &str) -> Result<Bind> {
     })
 }
 
-fn bind_text(b: &Bind) -> String {
+pub fn bind_text(b: &Bind) -> String {
     match b {
         Bind::None => "none".into(),
         Bind::Param(n) => format!("param:{n}"),

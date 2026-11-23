@@ -315,15 +315,18 @@ impl Engine for SamplerEngine {
 }
 
 pub const KIT_CEILING: u16 = 0;
+/// The velocity law: 0 linear (`v / 127`), 1 X0X 1.2.2's measured one (`sampler::X0X_VELOCITY`).
+pub const KIT_VELOCITY_LAW: u16 = 1;
 
 pub struct KitEngine {
     k: Kit,
     ceiling: i32,
+    law: i32,
 }
 
 impl KitEngine {
     pub fn new(k: Kit) -> KitEngine {
-        KitEngine { k, ceiling: 0 }
+        KitEngine { k, ceiling: 0, law: 0 }
     }
 }
 
@@ -333,20 +336,31 @@ impl Engine for KitEngine {
     }
 
     fn params(&self) -> Vec<ParamDesc> {
-        vec![pd(KIT_CEILING, "LIMITER CEILING (0 = OFF)", 0, 100, 0, "%")]
+        vec![pd(KIT_CEILING, "LIMITER CEILING (0 = OFF)", 0, 100, 0, "%"), pd(KIT_VELOCITY_LAW, "VELOCITY LAW (0 LINEAR, 1 X0X)", 0, 1, 0, "")]
     }
 
     fn get(&self, id: u16) -> Option<i32> {
-        (id == KIT_CEILING).then_some(self.ceiling)
+        match id {
+            KIT_CEILING => Some(self.ceiling),
+            KIT_VELOCITY_LAW => Some(self.law),
+            _ => None,
+        }
     }
 
     fn set(&mut self, id: u16, value: i32) -> bool {
-        if id != KIT_CEILING {
-            return false;
+        match id {
+            KIT_CEILING => {
+                self.ceiling = value.clamp(0, 100);
+                self.k.set_ceiling((self.ceiling > 0).then(|| self.ceiling as f64 / 100.0), 0.05);
+                true
+            }
+            KIT_VELOCITY_LAW => {
+                self.law = value.clamp(0, 1);
+                self.k.set_velocity(if self.law == 1 { crate::sampler::velocity_from_knots(&crate::sampler::X0X_VELOCITY) } else { std::array::from_fn(|v| crate::sampler::velocity_gain(v as u8)) });
+                true
+            }
+            _ => false,
         }
-        self.ceiling = value.clamp(0, 100);
-        self.k.set_ceiling((self.ceiling > 0).then(|| self.ceiling as f64 / 100.0), 0.05);
-        true
     }
 
     fn note_on(&mut self, note: u8, velocity: u8) {
@@ -446,5 +460,6 @@ mod tests {
         k.render(&mut a);
         assert!(a.iter().any(|&x| x != 0));
         assert!(!k.set(9, 1));
+        assert!(k.set(KIT_VELOCITY_LAW, 1) && k.get(KIT_VELOCITY_LAW) == Some(1));
     }
 }

@@ -27,6 +27,7 @@ pub struct Instrument {
     name: String,
     licence: String,
     verify: String,
+    verify_ui: String,
     engine: Box<dyn Engine>,
     fx: Vec<Box<dyn Effect>>,
     fx_names: Vec<String>,
@@ -58,6 +59,14 @@ pub struct Instrument {
     data: [u8; 2],
     have: usize,
     in_sysex: bool,
+    /// the package's UI model (`ui.rs`): its lines as written, the parsed model, the page shown, the state a host or the player set by hand (key, scale, mood) and the last
+    /// output peak (0 to 99)
+    ui_lines: Vec<String>,
+    ui: crate::ui::Ui,
+    ui_page: usize,
+    ui_set: [Option<i32>; crate::ui::STATE_NAMES.len()],
+    last_note: Option<u8>,
+    peak: i32,
 }
 
 /// The most decoded sample frames a kit package may hold in all (32 Mi frames, 64 MiB of 16-bit).
@@ -110,6 +119,7 @@ impl Instrument {
             name: pkg.name.clone(),
             licence: pkg.licence.clone(),
             verify: pkg.verify.clone(),
+            verify_ui: pkg.verify_ui.clone(),
             engine,
             fx: Vec::new(),
             fx_names: Vec::new(),
@@ -127,6 +137,12 @@ impl Instrument {
             clock: crate::evq::Clock::new(),
             arp: Arp::new(rate),
             seq: Seq::new(rate),
+            ui_lines: pkg.ui.clone(),
+            ui: crate::ui::Ui::parse(&pkg.ui)?,
+            ui_page: 0,
+            ui_set: [None; crate::ui::STATE_NAMES.len()],
+            last_note: None,
+            peak: 0,
             frames_total: 0,
             last_tick: None,
             tick_frames: rate * 60.0 / 120.0 / 24.0,
@@ -197,7 +213,150 @@ impl Instrument {
                 _ => {}
             }
         }
+        // a UI binding names something this instrument has
+        let binds: Vec<crate::ui::Bind> = inst.ui.widgets.iter().map(|w| w.bind).chain(inst.ui.controls.iter().map(|c| c.bind)).collect();
+        for b in binds {
+            if inst.ui_get(&b).is_none() && !matches!(b, crate::ui::Bind::State(_) | crate::ui::Bind::None) {
+                return fail(format!("ui: a binding names something this instrument does not have ({})", crate::ui::bind_text(&b)));
+            }
+        }
         Ok(inst)
+    }
+
+    // ---- the package's UI (ui.rs, docs/PORTING-UI.md): the model, the page shown, the state it binds, and its controls -------------------------------------------------
+
+    pub fn ui(&self) -> &crate::ui::Ui {
+        &self.ui
+    }
+
+    pub fn has_ui(&self) -> bool {
+        !self.ui.is_empty() && !self.ui.pages.is_empty()
+    }
+
+    pub fn ui_page(&self) -> usize {
+        self.ui_page
+    }
+
+    /// Shows page `i` (false: there is no such page).
+    pub fn ui_set_page(&mut self, i: usize) -> bool {
+        if i >= self.ui.pages.len() {
+            return false;
+        }
+        self.ui_page = i;
+        true
+    }
+
+    /// The value of a binding now: a parameter, a global, an effect parameter, or a published state (`ui_state`).
+    pub fn ui_get(&self, b: &crate::ui::Bind) -> Option<i32> {
+        use crate::ui::Bind;
+        match *b {
+            Bind::None => None,
+            Bind::Param(id) => self.engine.get(id),
+            Bind::Global(id) => self.globals.get(id),
+            Bind::Fx(i, id) => self.fx.get(usize::from(i)).and_then(|f| f.get(id)),
+            Bind::State(n) => self.ui_state(usize::from(n)),
+        }
+    }
+
+    /// The range a binding can take: (min, max), for a parameter, a global or an effect parameter.
+    pub fn ui_range(&self, b: &crate::ui::Bind) -> Option<(i32, i32)> {
+        use crate::ui::Bind;
+        let d = |v: Vec<ParamDesc>, id: u16| v.into_iter().find(|d| d.id == id).map(|d| (d.min, d.max));
+        match *b {
+            Bind::Param(id) => d(self.engine.params(), id),
+            Bind::Global(id) => d(self.globals.params(), id),
+            Bind::Fx(i, id) => self.fx.get(usize::from(i)).and_then(|f| d(f.params(), id)),
+            Bind::State(n) if matches!(usize::from(n), 1 | 2 | 4) => Some((0, 99)),
+            _ => None,
+        }
+    }
+
+    /// Sets a binding (clamped to its range); a state can be set only for the three nothing here derives: key, scale and mood.
+    pub fn ui_put(&mut self, b: &crate::ui::Bind, v: i32) -> bool {
+        use crate::ui::Bind;
+        let Some((lo, hi)) = self.ui_range(b) else { return false };
+        let v = v.clamp(lo, hi);
+        match *b {
+            Bind::Param(id) => self.set_param(id, v),
+            Bind::Global(id) => self.set_global(id, v),
+            Bind::Fx(i, id) => self.set_fx_param(usize::from(i), id, v),
+            Bind::State(n) => self.ui_publish(usize::from(n), v),
+            Bind::None => false,
+        }
+    }
+
+    /// Publishes a state by hand (`STATE_NAMES` index): key (0 to 11), scale and mood. The others are derived from what the instrument is doing and refuse.
+    pub fn ui_publish(&mut self, name: usize, v: i32) -> bool {
+        if matches!(name, 1 | 2 | 4) {
+            self.ui_set[name] = Some(v.clamp(0, 99));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The tempo the UI shows: the sequencer's when it runs, else the arpeggiator's.
+    fn ui_bpm(&self) -> i32 {
+        let seq = self.seq.get(crate::seq::P_BPM).unwrap_or(120);
+        let arp = self.arp.get(crate::arp::P_BPM).unwrap_or(120);
+        if self.seq.on() {
+            seq
+        } else {
+            arp
+        }
+    }
+
+    /// A published state, by `STATE_NAMES` index (`title` has no number). **title** the instrument's name (text); **key** the last note's pitch class unless set; **scale**
+    /// and **mood** what was set, else 0; **bpm** the tempo; **beat** 0 to 3 and **bar** from the frames rendered at that tempo; **progress** 0 to 99 through the bar;
+    /// **playing** 1 while anything sounds; **level0** and **level1** the output peak 0 to 99 (the instrument is mono, so both); **pattern0** the sequencer's step 0 to 15.
+    pub fn ui_state(&self, n: usize) -> Option<i32> {
+        let beats = self.frames_total as f64 * f64::from(self.ui_bpm().max(1)) / (60.0 * self.rate);
+        Some(match n {
+            0 => return None,
+            1 => self.ui_set[1].unwrap_or_else(|| self.last_note.map_or(0, |k| i32::from(k % 12))),
+            2 | 4 => self.ui_set[n].unwrap_or(0),
+            3 => self.ui_bpm(),
+            5 => (beats as i64 % 4) as i32,
+            6 => (beats as i64 / 4) as i32,
+            7 => ((beats % 4.0) / 4.0 * 99.0) as i32,
+            8 => i32::from(self.sounding() > 0),
+            9 | 10 => self.peak,
+            11 => self.seq.position() as i32,
+            _ => return None,
+        })
+    }
+
+    /// Page `ui_page()` as a display list, bound to this instrument's live values.
+    pub fn ui_draw(&self) -> Vec<crate::ui::Op> {
+        self.ui.draw(
+            self.ui_page,
+            &|b| self.ui_get(b),
+            &|b| match b {
+                crate::ui::Bind::State(0) => Some(self.name.clone()),
+                _ => None,
+            },
+        )
+    }
+
+    /// Control `i` of the model was pressed (a button) or turned by `clicks` (an encoder): it opens its page, and an encoder steps its binding by `step` a click. Returns
+    /// whether anything changed.
+    pub fn ui_control(&mut self, i: usize, clicks: i32) -> bool {
+        let Some(c) = self.ui.controls.get(i).cloned() else { return false };
+        let mut changed = false;
+        if !c.page.is_empty() {
+            if let Some(p) = self.ui.pages.iter().position(|p| p.0 == c.page) {
+                changed |= self.ui_page != p;
+                self.ui_page = p;
+            }
+        }
+        if c.encoder && c.bind != crate::ui::Bind::None {
+            if let Some(v) = self.ui_get(&c.bind) {
+                let before = v;
+                self.ui_put(&c.bind, v.saturating_add(c.step.saturating_mul(clicks)));
+                changed |= self.ui_get(&c.bind) != Some(before);
+            }
+        }
+        changed
     }
 
     pub fn name(&self) -> &str {
@@ -209,6 +368,10 @@ impl Instrument {
     }
 
     /// What verification measured when the package was made; empty means unverified.
+    /// What the UI model's check against the captured screens measured (empty: not checked).
+    pub fn verify_ui_note(&self) -> &str {
+        &self.verify_ui
+    }
     pub fn verify_note(&self) -> &str {
         &self.verify
     }
@@ -368,6 +531,7 @@ impl Instrument {
 
     /// A key goes down: to the arpeggiator when it is on (which plays the engine from its own clock), else straight to the engine.
     pub fn note_on(&mut self, note: u8, velocity: u8) {
+        self.last_note = Some(note);
         // struck again while the pedal held it: the old strike is let go (the new one is the finger's)
         if let Some(k) = self.pedal_held.iter().position(|&n| n == note) {
             self.pedal_held.remove(k);
@@ -677,6 +841,12 @@ impl Instrument {
 
     /// Replaces `out` with mono samples: the engine, the effects in order, then the safety limiter (95%).
     pub fn render(&mut self, out: &mut [i16]) {
+        self.render_inner(out);
+        let pk = out.iter().map(|&x| i32::from(x).abs()).max().unwrap_or(0);
+        self.peak = (pk * 99 / 32767).max(self.peak - 4).min(99);        // the level falls away by a few points a buffer
+    }
+
+    fn render_inner(&mut self, out: &mut [i16]) {
         self.frames_total += out.len() as u64;
         for chunk in out.chunks_mut(SLICE) {
             self.arp_events.clear();
@@ -756,9 +926,11 @@ impl Instrument {
     /// verified**, so the note says so.
     pub fn to_package(&self, source: &str, source_sha256: &str) -> Package {
         let mut p = Package::new(&self.name, self.engine.kind(), &self.licence);
+        p.ui = self.ui_lines.clone();
         p.source = source.into();
         p.source_sha256 = source_sha256.into();
         p.verify = self.verify.clone();
+        p.verify_ui = self.verify_ui.clone();
         p.map = self.map.clone();
         p.voices = self.voices.clone();
         p.program = self.program;
@@ -1565,5 +1737,131 @@ mod tests_globals {
         m.midi_bytes(&[0xB0, 64, 127, 0x90, 60, 100, 0x80, 60, 0, 0xB0, 123, 0]);
         run(&mut m, 44_100);
         assert_eq!(m.sounding(), 0, "all notes off lets go");
+    }
+
+    fn ui_instrument() -> Instrument {
+        let mut p = Package::new("DRIFT", "analog", "MIT");
+        p.params = vec![(crate::analog::P_RELEASE, 1), (crate::analog::P_ATTACK, 1), (crate::analog::P_WAVE, 3)];
+        p.ui = [
+            "theme bg=#101010 fg=#f0f0f0 dim=#808080 accent=#ff8040",
+            "page home \"HOME\"",
+            "page song \"SONG\"",
+            "text home 4 4 \"X\" size=2 bind=state:title",
+            "value song 8 40 \"CUTOFF\" bind=param:3 min=0 max=3 bar=1 w=100",
+            "key HOME page=home",
+            "key PLAY page=song",
+            "enc KNOB1 page=song bind=param:3 step=1",
+            "enc KNOB2 bind=state:key step=2",
+        ]
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+        Instrument::from_package(&p, 44_100.0, &none).unwrap()
+    }
+
+    #[test]
+    fn a_package_ui_is_kept_drawn_bound_and_saved() {
+        use crate::ui::{Bind, Op};
+        let mut m = ui_instrument();
+        assert!(m.has_ui() && m.ui_page() == 0);
+        // the title is the instrument's name, drawn from state
+        assert!(m.ui_draw().iter().any(|o| matches!(o, Op::Text { text, size: 2, .. } if text == "DRIFT")));
+        // a button opens its page; an unknown page index is refused
+        let song = m.ui().controls.iter().position(|c| c.name == "PLAY").unwrap();
+        let home = m.ui().controls.iter().position(|c| c.name == "HOME").unwrap();
+        assert!(m.ui_control(song, 1) && m.ui_page() == 1);
+        assert!(!m.ui_control(song, 1), "already there: nothing changed");
+        assert!(m.ui_control(home, 1) && m.ui_page() == 0);
+        assert!(!m.ui_set_page(9));
+        // an encoder opens its page and steps its binding, clamped to the parameter's range
+        let knob = m.ui().controls.iter().position(|c| c.name == "KNOB1").unwrap();
+        let b = Bind::Param(3);
+        let v0 = m.ui_get(&b).unwrap();
+        assert!(m.ui_control(knob, 1) && m.ui_page() == 1);
+        assert_eq!(m.ui_get(&b), m.ui_range(&b).map(|(_, hi)| (v0 + 1).min(hi)));
+        for _ in 0..200 {
+            m.ui_control(knob, 1);
+        }
+        assert_eq!(Some(m.ui_range(&b).unwrap().1), m.ui_get(&b));
+        // the page shows the value
+        let shown = m.ui_get(&b).unwrap();
+        assert!(m.ui_draw().iter().any(|o| matches!(o, Op::Text { text, .. } if *text == format!("{shown}"))));
+        // the UI survives a save and a load
+        let q = Package::parse(&m.to_package("t", "").to_text()).unwrap();
+        assert_eq!(q.ui, m.ui_lines);
+        let again = Instrument::from_package(&q, 44_100.0, &none).unwrap();
+        assert!(again.has_ui() && again.ui().pages.len() == 2);
+        // a binding to something the instrument does not have is refused at load
+        let mut bad = Package::new("B", "analog", "MIT");
+        bad.ui = vec!["page a".into(), "value a 1 1 \"X\" bind=param:9999".into()];
+        assert!(Instrument::from_package(&bad, 44_100.0, &none).is_err());
+    }
+
+    /// One check for each of `ui::STATE_NAMES`, in order.
+    #[test]
+    fn every_published_state_has_a_value_and_a_test() {
+        let names = crate::ui::STATE_NAMES;
+        let mut m = ui_instrument();
+        // title: text only, no number
+        assert_eq!(names[0], "title");
+        assert_eq!(m.ui_state(0), None);
+        // key: the last note's pitch class, until set by hand
+        assert_eq!(names[1], "key");
+        assert_eq!(m.ui_state(1), Some(0));
+        m.note_on(62, 100);
+        assert_eq!(m.ui_state(1), Some(2));
+        assert!(m.ui_publish(1, 7));
+        assert_eq!(m.ui_state(1), Some(7));
+        // scale and mood: what was set, else 0
+        assert_eq!((names[2], names[4]), ("scale", "mood"));
+        assert_eq!((m.ui_state(2), m.ui_state(4)), (Some(0), Some(0)));
+        assert!(m.ui_publish(2, 3) && m.ui_publish(4, 5));
+        assert_eq!((m.ui_state(2), m.ui_state(4)), (Some(3), Some(5)));
+        // the derived ones refuse to be set
+        for n in [0, 3, 5, 6, 7, 8, 9, 10, 11] {
+            assert!(!m.ui_publish(n, 1), "{} is derived", names[n]);
+        }
+        // bpm follows the arpeggiator's tempo, or the sequencer's when it runs
+        assert_eq!(names[3], "bpm");
+        assert!(m.set_arp_param(crate::arp::P_BPM, 90));
+        assert_eq!(m.ui_state(3), Some(90));
+        // beat, bar and progress come from the frames rendered at that tempo: 90 bpm is 1.5 beats a second
+        assert_eq!((names[5], names[6], names[7]), ("beat", "bar", "progress"));
+        let mut fresh = ui_instrument();
+        fresh.set_arp_param(crate::arp::P_BPM, 120); // 2 beats a second
+        assert_eq!((fresh.ui_state(5), fresh.ui_state(6), fresh.ui_state(7)), (Some(0), Some(0), Some(0)));
+        run(&mut fresh, 44_100 + 11_025); // 1.25 s: 2.5 beats
+        assert_eq!((fresh.ui_state(5), fresh.ui_state(6)), (Some(2), Some(0)));
+        assert_eq!(fresh.ui_state(7), Some(61)); // 2.5 of 4 beats through the bar
+        run(&mut fresh, 44_100 * 2); // 3.25 s: 6.5 beats
+        assert_eq!((fresh.ui_state(5), fresh.ui_state(6)), (Some(2), Some(1)));
+        // playing: 1 while anything sounds
+        assert_eq!(names[8], "playing");
+        let mut p = ui_instrument();
+        assert_eq!(p.ui_state(8), Some(0));
+        p.note_on(60, 100);
+        assert_eq!(p.ui_state(8), Some(1));
+        // the levels: the output peak, 0 when silent, up with a note, falling away after
+        assert_eq!((names[9], names[10]), ("level0", "level1"));
+        let mut l = ui_instrument();
+        run(&mut l, 1024);
+        assert_eq!(l.ui_state(9), Some(0));
+        l.note_on(60, 127);
+        run(&mut l, 2048);
+        let up = l.ui_state(9).unwrap();
+        assert!(up > 10 && up <= 99 && l.ui_state(10) == Some(up), "level {up}");
+        l.all_off();
+        for _ in 0..40 {
+            run(&mut l, 1024);
+        }
+        assert_eq!(l.ui_state(9), Some(0), "the level falls away when the sound has stopped");
+        // pattern0: the sequencer's step
+        assert_eq!(names[11], "pattern0");
+        let mut q = ui_instrument();
+        assert_eq!(q.ui_state(11), Some(0));
+        assert!(q.set_seq_param(crate::seq::P_ON, 1) && q.set_seq_param(crate::seq::P_BPM, 240));
+        run(&mut q, 24_000); // at 240 bpm a step is a quarter of a beat: 0.0625 s
+        let step = q.ui_state(11).unwrap();
+        assert!((0..16).contains(&step) && step > 0, "step {step}");
     }
 }

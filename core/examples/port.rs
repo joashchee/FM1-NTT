@@ -1,4 +1,5 @@
 //! `port FIRMWARE.fwsc --licence EXPR [--felucca-sweep N] [--name N] [--source FILE] [--model msfa|felucca[:DTUN]|stock] [--verify [--program P] [--voice I] [--channel C] [--note N] [--vel V]] [--out FILE.fm1i]`
+//! `port X0X.fwsc --x0x-kit --licence EXPR [--name N] [--out FILE.fm1i]`  (a level B drum kit in X0X's manner: its law, choke and limiter, no samples)
 //! `port --check PACKAGE.fm1i`
 //!
 //! The porting tool (docs/PORTING.md): identify a firmware, make a level-A port (its DX7-style bank into the `fm6` engine) and optionally verify it against the
@@ -58,6 +59,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut file, mut licence, mut name, mut source, mut out, mut model) = (None, None, None, None, None, "msfa".to_string());
     let mut sweep = 0usize;
+    let mut kit = false;
     let (mut verify, mut program, mut voice, mut channel, mut note, mut vel) = (false, None, 0usize, 0u8, 60u8, 100u8);
     let mut i = 0;
     while i < args.len() {
@@ -73,6 +75,7 @@ fn main() -> ExitCode {
             "--out" => out = next(&mut i),
             "--model" => model = next(&mut i).unwrap_or_default(),
             "--verify" => verify = true,
+            "--x0x-kit" => kit = true,
             "--felucca-sweep" => {
                 verify = true;
                 sweep = next(&mut i).and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -105,6 +108,33 @@ fn main() -> ExitCode {
         }
     };
     println!("{file}: {:?}, {} bytes, sha256 {}", id.identity, id.bytes, id.sha256);
+    if kit {
+        let base = Path::new(&file).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let (pkg, tier) = match port::x0x_kit_package(&name.unwrap_or_else(|| format!("{} kit", id.identity)), &licence, &source.unwrap_or(base), &id.sha256) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("not ported: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        println!("level B drum kit ({}): put your own WAVs named {} beside the package", tier_line(tier), port::X0X_DRUMS.iter().map(|d| d.1).collect::<Vec<_>>().join(", "));
+        return match out {
+            Some(o) => match fs::write(&o, pkg.to_text()) {
+                Ok(()) => {
+                    println!("wrote {o}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{o}: {e}");
+                    ExitCode::from(1)
+                }
+            },
+            None => {
+                print!("{}", pkg.to_text());
+                ExitCode::SUCCESS
+            }
+        };
+    }
     println!("  {} voice run(s), {} voices; engine hints in its strings: {:?}", id.banks, id.voices, id.hints);
     println!("  port level: {}", if id.level == port::Level::A { "A (a bank for fm6)" } else { "B or C (no bank: by hand)" });
     let m = match model.split_once(':') {

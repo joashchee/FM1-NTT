@@ -186,6 +186,7 @@ typedef struct {
     double sw_start_ms, sw_next_ms, sw_batt_ms, sw_cancel_ms;
     char fsha[PX_MAX_FILES][65];        /* each firmware's SHA-256 ("" not yet taken, "-" unreadable): the key of its demo folder */
     struct { int found; char licence[96], source[120], name[48]; } info_rec;
+    struct { int found; char name[PX_NAME], path[300]; char tier; } info_port;   /* a .fm1i whose source-sha256 is this firmware's hash: the page's "port available" line (ROADMAP 5d) */
     struct { volatile int on; int16_t *pcm; size_t frames; volatile size_t pos; int nf, total_ms, cur; int ms[400]; char dir[420], name[PX_NAME], tier[40], licence[104]; } pl;
     uint32_t pl_pic[240 * 240];
     /* MONITOR (monitor.h, docs/MONITOR.md) */
@@ -512,12 +513,14 @@ static int inst_load(App *a, const char *path) {
     say(a, 0, "Instrument loaded: %s", nm);
     return 0;
 }
+enum { ED_GLOBAL = 4, ED_FX0 = 5 };      /* the editor's groups (below): the engine 0, the arpeggiator 1, the sequencer 2 and 3, the globals, then the effects */
 /* An instrument from the FILES list: loaded, the SOUND panel shown with the preview on, played alone when no firmware is loaded (the same as --instrument). */
 static void open_instrument(App *a, const char *path) {
     if (inst_load(a, path) != 0) return;
     a->panel = PANEL_SOUND;
     a->pv_on = 1;
     lock(a); a->pv_solo = !fm1ntt_loaded(a->m); unlock(a);
+    if (a->inst && fm1ntt_inst_ui_pages(a->inst) > 0) { a->ed_on = 1; a->ed_group = ED_FX0 + (int)fm1ntt_inst_fx_count(a->inst); a->ed_sel = 0; }   /* a package with a screen opens on it */
 }
 static const char *g_stamp_override;   /* Rec demo fixes the stamp in what the tour writes, so two recordings are the same */
 static void stamp(char *out, size_t n) {
@@ -1112,8 +1115,11 @@ static void midi_ok(App *a, int down) {
 
 /* ---- the instrument editor: any engine's, the arpeggiator's and each effect's parameters, generic over what the core describes (core/src/engine.rs ParamDesc) ------------------ */
 /* groups: 0 the engine, 1 the arpeggiator, 2 the sequencer's settings, 3 the pattern being edited (its voice and steps), 4 the global settings (channels, bend range, velocity, mono), then one for each effect */
-enum { ED_GLOBAL = 4, ED_FX0 = 5 };
-static int ed_groups(const App *a) { return ED_FX0 + (int)fm1ntt_inst_fx_count(a->inst); }
+/* The last group of a package that has a UI model is its SCREEN: one row for each control the model gives a job (a button opens its page, an encoder opens its page and steps its
+ * binding), and the FM-1's screen box shows the model's page, drawn live (the engine's own rows stay in the groups before it). */
+static int ed_has_ui(const App *a) { return a->inst && fm1ntt_inst_ui_pages(a->inst) > 0; }
+static int ed_groups(const App *a) { return ED_FX0 + (int)fm1ntt_inst_fx_count(a->inst) + ed_has_ui(a); }
+static int ed_is_ui(const App *a, int g) { return ed_has_ui(a) && g == ED_FX0 + (int)fm1ntt_inst_fx_count(a->inst); }
 /* One extra row ends a group that has something to choose besides parameters (no new keys: Left and Right change it like any row): the engine's group gets BANK when the
  * instrument has more than one bank of voices (same slot, another bank), and an effect's group gets POSITION when the chain has more than one effect (Left and Right move it
  * earlier or later, and the editor follows it). Neither is a stored parameter: the bank is not saved, the order is (the package writes the chain in order). */
@@ -1121,16 +1127,31 @@ enum { ED_V_ID = 100000 };
 static int ed_virtual(const App *a, int g) {
     if (!a->inst) return 0;
     if (g == 0) return fm1ntt_inst_bank_count(a->inst) > 1;
-    return g >= ED_FX0 && fm1ntt_inst_fx_count(a->inst) > 1;
+    return g >= ED_FX0 && !ed_is_ui(a, g) && fm1ntt_inst_fx_count(a->inst) > 1;
 }
 static int ed_count_real(const App *a, int g) {
     if (!a->inst) return 0;
+    if (ed_is_ui(a, g)) return (int)fm1ntt_inst_ui_control_count(a->inst);
     return (int)(g == 0 ? fm1ntt_inst_param_count(a->inst) : g == 1 ? fm1ntt_inst_arp_count(a->inst) : g == ED_GLOBAL ? fm1ntt_inst_global_count(a->inst) : g < ED_FX0 ? fm1ntt_inst_seq_count(a->inst, (size_t)g - 2) : fm1ntt_inst_fx_param_count(a->inst, (size_t)g - ED_FX0));
 }
 static int ed_count(const App *a, int g) { return ed_count_real(a, g) + ed_virtual(a, g); }
 /* Parameter i of group g: { id, min, max, default } and its name; 0 ok. */
 static int ed_info(const App *a, int g, int i, int32_t info[4], char *name, size_t cap) {
     if (!a->inst || i < 0) return -1;
+    if (ed_is_ui(a, g)) {
+        int32_t ci[4];
+        char cn[24];
+        int enc = fm1ntt_inst_ui_control(a->inst, (size_t)i, ci, cn, sizeof cn);
+        if (enc < 0) return -1;
+        char pt[24] = "";
+        if (ci[0] >= 0) fm1ntt_inst_ui_page_title(a->inst, (size_t)ci[0], pt, sizeof pt);
+        snprintf(name, cap, "%s %s%s%s", cn, enc ? "TURN" : "PRESS", pt[0] ? " > " : "", pt);
+        info[0] = i;
+        info[1] = ci[1] < ci[2] ? ci[1] : -1;                   /* a button, or a knob that binds nothing: Left and Right are one click each way */
+        info[2] = ci[1] < ci[2] ? ci[2] : 1;
+        info[3] = 0;
+        return 0;
+    }
     if (ed_virtual(a, g) && i == ed_count_real(a, g)) {
         int top = g == 0 ? (int)fm1ntt_inst_bank_count(a->inst) - 1 : (int)fm1ntt_inst_fx_count(a->inst) - 1;
         info[0] = ED_V_ID; info[1] = 0; info[2] = top; info[3] = 0;
@@ -1141,11 +1162,18 @@ static int ed_info(const App *a, int g, int i, int32_t info[4], char *name, size
          : g == ED_GLOBAL ? fm1ntt_inst_global_param(a->inst, (size_t)i, info, name, cap) : g < ED_FX0 ? fm1ntt_inst_seq_param(a->inst, (size_t)g - 2, (size_t)i, info, name, cap) : fm1ntt_inst_fx_param(a->inst, (size_t)g - ED_FX0, (size_t)i, info, name, cap);
 }
 static int ed_get(const App *a, int g, int id) {
+    if (ed_is_ui(a, g)) {
+        int32_t ci[4];
+        char cn[24];
+        int enc = fm1ntt_inst_ui_control(a->inst, (size_t)id, ci, cn, sizeof cn);
+        return enc == 1 && ci[1] < ci[2] ? ci[3] : 0;
+    }
     if (id == ED_V_ID) return g == 0 ? (int)fm1ntt_inst_bank(a->inst) : g - ED_FX0;
     return g == 0 ? fm1ntt_inst_get(a->inst, id) : g == 1 ? fm1ntt_inst_arp_get(a->inst, id) : g == ED_GLOBAL ? fm1ntt_inst_global_get(a->inst, id) : g < ED_FX0 ? fm1ntt_inst_seq_get(a->inst, id) : fm1ntt_inst_fx_get(a->inst, (size_t)g - ED_FX0, id);
 }
 static void ed_title(const App *a, int g, char *out, size_t n) {
-    if (g == 0) { char k[16]; fm1ntt_inst_text(a->inst, 1, k, sizeof k); for (char *q = k; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "ENGINE %s", k); }
+    if (ed_is_ui(a, g)) { char pt[24] = ""; int p = fm1ntt_inst_ui_page(a->inst); if (p >= 0) fm1ntt_inst_ui_page_title(a->inst, (size_t)p, pt, sizeof pt); snprintf(out, n, "SCREEN %s", pt); }
+    else if (g == 0) { char k[16]; fm1ntt_inst_text(a->inst, 1, k, sizeof k); for (char *q = k; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "ENGINE %s", k); }
     else if (g == 1) snprintf(out, n, "ARPEGGIATOR");
     else if (g == 2) snprintf(out, n, "SEQUENCER");
     else if (g == ED_GLOBAL) snprintf(out, n, "GLOBAL");
@@ -1153,6 +1181,16 @@ static void ed_title(const App *a, int g, char *out, size_t n) {
     else { char f[24]; fm1ntt_inst_fx_name(a->inst, (size_t)g - ED_FX0, f, sizeof f); for (char *q = f; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32); snprintf(out, n, "EFFECT %s", f); }
 }
 static void ed_set(App *a, int g, int id, int v) {
+    if (ed_is_ui(a, g)) {                                              /* a control: a click each way on a button or a knob with no range; the binding's own value otherwise */
+        int32_t ci[4];
+        char cn[24];
+        int enc = fm1ntt_inst_ui_control(a->inst, (size_t)id, ci, cn, sizeof cn), ranged = enc == 1 && ci[1] < ci[2];
+        lock(a);
+        int changed = fm1ntt_inst_ui_press(a->inst, (size_t)id, ranged ? v - ci[3] : v);
+        unlock(a);
+        if (changed > 0 && ranged) a->ed_dirty = 1;
+        return;
+    }
     lock(a);
     if (id == ED_V_ID) {
         if (g == 0) fm1ntt_inst_bank_set(a->inst, (size_t)v);          /* not an edit of the package: the bank is where the player is */
@@ -1440,7 +1478,7 @@ static const char *btn_name(int b) {
 static const char *const SLOT_LABEL[PANEL_COUNT][NSLOT] = {
     /*        UP             LEFT            DOWN            RIGHT          Y                  B                 A                X                  SELECT           START */
     /*MACHINE*/ {"NOTE 1 (C)", "NOTE 2 (D)", "NOTE 3 (E)", "NOTE 4 (F)", "NOTE 5 (G)", "NOTE 6 (A)", "NOTE 7 (B)", "NOTE 8 (C)", "OCTAVE -", "OCTAVE +"},
-    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "", "MAKE A DEMO, COMPARE, DELETE", "BACK FROM A PAGE", "OPEN, LOAD, PLAY", "RESCAN, PLAY DEMO", "", "PAUSE"},
+    /*FILES*/   {"PREVIOUS FILE", "", "NEXT FILE", "LOAD ITS PORT (ON A PAGE)", "MAKE A DEMO, COMPARE, DELETE", "BACK FROM A PAGE", "OPEN, LOAD, PLAY", "RESCAN, PLAY DEMO", "", "PAUSE"},
     /*CPU*/     {"OTHER CORE", "OTHER CORE", "OTHER CORE", "OTHER CORE", "", "", "", "", "", "PAUSE"},
     /*MEMORY*/  {"ONE ROW UP", "PREVIOUS REGION", "ONE ROW DOWN", "NEXT REGION", "64 KIB FORTH", "", "", "64 KIB BACK", "", "PAUSE"},
     /*CONSOLE*/ {"", "", "", "", "", "", "", "", "", "PAUSE"},
@@ -1579,7 +1617,7 @@ static void theme_load(void) {
 }
 
 /* What the context menu holds on each panel: the panel's own actions, as the same code that a press runs (an action code), or a special one. */
-enum { CX_PANIC = 1, CX_PAUSE, CX_SCALE, CX_SHOT, CX_ACT = 0x100 };
+enum { CX_PANIC = 1, CX_PAUSE, CX_SCALE, CX_SHOT, CX_RESET, CX_ACT = 0x100 };
 typedef struct { int panel; const char *label; int code; } CtxItem;
 static const CtxItem CTX[] = {
     {PANEL_MACHINE, "PANIC: ALL NOTES OFF", CX_PANIC}, {PANEL_MACHINE, "PAUSE / RESUME", CX_PAUSE}, {PANEL_MACHINE, "NEXT SCALE", CX_SCALE},
@@ -1595,6 +1633,7 @@ static const CtxItem CTX[] = {
 /* The items for the focus now: the panel's, then Screenshot (every panel has it); an open page or editor offers to close it instead. Returns how many (at most PX_MENU_MAX). */
 static int ctx_items(const App *a, const char *label[], int code[]) {
     int n = 0;
+    if (a->ed_on && a->inst && !ed_is_ui(a, a->ed_group)) { label[n] = "RESET THIS ROW TO ITS DEFAULT"; code[n++] = CX_RESET; }       /* no pad button is free for it */
     if (a->info_on || a->ed_on) { label[n] = "CLOSE THIS PAGE"; code[n++] = CX_ACT | A_BACK; }
     else {
         for (int i = 0; i < NCTX && n < PX_MENU_MAX - 2; i++) if (CTX[i].panel == a->panel) { label[n] = CTX[i].label; code[n++] = CTX[i].code; }
@@ -1608,6 +1647,7 @@ static void ctx_run(App *a, int code) {
     else if (code == CX_PAUSE) { a->paused = !a->paused; say(a, 0, a->paused ? "Paused (Start resumes)" : "Running", NULL); }
     else if (code == CX_SCALE) scale_next(a);
     else if (code == CX_SHOT) screenshot(a);
+    else if (code == CX_RESET) { if (a->ed_on && a->inst) ed_change(a, 0, 1); }
     else if (code & CX_ACT) act(a, code & 0xFF);
 }
 
@@ -1868,6 +1908,13 @@ static void fill_ui(App *a, UiState *u, int use_lock) {
             u->ed_row[u->ed_n].min = info[1]; u->ed_row[u->ed_n].max = info[2];
             u->ed_row[u->ed_n].val = ed_get(a, g, info[0]);
             u->ed_n++;
+        }
+        if (ed_is_ui(a, g)) {                                         /* the package's own screen, live, in the FM-1's screen box */
+            static fm1ntt_ui_op ops[512];
+            _Static_assert(sizeof(fm1ntt_ui_op) == sizeof(PxUiOp), "the display-list op is the painter's");
+            size_t n = fm1ntt_inst_ui_draw(a->inst, ops, 512);
+            px_paint_ui(u->fb, (const PxUiOp *)ops, (int)n);
+            u->fb_valid = 1;
         }
         if (use_lock) unlock(a);
     }
@@ -2445,9 +2492,44 @@ static int manifest_find(const char *dir, const char *sha, char *licence, size_t
     fclose(f);
     return found;
 }
+/* The source-sha256 of an instrument package, from its header (the line is written before any voice, so the first 4 KiB hold it); 1 and `out` (64 lowercase hex) when it has one. */
+static int pkg_source_sha(const char *path, char out[65]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char buf[4097];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    if (strncmp(buf, "fm1i = ", 7) != 0) return 0;                          /* not a package */
+    for (char *l = buf; l && *l; ) {
+        char *e = strchr(l, '\n');
+        if (!strncmp(l, "source-sha256 = ", 16)) {
+            char t[65] = {0};
+            size_t k = 0;
+            for (const char *q = l + 16; k < 64 && *q && *q != '\n' && *q != '\r'; q++) t[k++] = (char)((*q >= 'A' && *q <= 'F') ? *q + 32 : *q);
+            if (k == 64 && show_sha_ok(t)) { memcpy(out, t, 65); return 1; }
+            return 0;
+        }
+        l = e ? e + 1 : NULL;
+    }
+    return 0;
+}
+/* The first package in FILES (yours, then bundled, then the Pack) made from the firmware with this hash. */
+static void port_find(App *a, int i) {
+    memset(&a->info_port, 0, sizeof a->info_port);
+    if (!show_sha_ok(a->fsha[i])) return;
+    for (int k = 0; k < a->nfiles && !a->info_port.found; k++) {
+        char h[65];
+        if (!has_ext(a->fpaths[k], ".fm1i") || !pkg_source_sha(a->fpaths[k], h) || strcmp(h, a->fsha[i])) continue;
+        a->info_port.found = 1; a->info_port.tier = a->fbundled[k];
+        snprintf(a->info_port.name, sizeof a->info_port.name, "%s", a->files[k]);
+        snprintf(a->info_port.path, sizeof a->info_port.path, "%s", a->fpaths[k]);
+    }
+}
 static void info_open(App *a, int i) {
     memset(&a->info_rec, 0, sizeof a->info_rec);
     file_sha(a, i);
+    port_find(a, i);
     const char *dir = a->fbundled[i] == 1 ? a->bdir : a->fbundled[i] == 2 ? a->pdir : "";
     if (dir[0] && show_sha_ok(a->fsha[i])) {
         /* beside the firmware (the repository), else in the installed package's doc folder (usr/share/doc/..., two levels up from usr/share/fm1ntt/firmware) */
@@ -2628,6 +2710,10 @@ static int files_press(App *a, int act) {
         if (i < 0 || i >= a->nfiles) { a->info_on = 0; return 1; }
         if (act == A_OK) { a->info_on = 0; const char *p = a->fpaths[i]; load_start(a, p, has_ext(p, ".bin"), FM1_ENTRY_FELUCCA); }
         else if (act == A_X) player_start(a, i);
+        else if (act == A_RIGHT) {
+            if (!a->info_port.found) say(a, 2, "No port of this firmware is here yet", NULL);
+            else { char p[300]; snprintf(p, sizeof p, "%s", a->info_port.path); a->info_on = 0; open_instrument(a, p); }
+        }
         else if (act == A_Y) {
             if (a->sw_pid && !strcmp(a->sw_name, a->files[i])) { show_cancel(a); say(a, 0, "Stopping the demo", NULL); }
             else if (a->sw_pid) say(a, 2, "Another demo is being made: wait for it or stop it", NULL);
@@ -2664,6 +2750,9 @@ static void ui_showcase(App *a, UiState *u) {
         snprintf(u->info_source, sizeof u->info_source, "%s", a->info_rec.found ? a->info_rec.source : "-");
         if (show_sha_ok(a->fsha[i])) snprintf(u->info_sha, sizeof u->info_sha, "%s", a->fsha[i]);
         u->info_busy = a->sw_pid && !strcmp(a->sw_name, a->files[i]);
+        u->info_port_ok = a->info_port.found;
+        if (a->info_port.found) snprintf(u->info_port, sizeof u->info_port, "%s (%s)", a->info_port.name, a->info_port.tier == 1 ? "BUNDLED" : a->info_port.tier == 2 ? "THE GPL PACK" : "YOURS");
+        else snprintf(u->info_port, sizeof u->info_port, "NONE FOR THIS FIRMWARE YET");
         ShowState s;
         memset(&s, 0, sizeof s);
         if (demo_dir_of(a, i, dir, sizeof dir) == 0) show_state_read(dir, &s);
@@ -3306,7 +3395,29 @@ static int show_app_selftest(const char *root, App *a, UiState *ui) {
     ACHECK(a->info_on && a->info_i == 0 && a->info_rec.found);
     fill_ui(a, ui, 0);
     ACHECK(ui->info_on && !strcmp(ui->info_tier, "BUNDLED (PERMISSIVE)") && strstr(ui->info_licence, "MPL-2.0") && strstr(ui->info_source, "github.com") && strlen(ui->info_sha) == 64 && !ui->info_can_play && ui->info_demo_kind == 0 && strstr(ui->info_demo, "NONE YET") && !ui->demo_run[0]);
+    ACHECK(!a->info_port.found && !ui->info_port_ok && strstr(ui->info_port, "NONE"));          /* no package is made from it yet */
+    act(a, A_RIGHT); ACHECK(a->info_on && a->msg_style == 2);                                   /* Right says so and the page stays */
     act(a, A_BACK);
+    {   /* a package whose source-sha256 is the firmware's hash: the page offers it, Right loads it; a package of another hash, or none, is not offered */
+        char pp[460], pk[400], pq[460];
+        snprintf(pp, sizeof pp, "%s/port-of-it.fm1i", root);
+        snprintf(pk, sizeof pk, "fm1i = 1\nname = Port\nengine = analog\nlicence = MPL-2.0\nsource = test\nsource-sha256 = %s\n", a->fsha[0]);
+        write_atomic(pp, pk, strlen(pk));
+        snprintf(pq, sizeof pq, "%s/other.fm1i", root);
+        snprintf(pk, sizeof pk, "fm1i = 1\nname = Other\nengine = analog\nlicence = MIT\nsource-sha256 = %064d\n", 7);
+        write_atomic(pq, pk, strlen(pk));
+        snprintf(a->fpaths[2], sizeof a->fpaths[2], "%s", pq); snprintf(a->files[2], PX_NAME, "other.fm1i"); a->fbundled[2] = 0;
+        snprintf(a->fpaths[3], sizeof a->fpaths[3], "%s", pp); snprintf(a->files[3], PX_NAME, "port-of-it.fm1i"); a->fbundled[3] = 2;
+        a->nfiles = 4; a->file_sel = 0;
+        act(a, A_OK); fill_ui(a, ui, 0);
+        ACHECK(a->info_port.found && !strcmp(a->info_port.name, "port-of-it.fm1i") && ui->info_port_ok && strstr(ui->info_port, "THE GPL PACK"));
+        act(a, A_RIGHT);
+        ACHECK(!a->info_on && a->inst != NULL && a->panel == PANEL_SOUND && !strcmp(a->inst_path, pp) && a->pv_on);
+        a->panel = PANEL_FILES; a->pv_on = 0;
+        a->file_sel = 1; act(a, A_OK); fill_ui(a, ui, 0);
+        ACHECK(!a->info_port.found && !ui->info_port_ok);                                       /* a file you brought is not that firmware */
+        act(a, A_BACK); a->nfiles = 2; a->file_sel = 0;
+    }
     a->file_sel = 1; act(a, A_OK); fill_ui(a, ui, 0);
     ACHECK(ui->info_on && !strcmp(ui->info_tier, "YOUR OWN FILE") && strstr(ui->info_licence, "NOT KNOWN") && !strcmp(ui->info_source, "-"));
     act(a, A_X); ACHECK(!a->pl.on && a->msg_style == 2);                                        /* no demo: X says so */
@@ -3456,6 +3567,7 @@ draw_tests:;
             ui->info_on = st < 4;
             ui->info_demo_kind = st == 0 ? 0 : st == 1 ? 1 : st == 2 ? 2 : 3; ui->info_can_play = st == 2; ui->info_busy = st == 1; ui->info_pct = 45;
             snprintf(ui->info_demo, sizeof ui->info_demo, "%s", st == 0 ? "NONE YET: Y MAKES IT" : st == 1 ? "BEING MADE: 45%, 12S" : st == 2 ? "READY: 140 PICTURES, 15 S" : "FAILED: the screen stayed blank, so there is nothing to show");
+            ui->info_port_ok = st == 2 || st == 3; snprintf(ui->info_port, sizeof ui->info_port, "%s", ui->info_port_ok ? "felucca-1.8.2.fm1i (THE GPL PACK)" : "NONE FOR THIS FIRMWARE YET");
             if (st == 4) { snprintf(ui->demo_run, sizeof ui->demo_run, "untrue-0.1.fwsc"); ui->demo_pct = 45; ui->demo_secs = 12; }
             px_draw(cv, mode, ui); px_draw(cv2, mode, ui);
             ACHECK(!memcmp(cv, cv2, sizeof cv));
@@ -4368,6 +4480,9 @@ static int selftest(void) {
                     act(&a, A_X); CHECK(fm1ntt_inst_get(a.inst, 2) == c0 + 1 - 12);            /* the big step is a tenth of the range, at least 10 */
                     for (int k = 0; k < 30; k++) act(&a, A_X);
                     CHECK(fm1ntt_inst_get(a.inst, 2) == 0);                                    /* clamped at the bottom */
+                    { const char *cl[PX_MENU_MAX]; int cc[PX_MENU_MAX], n = ctx_items(&a, cl, cc), has = 0; for (int i = 0; i < n; i++) has |= cc[i] == CX_RESET; CHECK(has); }
+                    a.ed_group = 0; a.ed_sel = 2; fm1ntt_inst_set(a.inst, 2, 77);
+                    { int32_t inf[4]; char nm3[PX_NAME]; ed_info(&a, 0, a.ed_sel, inf, nm3, sizeof nm3); ctx_run(&a, CX_RESET); CHECK(fm1ntt_inst_get(a.inst, inf[0]) == inf[3]); }   /* the context menu puts the row back to its default */
                     act(&a, A_Y); act(&a, A_Y);
                     int c1 = fm1ntt_inst_get(a.inst, 2);
                     act(&a, A_UP); act(&a, A_UP); act(&a, A_UP); CHECK(a.ed_sel == 10 && a.ed_sel != 2);   /* up wraps through the top */
@@ -4440,6 +4555,75 @@ static int selftest(void) {
                     a.mode = MODE_STANDARD;
                     se.jbutton.button = 0; handle(&a, &se); CHECK(a.ed_on == 0);                 /* B closes it */
                     a.panel = PANEL_SOUND;
+                    {   /* a package with a screen (docs/PORTING-UI.md): it opens on its SCREEN group, the FM-1's screen box shows the page, a control row acts, the painted rectangles are the core's */
+                        char up[300];
+                        snprintf(up, sizeof up, "%s/selftest-ui.fm1i", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+                        FILE *uf = fopen(up, "wb");
+                        CHECK(uf != NULL);
+                        if (uf) {
+                            fputs("fm1i = 3\nname = UiTest\nengine = analog\nlicence = MIT\nui = theme bg=#101020 fg=#f0f0f0 dim=#808080 accent=#ff8040\nui = page home \"HOME\"\nui = page song \"SONG\"\n"
+                                  "ui = bar home 10 10 w=100 h=6 bind=param:3 min=0 max=99 color=accent\nui = disc home 120 120 r=20 bind=state:beat color=accent\nui = meter home 200 20 w=8 h=60 bind=state:level0\n"
+                                  "ui = text song 20 20 \"SONG\" size=2 color=accent\nui = key PLAY page=song\nui = enc KNOB1 page=home bind=param:3 step=5\n", uf);
+                            fclose(uf);
+                            open_instrument(&a, up);
+                            CHECK(a.panel == PANEL_SOUND && a.ed_on && ed_is_ui(&a, a.ed_group) && ed_groups(&a) == ED_FX0 + 1 && ed_count(&a, a.ed_group) == 2);
+                            fill_ui(&a, ui, 0);
+                            CHECK(ui->ed_on && !strncmp(ui->ed_title, "SCREEN HOME", 11) && ui->ed_n == 2 && strstr(ui->ed_row[0].name, "PLAY PRESS > SONG") && strstr(ui->ed_row[1].name, "KNOB1 TURN > HOME"));
+                            static uint32_t raster[240 * 240];
+                            CHECK(ui->fb_valid && fm1ntt_inst_ui_raster(a.inst, raster, 240 * 240) == 240 * 240);
+                            int same = 1; for (int i = 0; i < 240 * 240; i++) if ((raster[i] & 0xFFFFFF) != ui->fb[i]) { same = 0; break; }
+                            CHECK(same);                                                        /* home has no text: the host's paint is the core's raster, pixel for pixel */
+                            if (getenv("FM1NTT_MON_SHOTS")) {
+                                uint32_t *scv = calloc((size_t)PX_W * PX_H, 4);
+                                for (int pg = 0; pg < 2 && scv; pg++) {
+                                    fm1ntt_inst_ui_set_page(a.inst, (size_t)pg); fill_ui(&a, ui, 0); px_draw(scv, MODE_STANDARD, ui);
+                                    char fn[420]; snprintf(fn, sizeof fn, "%s/ui-screen-%d.bmp", getenv("FM1NTT_MON_SHOTS"), pg); mon_dump_bmp(fn, scv);
+                                }
+                                free(scv); fm1ntt_inst_ui_set_page(a.inst, 0);
+                            }
+                            a.ed_sel = 0; act(&a, A_RIGHT);                                     /* PLAY: the page opens */
+                            CHECK(fm1ntt_inst_ui_page(a.inst) == 1 && !a.ed_dirty);
+                            fill_ui(&a, ui, 0);
+                            CHECK(!strncmp(ui->ed_title, "SCREEN SONG", 11));
+                            int accent = 0; for (int i = 0; i < 240 * 240; i++) accent += ui->fb[i] == 0xff8040;
+                            CHECK(accent > 100);                                                /* the title text is painted in the font, in the accent colour */
+                            a.ed_sel = 1; int32_t ci[4]; char cn[24];
+                            fm1ntt_inst_ui_control(a.inst, 1, ci, cn, sizeof cn);
+                            act(&a, A_RIGHT);                                                   /* KNOB1: its page, and the binding up by its step */
+                            int32_t cj[4]; fm1ntt_inst_ui_control(a.inst, 1, cj, cn, sizeof cn);
+                            CHECK(fm1ntt_inst_ui_page(a.inst) == 0 && cj[3] == ci[3] + 5 && a.ed_dirty);
+                            act(&a, A_LEFT); fm1ntt_inst_ui_control(a.inst, 1, cj, cn, sizeof cn); CHECK(cj[3] == ci[3]);
+                            a.ed_dirty = 0; a.ed_group = 0; act(&a, A_SELECT); CHECK(ed_is_ui(&a, a.ed_group));   /* Select from the first group wraps round to the screen */
+                            a.ed_on = 0;
+                            remove(up);
+                        }
+                    }
+                    {   /* a kit package with samples beside it (the host's file resolver, ROADMAP 5c): loaded, played, and a missing sample says which */
+                        char kd[300], kp[340], wp[340];
+                        snprintf(kd, sizeof kd, "%s/selftest-kit", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+                        mkdir_p(kd);
+                        snprintf(kp, sizeof kp, "%s/kit.fm1i", kd); snprintf(wp, sizeof wp, "%s/kick.wav", kd);
+                        enum { KN = 4410 };
+                        static uint8_t wav[44 + KN * 2];
+                        memcpy(wav, "RIFF", 4); memcpy(wav + 8, "WAVEfmt ", 8);
+                        uint32_t v32[] = {36 + KN * 2, 16, 0x00010001, 44100, 88200}; memcpy(wav + 4, &v32[0], 4); memcpy(wav + 16, &v32[1], 4); memcpy(wav + 20, &v32[2], 4); memcpy(wav + 24, &v32[3], 4); memcpy(wav + 28, &v32[4], 4);
+                        uint32_t v2 = 0x00100002; memcpy(wav + 32, &v2, 4); memcpy(wav + 36, "data", 4); uint32_t dl = KN * 2; memcpy(wav + 40, &dl, 4);
+                        for (int k = 0; k < KN; k++) { int16_t x = (int16_t)(sin(k * 0.05) * 9000); memcpy(wav + 44 + k * 2, &x, 2); }
+                        const char *kt = "fm1i = 1\nname = KitTest\nengine = kit\nlicence = CC0-1.0\nsample 36 = kick.wav\n";
+                        CHECK(inst_load(&a, kp) != 0 && a.msg_style == 2);                       /* no such file yet */
+                        write_atomic(kp, kt, strlen(kt));
+                        CHECK(inst_load(&a, kp) != 0 && a.msg_style == 2);                       /* the package is there, the sample is not: refused, the old instrument kept */
+                        write_atomic(wp, wav, sizeof wav);
+                        CHECK(inst_load(&a, kp) == 0 && a.inst != NULL);
+                        fm1ntt_inst_note_on(a.inst, 36, 127);
+                        static int16_t kb[1024]; fm1ntt_inst_render(a.inst, kb, 1024);
+                        int kpk = 0; for (int k = 0; k < 1024; k++) if (abs(kb[k]) > kpk) kpk = abs(kb[k]);
+                        CHECK(kpk > 1000);                                                        /* the kick sounds, from the WAV beside the package */
+                        fm1ntt_inst_all_off(a.inst); fm1ntt_inst_note_on(a.inst, 60, 127); fm1ntt_inst_render(a.inst, kb, 1024);
+                        kpk = 0; for (int k = 0; k < 1024; k++) if (abs(kb[k]) > kpk) kpk = abs(kb[k]);
+                        CHECK(kpk < 3000);                                                        /* an unmapped key adds nothing new (the kick's tail may still ring) */
+                        remove(wp); remove(kp); rmdir(kd);
+                    }
                     remove(sp2);
                 }
                 pv_set(&a, two, 2); CHECK(a.inst == NULL && a.pv != NULL);

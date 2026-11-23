@@ -158,6 +158,8 @@ pub struct Package {
     pub source_sha256: String,
     /// what verification measured, or empty (unverified)
     pub verify: String,
+    /// what the UI model's check against the captured screens measured (`screen::verify_ui`), or empty
+    pub verify_ui: String,
     pub program: usize,
     pub root: u8,
     pub voices: Vec<[u8; 128]>,
@@ -187,6 +189,7 @@ impl Package {
             source: String::new(),
             source_sha256: String::new(),
             verify: String::new(),
+            verify_ui: String::new(),
             program: 0,
             root: 60,
             voices: Vec::new(),
@@ -231,6 +234,9 @@ impl Package {
         }
         if !self.verify.is_empty() {
             t += &format!("verify = {}\n", one(&self.verify));
+        }
+        if !self.verify_ui.is_empty() {
+            t += &format!("verify-ui = {}\n", one(&self.verify_ui));
         }
         t += &format!("program = {}\nroot = {}\n", self.program, self.root);
         for v in &self.voices {
@@ -322,6 +328,7 @@ impl Package {
                 "source" => p.source = v.into(),
                 "source-sha256" => p.source_sha256 = v.into(),
                 "verify" => p.verify = v.into(),
+                "verify-ui" => p.verify_ui = v.into(),
                 "program" => p.program = num(v)?.clamp(0, MAX_VOICES as i32) as usize,
                 "root" => p.root = num(v)?.clamp(0, 127) as u8,
                 "voice" => {
@@ -510,6 +517,7 @@ mod tests {
         p.source = "Felucca-1.8.2.fwsc".into();
         p.source_sha256 = hex(&sha256(b"x"));
         p.verify = "fm6 vs emulator: level 0.04 dB".into();
+        p.verify_ui = "home: ink overlap 0.52, 0.81 of the model on ink".into();
         p.voices.push([7; 128]);
         p.voices.push([9; 128]);
         p.program = 1;

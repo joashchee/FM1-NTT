@@ -60,6 +60,20 @@ Limits (bounded): 16 pages, 256 widgets, 64 controls, 64 colours, 1024 lines of 
 names must exist. **Not in the model yet:** icons (a glyph set to design), the proportional font (the model uses the 5 x 7 font, scaled), per-widget
 animation beyond a bound state, sub-pages and a cursor row (the settings list), themes as swappable sets, text that is a list of choices.
 
+**In the instrument and the host (2026-11-22).** `Instrument` keeps the model (it is saved back with an edited package, which it was not before), refuses a package whose
+binding names a parameter, global or effect parameter it does not have, and offers `ui_draw` (the page shown, bound to live values), `ui_control(i, clicks)` (a button
+opens its page; an encoder opens its page *and* steps its binding by `step` a click, clamped to the parameter's range) and `ui_state(n)`. **Published state:** `title` the
+instrument's name (text); `key` the last note's pitch class unless set; `scale` and `mood` what was set, else 0 (these three are set by hand, the rest refuse);
+`bpm` the sequencer's tempo when it runs, else the arpeggiator's; `beat` 0 to 3, `bar` and `progress` (0 to 99 through the bar) from the frames rendered at that tempo
+(a free-running count, not locked to a note); `playing` 1 while anything sounds; `level0` and `level1` the output peak 0 to 99 (the instrument is mono, so both, falling a
+few points a buffer); `pattern0` the sequencer's step 0 to 15. A test checks each name. The C face is `fm1ntt_inst_ui_*` (`core/fm1ntt.h`); the host paints the display list
+into the FM-1's screen box (`px_paint_ui`, `host/pix.h`): **rectangles and discs are the core's raster pixel for pixel (a host self-test and a C-face test compare them);
+text is the host's 5 x 7 font where the raster has solid cells.** A package with a screen opens the SOUND editor on its last group, SCREEN: one row for each control (Left and
+Right press a button or turn an encoder), and the box beside it shows the page, live. **Not seen on the R36S panel; no real firmware's model exists yet (the sweep's draft
+has no widgets).** The pad's own buttons are not the FM-1's, so the rows stand for them; mapping the FM-1's button names onto the pad is open.
+
+**Widget detection and the UI check (2026-11-22).** `screen::detect(frame, bg)` reads a captured frame: single-colour blocks give **discs** (a roughly square block three quarters filled, the ring and the dot of a disc are two), **bars** and **meters** (solid, three times longer than thick), **grids** (eight or more equal cells on a lattice; cells 5 : 7 are not, since `ui::rasterize` draws text as such cells) and **boxes**; what ink is left is read as marks of any colour (so an anti-aliased glyph holds together) and the glyph-sized ones are joined into **text lines** (a count of glyphs and a size). `draft_lines` writes them as `ui = ` lines with `?` for the words, and `uiport` puts them in its draft (cut at the model's 256 widgets, said in its last line). `screen::verify_ui(model, page, frame)` is the check: the overlap of the model's ink and the screen's, and the share of the model's ink that sits on ink, stored as a `verify-ui` line in the package. **What it cannot do:** the words (text recovery needs the firmware's font), a value row's label and number as one widget, a fader's handle, which control a widget belongs to, and anything that is not still on the screen at capture.
+
 ## 4. The porter, extended
 
 The six steps of `docs/PORTING.md` gain a UI half. A piece marked **built** exists and is tested here; **scaffold** is built but thin; the rest is the plan.

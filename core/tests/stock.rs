@@ -386,3 +386,26 @@ fn the_flash_layout_is_the_one_the_bootloader_spec_describes() {
     assert_eq!(seen[2], ("app_dir_head".to_string(), 0x4000, 0xFFFF_FFFF, 0x81));
     assert_eq!(seen[3], ("key_mac".to_string(), 0xFF000, 0x1000, 0x12));
 }
+
+/// The stock bank is read from the booted machine's flash-mapped image (the package is scrambled): 128 voices, the names the unit shows, and the port plays like the firmware
+/// for a few of them (Program Change n selects voice n + 1, docs/FM-1-MIDI.md). Prints what it measured.
+#[test]
+fn the_stock_bank_is_read_from_the_running_machine_and_the_port_matches() {
+    let Ok(pkg) = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/FM-1.fwsc")) else {
+        eprintln!("skipped: docs/FM-1.fwsc is not here (local only)");
+        return;
+    };
+    let (p, tier) = fm1ntt::port::port_stock(&pkg, "Stock FM-1 (local)", "FM-1.fwsc", "MIT").unwrap();
+    assert_eq!(tier, fm1ntt::package::Tier::Permissive, "the licence is the person's statement for a local file");
+    assert_eq!(p.voices.len(), 128);
+    let name = |i: usize| String::from_utf8_lossy(&p.voices[i][118..128]).trim_end_matches(['\0', ' ']).to_string();
+    assert_eq!((name(0).as_str(), name(99).as_str(), name(100).as_str()), ("PIANO   3", "Pan Pipe 8", "JAZZFLUTE"));
+    // the same voice on the firmware (Program Change over the jack) and on the port
+    for voice in [0usize, 5, 31, 32, 100, 127] {
+        let c = fm1ntt::port::verify_fm6(&pkg, &p, voice, 0, Some(voice as u8), 60, 100).unwrap();
+        eprintln!("voice {} {:?}: level {:+.2} dB, pitch {:?} cents", voice + 1, name(voice), c.level_db, c.pitch_cents);
+        if voice == 0 {
+            assert!(c.level_db.abs() < 3.0, "voice 1: {c:?}");
+        }
+    }
+}

@@ -57,8 +57,10 @@ pub fn valid_voice(v: &[u8]) -> bool {
     if v.len() < VOICE_LEN {
         return false;
     }
-    // the name first: it rejects almost everything at once
-    if !v[118..128].iter().all(|&c| (0x20..0x7f).contains(&c)) {
+    // the name first: it rejects almost everything at once. Printable, then NUL padding is allowed (the stock firmware's "JAZZFLUTE\0" is a name a person typed shorter).
+    let name = &v[118..128];
+    let text = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    if text == 0 || !name[..text].iter().all(|&c| (0x20..0x7f).contains(&c)) || !name[text..].iter().all(|&c| c == 0) {
         return false;
     }
     for op in 0..6 {

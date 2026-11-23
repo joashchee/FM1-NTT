@@ -77,7 +77,7 @@ makes (stored blocks, RGB or paletted, filter 0): anything else is refused, neve
 - **Measure on the unit:** the worker's cost to the UI and the audio, battery and heat, and the real time of a tour (Device report `power` and `threads` lines with a worker
   running). `--pin` stays off.
 - **A per-family tour** (Felucca, Jangada) beyond the generic one.
-- **"Port available" and a Load instrument button:** blocked on the package picker (ROADMAP 5c).
+- **"Port available" and Load its port (built 2026-11-22):** the page's PORT line names the first package in FILES whose `source-sha256` is this firmware's hash (yours, then bundled, then the Pack), and Right loads it as the SOUND preview (the `--instrument` path). It reads the first 4 KiB of each package, never the voices; a package with no hash, or another firmware's, is not offered. Self-tested and screenshotted in both layouts; not seen on the unit.
 - **The background port job:** blocked on a second verified family (ROADMAP 5d).
 - **Not shipped:** demos are written under the app's own `demos/` folder from a file the person holds and are never put in the app, a package or `bundled-firmware/`;
   `scripts/check-bundled.py` has no check for a `demos/` folder yet.
